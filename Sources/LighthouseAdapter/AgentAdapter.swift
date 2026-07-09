@@ -25,11 +25,18 @@ public struct SessionSpec: Sendable, Equatable {
     public let additionalWorktrees: [URL]
     /// The user's shell (e.g. "/bin/zsh"); prod passes SHELL from the environment.
     public let loginShell: String
+    /// Human-readable session name (the task name), shown by the agent's own
+    /// UI (Claude Code: `-n`, prompt box + /resume picker).
+    public let displayName: String?
 
-    public init(primaryWorktree: URL, additionalWorktrees: [URL] = [], loginShell: String) {
+    public init(
+        primaryWorktree: URL, additionalWorktrees: [URL] = [], loginShell: String,
+        displayName: String? = nil
+    ) {
         self.primaryWorktree = primaryWorktree
         self.additionalWorktrees = additionalWorktrees
         self.loginShell = loginShell
+        self.displayName = displayName
     }
 }
 

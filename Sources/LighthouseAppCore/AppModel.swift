@@ -1,0 +1,280 @@
+import Foundation
+import Observation
+import LighthouseAdapter
+import LighthouseGit
+import LighthouseTaskEngine
+
+public enum RepoRegistrationError: Error, Sendable, Equatable {
+    case pathDoesNotExist(String)
+    case notAGitRepository(String)
+    /// The path is inside a repo but is not its root — registering a subdir
+    /// would make every worktree/merge computation subtly wrong.
+    case notTheRepositoryRoot(path: String, actualRoot: String)
+    case alreadyRegistered(path: String)
+    case baseBranchMissing(path: String, baseBranch: String)
+}
+
+public enum RepoRemovalError: Error, Sendable, Equatable {
+    /// Repos referenced by tasks can't be removed out from under them.
+    case usedByTasks(repoId: UUID, taskNames: [String])
+    case unknownRepo(UUID)
+}
+
+/// The app's observable core: config-backed repo registry and task list,
+/// per-task attention state, and the orchestration of TaskEngine + adapter
+/// for creation/resume/removal. Deliberately free of any UI import — every
+/// rule here is unit-tested. The UI layer owns SwiftTerm and the socket
+/// listener and feeds this model via `apply(_:)` / `noteSession…`.
+@MainActor @Observable
+public final class AppModel {
+    public private(set) var repos: [RepoConfig] = []
+    public private(set) var tasks: [TaskRecord] = []
+    /// Live attention state per task (seeded from persisted TaskRecord.state).
+    public private(set) var attention: [UUID: TaskAttentionState] = [:]
+    /// Task ids with a live pty right now — maintained by the session layer.
+    public private(set) var liveSessions: Set<UUID> = []
+
+    private let store: ConfigStore
+    private let engine: TaskEngine
+    private let git: GitClient
+    private let adapter: any AgentAdapter
+    private let worktreesRoot: URL
+    private let socketPath: URL
+    private let loginShell: String
+
+    public init(
+        store: ConfigStore,
+        worktreesRoot: URL,
+        socketPath: URL,
+        adapter: any AgentAdapter,
+        git: GitClient = GitClient(),
+        loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    ) {
+        self.store = store
+        self.worktreesRoot = worktreesRoot
+        self.socketPath = socketPath
+        self.adapter = adapter
+        self.git = git
+        self.engine = TaskEngine(git: git)
+        self.loginShell = loginShell
+    }
+
+    /// Loads persisted state. Attention seeds from each task's stored state.
+    public func load() throws {
+        let config = try store.load()
+        repos = config.repos
+        tasks = config.tasks
+        attention = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, $0.state) })
+    }
+
+    private func persist() throws {
+        try store.save(LighthouseConfig(repos: repos, tasks: tasks))
+    }
+
+    // MARK: - Repo registry
+
+    @discardableResult
+    public func registerRepo(
+        path: URL, baseBranch: String, setupScript: String? = nil, envCopyList: [String]? = nil
+    ) async throws -> RepoConfig {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw RepoRegistrationError.pathDoesNotExist(path.path)
+        }
+        guard try await git.isInsideWorkTree(at: path) else {
+            throw RepoRegistrationError.notAGitRepository(path.path)
+        }
+        let root = try await git.topLevel(of: path)
+        let canonicalPath = path.resolvingSymlinksInPath().path
+        let canonicalRoot = root.resolvingSymlinksInPath().path
+        guard canonicalPath == canonicalRoot else {
+            throw RepoRegistrationError.notTheRepositoryRoot(
+                path: path.path, actualRoot: root.path)
+        }
+        guard !repos.contains(where: {
+            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == canonicalRoot
+        }) else {
+            throw RepoRegistrationError.alreadyRegistered(path: path.path)
+        }
+        guard try await git.branchExists(baseBranch, in: root) else {
+            throw RepoRegistrationError.baseBranchMissing(path: path.path, baseBranch: baseBranch)
+        }
+
+        let repo = RepoConfig(
+            path: canonicalRoot, baseBranch: baseBranch,
+            setupScript: setupScript, envCopyList: envCopyList)
+        repos.append(repo)
+        try persist()
+        return repo
+    }
+
+    public func updateRepo(_ updated: RepoConfig) throws {
+        guard let index = repos.firstIndex(where: { $0.id == updated.id }) else {
+            throw RepoRemovalError.unknownRepo(updated.id)
+        }
+        repos[index] = updated
+        try persist()
+    }
+
+    public func removeRepo(id: UUID) throws {
+        guard repos.contains(where: { $0.id == id }) else {
+            throw RepoRemovalError.unknownRepo(id)
+        }
+        let users = tasks.filter { $0.workspaces.contains { $0.repoId == id } }
+        guard users.isEmpty else {
+            throw RepoRemovalError.usedByTasks(repoId: id, taskNames: users.map(\.name))
+        }
+        repos.removeAll { $0.id == id }
+        try persist()
+    }
+
+    // MARK: - Task lifecycle
+
+    /// Atomic creation (engine) + attention wiring (hooks in the PRIMARY
+    /// worktree — `--add-dir` loads no sibling `.claude/` config, verified) +
+    /// a ready-to-spawn LaunchPlan with the pre-assigned session id
+    /// persisted as the task's sessionRef. Errors propagate typed
+    /// (TaskCreationFailure carries cause + rollback account) — the UI
+    /// formats them honestly, it never invents a generic message.
+    public func createTask(
+        name: String, branch: String, repoIds: [UUID]
+    ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
+        let selected = try repoIds.map { id in
+            guard let repo = repos.first(where: { $0.id == id }) else {
+                throw TaskEngineError.unknownRepo(repoId: id)
+            }
+            return repo
+        }
+        var task = try await engine.createTask(
+            name: name, branch: branch, adapterKind: adapter.kind,
+            repos: selected, worktreesRoot: worktreesRoot)
+
+        let primary = task.workspaces[0].worktreeURL
+        try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
+
+        let plan = try adapter.launchPlan(for: sessionSpec(for: task))
+        task.sessionRef = plan.sessionRef
+        tasks.append(task)
+        attention[task.id] = task.state
+        try persist()
+        return (task, plan)
+    }
+
+    /// Resume plan for a task with a stored sessionRef. Resuming an id whose
+    /// history is gone fails fast and visibly in the terminal ("No
+    /// conversation found with session ID", exit 1 — verified live).
+    public func resumePlan(for task: TaskRecord) throws -> LaunchPlan? {
+        guard let ref = task.sessionRef else { return nil }
+        return try adapter.resumePlan(for: sessionSpec(for: task), sessionRef: ref)
+    }
+
+    private func sessionSpec(for task: TaskRecord) -> SessionSpec {
+        let worktrees = task.workspaces.map(\.worktreeURL)
+        return SessionSpec(
+            primaryWorktree: worktrees[0],
+            additionalWorktrees: Array(worktrees.dropFirst()),
+            loginShell: loginShell,
+            displayName: task.name)
+    }
+
+    public func unmergedWork(for task: TaskRecord) async throws -> [UnmergedWorkItem] {
+        try await engine.unmergedWork(in: task, repos: repos)
+    }
+
+    @discardableResult
+    public func removeTask(
+        _ task: TaskRecord, mode: TaskRemovalMode
+    ) async throws -> TaskRemovalReport {
+        let report = try await engine.removeTask(task, repos: repos, mode: mode)
+        tasks.removeAll { $0.id == task.id }
+        attention.removeValue(forKey: task.id)
+        liveSessions.remove(task.id)
+        try persist()
+        return report
+    }
+
+    // MARK: - Attention
+
+    /// Reducer for socket signals: folds the event through the state machine.
+    /// Unknown tasks are ignored (the listener already dropped unknown
+    /// sessions; this guards the id-level race after task removal).
+    public func apply(_ signal: TaskAttentionSignal) {
+        applyEvent(signal.event, to: signal.taskId)
+    }
+
+    public func noteSessionStarted(taskId: UUID) {
+        guard tasks.contains(where: { $0.id == taskId }) else { return }
+        liveSessions.insert(taskId)
+        applyEvent(.agentWorking, to: taskId)
+    }
+
+    /// Pty death (process exited, window closed the fd, crash) — distinct
+    /// from the SessionEnd hook, which may or may not have arrived first;
+    /// both fold to the same defined state.
+    public func noteSessionEnded(taskId: UUID) {
+        liveSessions.remove(taskId)
+        applyEvent(.sessionDied, to: taskId)
+    }
+
+    private func applyEvent(_ event: AttentionEvent, to taskId: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        let current = attention[taskId] ?? tasks[index].state
+        let next = AttentionStateMachine.nextState(from: current, on: event)
+        guard next != current else { return }
+        attention[taskId] = next
+        tasks[index].state = next
+        try? persist() // state persistence is best-effort; next save catches up
+    }
+
+    public func attentionState(of taskId: UUID) -> TaskAttentionState {
+        attention[taskId] ?? .done
+    }
+
+    // MARK: - Derivations for the UI
+
+    /// A task can be resumed when it has a persisted session and no live pty.
+    public func canResume(_ task: TaskRecord) -> Bool {
+        task.sessionRef != nil && !liveSessions.contains(task.id)
+    }
+
+    /// Quitting kills in-flight agent work (pty death); these tasks make the
+    /// quit confirmation mandatory (spec §3).
+    public func tasksBlockingQuit() -> [TaskRecord] {
+        tasks.filter { liveSessions.contains($0.id) && attentionState(of: $0.id) == .working }
+    }
+
+    /// Cmd+K entries: fuzzy-filtered by query, needs-input tasks first
+    /// (inbox semantics), then match quality, then stable by name.
+    public func switcherEntries(query: String) -> [TaskRecord] {
+        let scored: [(TaskRecord, Int)] = tasks.compactMap { task in
+            FuzzyMatcher.score(query: query, candidate: task.name).map { (task, $0) }
+        }
+        return scored.sorted { lhs, rhs in
+            let lhsNeedsInput = attentionState(of: lhs.0.id) == .needsInput
+            let rhsNeedsInput = attentionState(of: rhs.0.id) == .needsInput
+            if lhsNeedsInput != rhsNeedsInput { return lhsNeedsInput }
+            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+            return lhs.0.name.localizedCompare(rhs.0.name) == .orderedAscending
+        }.map(\.0)
+    }
+
+    /// Branch prefill from a task name: "Fix Payments  API!" → "task/fix-payments-api".
+    nonisolated public static func branchSlug(from name: String) -> String {
+        let folded = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .lowercased()
+        var slug = ""
+        var lastWasDash = true // suppress leading dash
+        for character in folded {
+            if character.isLetter || character.isNumber {
+                slug.append(character)
+                lastWasDash = false
+            } else if !lastWasDash {
+                slug.append("-")
+                lastWasDash = true
+            }
+        }
+        while slug.hasSuffix("-") { slug.removeLast() }
+        return slug.isEmpty ? "task/new" : "task/\(slug)"
+    }
+}

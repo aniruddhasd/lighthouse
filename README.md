@@ -1,9 +1,8 @@
 # Lighthouse
 
 A native macOS developer tool: a single-app home for daily agentic development
-across git worktrees. This repository currently contains the foundation
-layers — the git access layer, the task engine, and their test harness.
-No UI yet.
+across git worktrees — task-centric sessions, ambient attention state, and
+worktree bookkeeping handled for you.
 
 ## Layout
 
@@ -18,8 +17,7 @@ No UI yet.
   destroying unmerged work requires a typed confirmation carrying the exact
   (repo, branch) list; the pure, total attention state machine
   (working / needs-input / done / dirty); and the schema-versioned JSON config
-  store with atomic writes. Records `adapterKind`/`sessionRef` but never
-  launches agent sessions — that is the agent adapter's job (next layer).
+  store with atomic writes.
 - `Sources/LighthouseAdapter` — the agent seam. The `AgentAdapter` protocol
   (launch/resume plans, attention wiring, payload translation — one of the
   two future-public contracts) and its single v1 implementation,
@@ -29,40 +27,41 @@ No UI yet.
   and the shell quoter guarding the app's single shell string (the
   login-shell launch). Every Claude Code CLI fact is recorded with its source
   in `docs/claude-code-contract.md` — re-verify that file when the CLI updates.
+- `Sources/LighthouseAppCore` — the app's testable core, free of UI imports:
+  the observable `AppModel` (repo registry, task list, attention reducer,
+  switcher/inbox ordering, quit and resume derivations), the fuzzy matcher
+  behind Cmd+K, and the honest failure formatter.
+- `Sources/LighthouseApp` — the macOS app itself: SwiftUI shell
+  (NavigationSplitView, sidebar with attention badges, Cmd+K switcher,
+  guardrail sheets) and the SwiftTerm session layer. Terminals live in a
+  registry keyed by task id, outside the SwiftUI view tree — sessions keep
+  running while unfocused and survive tab switches.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway
   git repositories with known state (clean history, dirty trees, detached
   HEAD, content / delete-modify / binary merge conflicts, paths with spaces,
   attached worktrees). Never touches global git config or the network. Kept as
   a separate target so fixtures can never ship inside an app target.
 - `Tests/` — fixture-driven tests plus pure tests on synthetic input (porcelain
-  parsing, state-machine table, config round-trips). Failure and edge cases
-  are written before happy paths.
+  parsing, state-machine table, config round-trips, matcher ranking). Failure
+  and edge cases are written before happy paths.
 
-## Building and testing
+## Building, testing, running
 
-Requires macOS 14+, git >= 2.35, and a Swift 6 toolchain.
-
-```sh
-swift build
-swift test
-```
-
-### On machines with only Command Line Tools (no Xcode)
-
-CLT ships Swift Testing as `Testing.framework`, but SwiftPM (observed with
-Swift 6.3.2 / CLT 26.x, 2026-07) passes that directory to the compiler as a
-swiftmodule search path (`-I`) instead of a framework search path (`-F`). The
-auto-generated test runner then compiles its `#if canImport(Testing)` block
-away, and **`swift test` exits 0 having run zero tests** — a silent false
-green.
-
-After any fresh clone or `.build` wipe, run once:
+Requires macOS 14+, git >= 2.35, Xcode 26+ (SwiftTerm needs the full SDK),
+and the Claude Code CLI on PATH for live sessions.
 
 ```sh
-./Scripts/bootstrap-clt-swift-testing.sh
-swift test
+swift test               # the single test entry point (all targets)
+Scripts/make-app.sh      # assemble dist/Lighthouse.app from the SPM build
+open dist/Lighthouse.app
 ```
 
-A healthy run prints a `Test run with N tests` summary line. If `swift test`
-prints no test summary at all, the shim is missing — do not trust that run.
-Xcode-based toolchains don't need any of this.
+The SPM package is the single source of truth — there is no .xcodeproj.
+`make-app.sh` wraps the release binary in a minimal bundle
+(`dev.lighthouse.app`, ad-hoc signed), which native notifications will need
+later. `LIGHTHOUSE_SMOKE=1 Scripts/smoke-run.sh` launches the built app,
+checks the attention socket (0600) and clean-quit behavior, and exits.
+
+State locations: config + attention socket in
+`~/Library/Application Support/Lighthouse/`; task worktrees under
+`~/Lighthouse/<task name>/<repo>/`.

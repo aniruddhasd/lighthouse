@@ -33,6 +33,12 @@ public struct CreatedArtifact: Sendable, Equatable {
     public let repoPath: String
     public let branch: String
     public let worktreePath: String
+
+    public init(repoPath: String, branch: String, worktreePath: String) {
+        self.repoPath = repoPath
+        self.branch = branch
+        self.worktreePath = worktreePath
+    }
 }
 
 /// Something rollback tried to remove but could not. Loud by design.
@@ -42,6 +48,13 @@ public struct DebrisItem: Sendable, Equatable {
     public let worktreePath: String
     /// What failed while removing it (human-readable, for the error surface).
     public let failure: String
+
+    public init(repoPath: String, branch: String, worktreePath: String, failure: String) {
+        self.repoPath = repoPath
+        self.branch = branch
+        self.worktreePath = worktreePath
+        self.failure = failure
+    }
 }
 
 public enum RollbackOutcome: Sendable, Equatable {
@@ -62,4 +75,10 @@ public struct TaskCreationFailure: Error, Sendable {
     public let repoPath: String?
     public let cause: TaskEngineError
     public let rollback: RollbackOutcome
+
+    public init(repoPath: String?, cause: TaskEngineError, rollback: RollbackOutcome) {
+        self.repoPath = repoPath
+        self.cause = cause
+        self.rollback = rollback
+    }
 }

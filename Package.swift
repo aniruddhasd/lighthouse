@@ -1,31 +1,6 @@
 // swift-tools-version:6.1
 import PackageDescription
 
-// Command Line Tools-only machines (no Xcode, observed 2026-07 with CLT 26.x /
-// Swift 6.3.2): SwiftPM passes the CLT frameworks directory as -I, but Swift
-// Testing ships there as Testing.framework, which needs -F — without it
-// `import Testing` fails with "no such module". These settings, plus
-// Scripts/bootstrap-clt-swift-testing.sh, make `swift test` work. Harmless
-// where the path doesn't exist (e.g. Xcode toolchains).
-let cltFrameworks = "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
-let cltTestingSwiftSettings: [SwiftSetting] = [
-    .unsafeFlags(["-F", cltFrameworks])
-]
-let cltTestingLinkerSettings: [LinkerSetting] = [
-    // Explicit because the bootstrap shim imports Testing via -I, which
-    // records no framework autolink hint. Applied once (test products link
-    // all test targets together, so one declaration reaches the bundle).
-    .linkedFramework("Testing"),
-    .unsafeFlags([
-        "-F", cltFrameworks,
-        "-Xlinker", "-rpath", "-Xlinker", cltFrameworks,
-        // Testing.framework loads @rpath/lib_TestingInterop.dylib, which CLT
-        // ships one directory over.
-        "-Xlinker", "-rpath",
-        "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib",
-    ]),
-]
-
 let package = Package(
     name: "Lighthouse",
     platforms: [.macOS(.v14)],
@@ -33,32 +8,50 @@ let package = Package(
         .library(name: "LighthouseGit", targets: ["LighthouseGit"]),
         .library(name: "LighthouseTaskEngine", targets: ["LighthouseTaskEngine"]),
         .library(name: "LighthouseAdapter", targets: ["LighthouseAdapter"]),
+        .library(name: "LighthouseAppCore", targets: ["LighthouseAppCore"]),
         .library(name: "LighthouseFixtures", targets: ["LighthouseFixtures"]),
+        .executable(name: "Lighthouse", targets: ["LighthouseApp"]),
+    ],
+    dependencies: [
+        // Terminal emulation + local pty (spec §4 consumed contracts).
+        // Latest stable verified against GitHub releases 2026-07-09.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.13.0"),
     ],
     targets: [
         .target(name: "LighthouseGit"),
         .target(name: "LighthouseTaskEngine", dependencies: ["LighthouseGit"]),
         .target(name: "LighthouseAdapter", dependencies: ["LighthouseGit", "LighthouseTaskEngine"]),
+        // View-model layer: everything the app does that is testable without
+        // a UI — kept free of AppKit/SwiftUI imports on purpose.
+        .target(
+            name: "LighthouseAppCore",
+            dependencies: ["LighthouseGit", "LighthouseTaskEngine", "LighthouseAdapter"]),
+        // The macOS app: SwiftUI views, SwiftTerm embedding, wiring only.
+        .executableTarget(
+            name: "LighthouseApp",
+            dependencies: [
+                "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]),
         // Test-harness only: generates throwaway git repos with known state.
         // Kept as a separate target so fixtures never ship in an app target.
         .target(name: "LighthouseFixtures"),
         .testTarget(
             name: "LighthouseGitTests",
-            dependencies: ["LighthouseGit", "LighthouseFixtures"],
-            swiftSettings: cltTestingSwiftSettings,
-            linkerSettings: cltTestingLinkerSettings
-        ),
+            dependencies: ["LighthouseGit", "LighthouseFixtures"]),
         .testTarget(
             name: "LighthouseTaskEngineTests",
-            dependencies: ["LighthouseTaskEngine", "LighthouseGit", "LighthouseFixtures"],
-            swiftSettings: cltTestingSwiftSettings
-        ),
+            dependencies: ["LighthouseTaskEngine", "LighthouseGit", "LighthouseFixtures"]),
         .testTarget(
             name: "LighthouseAdapterTests",
             dependencies: [
                 "LighthouseAdapter", "LighthouseGit", "LighthouseTaskEngine", "LighthouseFixtures",
-            ],
-            swiftSettings: cltTestingSwiftSettings
-        ),
+            ]),
+        .testTarget(
+            name: "LighthouseAppCoreTests",
+            dependencies: [
+                "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
+                "LighthouseFixtures",
+            ]),
     ]
 )

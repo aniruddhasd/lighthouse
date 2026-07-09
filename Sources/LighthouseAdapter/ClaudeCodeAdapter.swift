@@ -24,14 +24,21 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         // deterministic at launch instead of discovered afterwards.
         let sessionId = UUID().uuidString.lowercased()
         var argv = [claudeCommand, "--session-id", sessionId]
+        argv += Self.nameArguments(spec.displayName)
         argv += Self.addDirArguments(spec.additionalWorktrees)
         return plan(argv: argv, spec: spec, sessionRef: sessionId)
     }
 
     public func resumePlan(for spec: SessionSpec, sessionRef: String) throws -> LaunchPlan {
         var argv = [claudeCommand, "--resume", sessionRef]
+        argv += Self.nameArguments(spec.displayName)
         argv += Self.addDirArguments(spec.additionalWorktrees)
         return plan(argv: argv, spec: spec, sessionRef: sessionRef)
+    }
+
+    /// `-n <name>` labels the session in Claude Code's own UI.
+    private static func nameArguments(_ displayName: String?) -> [String] {
+        displayName.map { ["-n", $0] } ?? []
     }
 
     private static func addDirArguments(_ dirs: [URL]) -> [String] {
