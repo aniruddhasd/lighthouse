@@ -1,0 +1,254 @@
+import Foundation
+import Testing
+import LighthouseGit
+import LighthouseTaskEngine
+@testable import LighthouseAdapter
+
+/// Raw test client for sending arbitrary (including deliberately broken)
+/// bytes to the listener — the hostile-input harness.
+private enum RawSocketClient {
+    static func send(_ bytes: Data, to socketPath: String, awaitResponse: Bool = true, timeoutSeconds: Int = 5) -> String {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return "" }
+        defer { close(fd) }
+        var noSigpipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { raw in
+            raw.copyBytes(from: Array(socketPath.utf8))
+        }
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { return "" }
+        bytes.withUnsafeBytes { raw in
+            _ = write(fd, raw.baseAddress, raw.count)
+        }
+        guard awaitResponse else { return "" }
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        let n = recv(fd, &buffer, buffer.count, 0)
+        return n > 0 ? String(decoding: buffer[0..<n], as: UTF8.self) : ""
+    }
+
+    static func post(json: String, to socketPath: String) -> String {
+        let body = Data(json.utf8)
+        var request = Data("POST /lighthouse-hook HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\n\r\n".utf8)
+        request.append(body)
+        return send(request, to: socketPath)
+    }
+}
+
+@Suite("AttentionSocketListener", .serialized)
+final class AttentionSocketListenerTests {
+    private let directory: URL
+    private let listener: AttentionSocketListener
+
+    init() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lh-sock-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        listener = AttentionSocketListener(directory: directory, adapter: ClaudeCodeAdapter())
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func payload(session: String, event: String, notificationType: String? = nil) -> String {
+        var fields = [
+            "\"session_id\": \"\(session)\"",
+            "\"hook_event_name\": \"\(event)\"",
+            "\"cwd\": \"/tmp/x\"",
+        ]
+        if let notificationType {
+            fields.append("\"notification_type\": \"\(notificationType)\"")
+        }
+        return "{" + fields.joined(separator: ", ") + "}"
+    }
+
+    /// Waits for the actor to drain pending payload tasks.
+    private func waitForDrops(atLeast count: Int) async throws {
+        for _ in 0..<100 {
+            if await listener.droppedCount >= count { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        Issue.record("expected at least \(count) drops, got \(await listener.droppedCount)")
+    }
+
+    // MARK: Broken input first
+
+    @Test func socketIsOwnerOnly() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let permissions = try #require(attributes[.posixPermissions] as? NSNumber)
+        #expect(permissions.uint16Value & 0o777 == 0o600)
+    }
+
+    @Test func oversizedBodyRejectedAndListenerSurvives() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        await listener.register(sessionRef: "s1", taskId: UUID())
+
+        let huge = String(repeating: "A", count: AttentionSocketListener.maxBodyBytes + 1)
+        let response = RawSocketClient.post(json: huge, to: url.path)
+        #expect(response.contains("400"))
+        try await waitForDrops(atLeast: 1)
+
+        // Still alive: a good payload right after is accepted.
+        let good = RawSocketClient.post(
+            json: payload(session: "s1", event: "Stop"), to: url.path)
+        #expect(good.contains("200"))
+    }
+
+    @Test func oversizedHeadersRejected() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let request = "POST / HTTP/1.1\r\nX-Junk: " + String(repeating: "j", count: 10_000)
+        let response = RawSocketClient.send(Data(request.utf8), to: url.path)
+        #expect(response.contains("400"))
+    }
+
+    @Test func truncatedRequestRejected() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        // Claims 100 bytes, sends 5, closes.
+        let request = "POST / HTTP/1.1\r\nContent-Length: 100\r\n\r\nhello"
+        // The server gives a stalled body 5s before rejecting; outlast it.
+        let response = RawSocketClient.send(Data(request.utf8), to: url.path, timeoutSeconds: 8)
+        #expect(response.contains("400"))
+        try await waitForDrops(atLeast: 1)
+    }
+
+    @Test func nonPostAndMissingContentLengthRejected() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        #expect(RawSocketClient.send(
+            Data("GET / HTTP/1.1\r\n\r\n".utf8), to: url.path).contains("400"))
+        #expect(RawSocketClient.send(
+            Data("POST / HTTP/1.1\r\n\r\n{}".utf8), to: url.path).contains("400"))
+    }
+
+    @Test func malformedJSONBodyDroppedWithoutCrash() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let response = RawSocketClient.post(json: "{{{{ not json", to: url.path)
+        #expect(response.contains("200")) // framing fine; payload dropped later
+        try await waitForDrops(atLeast: 1)
+        #expect(await listener.lastDropReason?.contains("unparseable") == true)
+    }
+
+    @Test func unknownSessionDropped() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        _ = RawSocketClient.post(
+            json: payload(session: "someone-elses-session", event: "Stop"), to: url.path)
+        try await waitForDrops(atLeast: 1)
+        #expect(await listener.lastDropReason?.contains("unknown session") == true)
+    }
+
+    @Test func hostileStringsInEveryFieldAreInertData() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let evil = "$(touch /tmp/lighthouse-sock-pwned); `id`; ;|&"
+        let json = """
+        {"session_id": "\(evil.replacingOccurrences(of: "\"", with: ""))",
+         "hook_event_name": "Stop", "cwd": "; reboot", "message": "'; drop table"}
+        """
+        _ = RawSocketClient.post(json: json, to: url.path)
+        try await waitForDrops(atLeast: 1) // unknown session — dropped, alive
+        #expect(!FileManager.default.fileExists(atPath: "/tmp/lighthouse-sock-pwned"))
+    }
+
+    @Test func socketPathTooLongFailsLoud() async throws {
+        let deep = FileManager.default.temporaryDirectory
+            .appendingPathComponent(String(repeating: "d", count: 120), isDirectory: true)
+        let long = AttentionSocketListener(directory: deep, adapter: ClaudeCodeAdapter())
+        await #expect {
+            try await long.start()
+        } throws: { error in
+            guard case .socketPathTooLong = error as? AttentionSocketError else { return false }
+            return true
+        }
+    }
+
+    @Test func doubleStartThrows() async throws {
+        _ = try await listener.start()
+        defer { listener.stop() }
+        await #expect {
+            try await self.listener.start()
+        } throws: { error in
+            error as? AttentionSocketError == .alreadyStarted
+        }
+    }
+
+    // MARK: Signal delivery
+
+    @Test func registeredSessionYieldsAttributedSignals() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let taskId = UUID()
+        await listener.register(sessionRef: "sess-42", taskId: taskId)
+        let stream = await listener.signals()
+
+        _ = RawSocketClient.post(
+            json: payload(session: "sess-42", event: "UserPromptSubmit"), to: url.path)
+        _ = RawSocketClient.post(
+            json: payload(session: "sess-42", event: "Notification",
+                          notificationType: "permission_prompt"),
+            to: url.path)
+        _ = RawSocketClient.post(
+            json: payload(session: "sess-42", event: "Stop"), to: url.path)
+
+        var received: [TaskAttentionSignal] = []
+        for await signal in stream {
+            received.append(signal)
+            if received.count == 3 { break }
+        }
+        #expect(received == [
+            TaskAttentionSignal(taskId: taskId, sessionRef: "sess-42", event: .agentWorking),
+            TaskAttentionSignal(taskId: taskId, sessionRef: "sess-42", event: .agentNeedsInput),
+            TaskAttentionSignal(taskId: taskId, sessionRef: "sess-42", event: .agentStopped),
+        ])
+    }
+
+    @Test func unregisteredSessionStopsYielding() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        await listener.register(sessionRef: "gone", taskId: UUID())
+        await listener.unregister(sessionRef: "gone")
+        _ = RawSocketClient.post(json: payload(session: "gone", event: "Stop"), to: url.path)
+        try await waitForDrops(atLeast: 1)
+        #expect(await listener.lastDropReason?.contains("unknown session") == true)
+    }
+
+    @Test func deliveryViaRealCurlMatchesProductionHookCommand() async throws {
+        // Exactly the transport the installed hook uses: curl --unix-socket
+        // with --data-binary @- reading the payload from stdin.
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let taskId = UUID()
+        await listener.register(sessionRef: "curl-sess", taskId: taskId)
+        let stream = await listener.signals()
+
+        let handler = HookInstaller.handler(socketPath: url)
+        let args = try #require(handler["args"] as? [String])
+        let body = payload(session: "curl-sess", event: "Stop")
+        let result = try await ProcessRunner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf %s " + ShellQuoter.quote(body) + " | /usr/bin/curl " + ShellQuoter.command(args)],
+            workingDirectory: FileManager.default.temporaryDirectory)
+        #expect(result.exitCode == 0)
+
+        for await signal in stream {
+            #expect(signal == TaskAttentionSignal(
+                taskId: taskId, sessionRef: "curl-sess", event: .agentStopped))
+            break
+        }
+    }
+}

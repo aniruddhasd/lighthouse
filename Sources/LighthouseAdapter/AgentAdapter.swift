@@ -1,0 +1,76 @@
+import Foundation
+import LighthouseTaskEngine
+
+/// Everything the pty layer needs to start an agent session. The adapter
+/// BUILDS this; it never spawns the interactive session itself.
+public struct LaunchPlan: Sendable, Equatable {
+    /// Executable to spawn (for Claude Code: the user's login shell).
+    public let executable: String
+    /// Argument array for the executable. Never interpolated into a shell by
+    /// the consumer — where a shell command string exists, it is one element
+    /// of this array, built by ShellQuoter.
+    public let arguments: [String]
+    /// Extra environment merged over the inherited environment by the pty layer.
+    public let environment: [String: String]
+    public let workingDirectory: URL
+    /// The session reference to persist on the task (deterministic at launch
+    /// when the agent supports pre-assigned session IDs).
+    public let sessionRef: String
+}
+
+/// What a new session should span: the task's primary worktree (cwd) and the
+/// sibling worktrees the agent must also reach.
+public struct SessionSpec: Sendable, Equatable {
+    public let primaryWorktree: URL
+    public let additionalWorktrees: [URL]
+    /// The user's shell (e.g. "/bin/zsh"); prod passes SHELL from the environment.
+    public let loginShell: String
+
+    public init(primaryWorktree: URL, additionalWorktrees: [URL] = [], loginShell: String) {
+        self.primaryWorktree = primaryWorktree
+        self.additionalWorktrees = additionalWorktrees
+        self.loginShell = loginShell
+    }
+}
+
+/// A raw attention payload translated into task-engine terms: which session
+/// spoke, and what it means. `event` is nil for payloads that are valid but
+/// irrelevant (e.g. an auth notification).
+public struct AgentAttentionSignal: Sendable, Equatable {
+    public let sessionRef: String
+    public let event: AttentionEvent?
+
+    public init(sessionRef: String, event: AttentionEvent?) {
+        self.sessionRef = sessionRef
+        self.event = event
+    }
+}
+
+/// The seam between Lighthouse and any agent CLI (spec guardrail 3: app code
+/// never calls agent CLIs raw). Shaped around capabilities, not Claude
+/// specifics — this is one of the two future-public contracts (§4).
+public protocol AgentAdapter: Sendable {
+    /// Stable identifier persisted as TaskRecord.adapterKind.
+    var kind: String { get }
+
+    /// Plan for a brand-new session. The returned plan's sessionRef is what
+    /// the caller persists for later resume.
+    func launchPlan(for spec: SessionSpec) throws -> LaunchPlan
+
+    /// Plan that resumes a previously persisted sessionRef.
+    func resumePlan(for spec: SessionSpec, sessionRef: String) throws -> LaunchPlan
+
+    /// Installs attention wiring (hook config) into a workspace so the
+    /// running agent pushes events at `socketPath`. Idempotent; merges with
+    /// any existing user configuration.
+    func prepareWorkspaceAttention(in workspace: URL, socketPath: URL) async throws
+
+    /// Removes exactly what prepareWorkspaceAttention installed, leaving any
+    /// user configuration intact.
+    func removeWorkspaceAttention(from workspace: URL) async throws
+
+    /// Translates one raw payload (as delivered to the attention socket)
+    /// into a signal. Returns nil when the payload is not this agent's
+    /// schema — the listener drops it.
+    func attentionSignal(fromPayload payload: Data) -> AgentAttentionSignal?
+}

@@ -180,6 +180,25 @@ public actor GitClient {
 
     // MARK: - rev-parse helpers
 
+    /// Resolves a path inside the .git directory
+    /// (`git rev-parse --git-path <name>`), correctly following worktree and
+    /// common-dir indirection (e.g. `info/exclude` from a linked worktree
+    /// resolves to the repo's shared exclude file). Relative output is
+    /// resolved against the query directory, matching git's cwd-relative
+    /// behavior.
+    public func gitPath(_ name: String, in repository: URL) async throws -> URL {
+        let result = try await runExpectingSuccess(["rev-parse", "--git-path", name], in: repository)
+        let path = result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            throw GitClientError.unexpectedOutput(
+                description: "rev-parse --git-path printed nothing", output: result.stdoutText)
+        }
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+        return URL(fileURLWithPath: path, relativeTo: repository).standardizedFileURL
+    }
+
     /// Full object name of HEAD.
     public func headCommit(in repository: URL) async throws -> String {
         try await revParse("HEAD", in: repository)

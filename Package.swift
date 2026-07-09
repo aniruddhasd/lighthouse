@@ -32,11 +32,13 @@ let package = Package(
     products: [
         .library(name: "LighthouseGit", targets: ["LighthouseGit"]),
         .library(name: "LighthouseTaskEngine", targets: ["LighthouseTaskEngine"]),
+        .library(name: "LighthouseAdapter", targets: ["LighthouseAdapter"]),
         .library(name: "LighthouseFixtures", targets: ["LighthouseFixtures"]),
     ],
     targets: [
         .target(name: "LighthouseGit"),
         .target(name: "LighthouseTaskEngine", dependencies: ["LighthouseGit"]),
+        .target(name: "LighthouseAdapter", dependencies: ["LighthouseGit", "LighthouseTaskEngine"]),
         // Test-harness only: generates throwaway git repos with known state.
         // Kept as a separate target so fixtures never ship in an app target.
         .target(name: "LighthouseFixtures"),
@@ -49,6 +51,13 @@ let package = Package(
         .testTarget(
             name: "LighthouseTaskEngineTests",
             dependencies: ["LighthouseTaskEngine", "LighthouseGit", "LighthouseFixtures"],
+            swiftSettings: cltTestingSwiftSettings
+        ),
+        .testTarget(
+            name: "LighthouseAdapterTests",
+            dependencies: [
+                "LighthouseAdapter", "LighthouseGit", "LighthouseTaskEngine", "LighthouseFixtures",
+            ],
             swiftSettings: cltTestingSwiftSettings
         ),
     ]

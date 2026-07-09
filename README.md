@@ -20,6 +20,15 @@ No UI yet.
   (working / needs-input / done / dirty); and the schema-versioned JSON config
   store with atomic writes. Records `adapterKind`/`sessionRef` but never
   launches agent sessions — that is the agent adapter's job (next layer).
+- `Sources/LighthouseAdapter` — the agent seam. The `AgentAdapter` protocol
+  (launch/resume plans, attention wiring, payload translation — one of the
+  two future-public contracts) and its single v1 implementation,
+  `ClaudeCodeAdapter`. Includes the hook installer (surgical merge into
+  `.claude/settings.local.json` plus a repo-local git exclude entry), the
+  Unix-socket attention listener (0600, size-capped, hostile-input hardened),
+  and the shell quoter guarding the app's single shell string (the
+  login-shell launch). Every Claude Code CLI fact is recorded with its source
+  in `docs/claude-code-contract.md` — re-verify that file when the CLI updates.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway
   git repositories with known state (clean history, dirty trees, detached
   HEAD, content / delete-modify / binary merge conflicts, paths with spaces,
