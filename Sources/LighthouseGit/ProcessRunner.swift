@@ -1,29 +1,40 @@
 import Foundation
 
-struct GitCommandResult: Sendable {
-    let exitCode: Int32
-    let stdout: Data
-    let stderr: Data
+package struct ProcessResult: Sendable {
+    package let exitCode: Int32
+    package let stdout: Data
+    package let stderr: Data
 
-    var stdoutText: String { String(decoding: stdout, as: UTF8.self) }
-    var stderrText: String {
+    package var stdoutText: String { String(decoding: stdout, as: UTF8.self) }
+    package var stderrText: String {
         String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
-/// Runs git as a subprocess with an argument array — never a shell, never
-/// string interpolation. Branch names, task names, and paths are data.
-enum GitProcessRunner {
+package struct ProcessLaunchError: Error, Sendable {
+    package let executable: String
+    package let reason: String
+}
 
-    static func run(
+/// Runs a subprocess with an argument array — never a shell, never string
+/// interpolation. Branch names, task names, and paths are data. Shared by
+/// GitClient (git) and the task engine (user-authored setup scripts); it is
+/// `package`-scoped so app code cannot reach it to invoke arbitrary tools.
+package enum ProcessRunner {
+
+    package static func run(
         executable: String,
         arguments: [String],
-        workingDirectory: URL
-    ) async throws -> GitCommandResult {
+        workingDirectory: URL,
+        environment: [String: String]? = nil
+    ) async throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
+        if let environment {
+            process.environment = environment
+        }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -39,8 +50,7 @@ enum GitProcessRunner {
         do {
             try process.run()
         } catch {
-            throw GitClientError.launchFailed(
-                executable: executable, reason: String(describing: error))
+            throw ProcessLaunchError(executable: executable, reason: String(describing: error))
         }
 
         // Drain both pipes concurrently while the process runs; draining
@@ -49,7 +59,7 @@ enum GitProcessRunner {
         async let stderrData = drain(stderrPipe.fileHandleForReading)
 
         let status = await exitCode.value
-        return GitCommandResult(
+        return ProcessResult(
             exitCode: status,
             stdout: await stdoutData,
             stderr: await stderrData)

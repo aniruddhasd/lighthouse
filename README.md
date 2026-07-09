@@ -1,8 +1,9 @@
 # Lighthouse
 
 A native macOS developer tool: a single-app home for daily agentic development
-across git worktrees. This repository currently contains the foundation layer —
-the git access layer and its test harness. No UI yet.
+across git worktrees. This repository currently contains the foundation
+layers — the git access layer, the task engine, and their test harness.
+No UI yet.
 
 ## Layout
 
@@ -11,14 +12,22 @@ the git access layer and its test harness. No UI yet.
   (`status --porcelain=v2`, `worktree list --porcelain`). All subprocess calls
   use argument arrays — never a shell. No network git operations exist in this
   API at all (no fetch/pull/push): Lighthouse is fully offline by design.
+- `Sources/LighthouseTaskEngine` — the task lifecycle. Atomic task creation
+  (worktree + branch per repo from the local base tip, env-file copies, setup
+  scripts) with full rollback on any failure; guarded removal in which
+  destroying unmerged work requires a typed confirmation carrying the exact
+  (repo, branch) list; the pure, total attention state machine
+  (working / needs-input / done / dirty); and the schema-versioned JSON config
+  store with atomic writes. Records `adapterKind`/`sessionRef` but never
+  launches agent sessions — that is the agent adapter's job (next layer).
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway
   git repositories with known state (clean history, dirty trees, detached
   HEAD, content / delete-modify / binary merge conflicts, paths with spaces,
   attached worktrees). Never touches global git config or the network. Kept as
   a separate target so fixtures can never ship inside an app target.
-- `Tests/LighthouseGitTests` — fixture-driven tests plus pure parser tests on
-  synthetic porcelain input. Failure and edge cases are written before happy
-  paths.
+- `Tests/` — fixture-driven tests plus pure tests on synthetic input (porcelain
+  parsing, state-machine table, config round-trips). Failure and edge cases
+  are written before happy paths.
 
 ## Building and testing
 

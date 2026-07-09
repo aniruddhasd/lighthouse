@@ -137,6 +137,47 @@ public actor GitClient {
         try await runExpectingSuccess(["branch", force ? "-D" : "-d", name], in: repository)
     }
 
+    // MARK: - Branch and ancestry queries
+
+    /// True if a local branch of this name exists
+    /// (`git rev-parse -q --verify refs/heads/<name>`; exits 1 quietly when absent).
+    public func branchExists(_ name: String, in repository: URL) async throws -> Bool {
+        let arguments = ["rev-parse", "-q", "--verify", "refs/heads/\(name)"]
+        let result = try await run(arguments, in: repository)
+        switch result.exitCode {
+        case 0: return true
+        case 1 where result.stderrText.isEmpty: return false
+        default: throw classify(result, arguments: arguments, in: repository)
+        }
+    }
+
+    /// True if `ancestor`'s tip is reachable from `descendant`
+    /// (`git merge-base --is-ancestor`; per git-merge-base(1): exit 0 = yes,
+    /// 1 = no, any other nonzero = error).
+    public func isAncestor(_ ancestor: String, of descendant: String, in repository: URL) async throws -> Bool {
+        let arguments = ["merge-base", "--is-ancestor", ancestor, descendant]
+        let result = try await run(arguments, in: repository)
+        switch result.exitCode {
+        case 0: return true
+        case 1 where result.stderrText.isEmpty: return false
+        default: throw classify(result, arguments: arguments, in: repository)
+        }
+    }
+
+    /// True if `name` is a syntactically valid branch name
+    /// (`git check-ref-format refs/heads/<name>`; exit 0 = valid, 1 = not).
+    /// Needs no repository; runs in the temporary directory.
+    public func isValidBranchName(_ name: String) async throws -> Bool {
+        let arguments = ["check-ref-format", "refs/heads/\(name)"]
+        let cwd = FileManager.default.temporaryDirectory
+        let result = try await run(arguments, in: cwd)
+        switch result.exitCode {
+        case 0: return true
+        case 1: return false
+        default: throw classify(result, arguments: arguments, in: cwd)
+        }
+    }
+
     // MARK: - rev-parse helpers
 
     /// Full object name of HEAD.
@@ -179,13 +220,17 @@ public actor GitClient {
     // MARK: - Execution and error classification
 
     @discardableResult
-    private func run(_ arguments: [String], in directory: URL) async throws -> GitCommandResult {
-        try await GitProcessRunner.run(
-            executable: gitExecutable, arguments: arguments, workingDirectory: directory)
+    private func run(_ arguments: [String], in directory: URL) async throws -> ProcessResult {
+        do {
+            return try await ProcessRunner.run(
+                executable: gitExecutable, arguments: arguments, workingDirectory: directory)
+        } catch let error as ProcessLaunchError {
+            throw GitClientError.launchFailed(executable: error.executable, reason: error.reason)
+        }
     }
 
     @discardableResult
-    private func runExpectingSuccess(_ arguments: [String], in directory: URL) async throws -> GitCommandResult {
+    private func runExpectingSuccess(_ arguments: [String], in directory: URL) async throws -> ProcessResult {
         let result = try await run(arguments, in: directory)
         guard result.exitCode == 0 else {
             throw classify(result, arguments: arguments, in: directory)
@@ -194,7 +239,7 @@ public actor GitClient {
     }
 
     private func mergeOutcome(
-        from result: GitCommandResult, arguments: [String], in repository: URL
+        from result: ProcessResult, arguments: [String], in repository: URL
     ) async throws -> MergeOutcome {
         if result.exitCode == 0 { return .merged }
         // Distinguish "stopped on conflicts" (a state) from real failure by
@@ -207,7 +252,7 @@ public actor GitClient {
     }
 
     private func classify(
-        _ result: GitCommandResult, arguments: [String], in directory: URL
+        _ result: ProcessResult, arguments: [String], in directory: URL
     ) -> GitClientError {
         let failure = GitCommandFailure(
             arguments: arguments,
