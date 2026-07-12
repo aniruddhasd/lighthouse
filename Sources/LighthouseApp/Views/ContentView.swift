@@ -81,6 +81,7 @@ struct TaskDetailView: View {
     private var terminalPane: some View {
         if let controller = runtime.registry.controller(for: task.id), controller.isRunning {
             TerminalHostView(terminalView: controller.terminalView)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 12) {
                 let state = runtime.model.attentionState(of: task.id)
@@ -109,11 +110,42 @@ struct TaskDetailView: View {
     }
 }
 
-/// Hosts the registry-owned NSView. makeNSView returns the RETAINED view —
-/// SwiftUI reparents it; it never recreates the terminal or its pty.
+/// Hosts the registry-owned terminal NSView. The terminal is created once
+/// and RETAINED in the registry; this wrapper only reparents it.
+///
+/// The terminal is pinned inside a plain flexible container instead of being
+/// returned directly: SwiftUI sizes a bare NSViewRepresentable by the view's
+/// own autolayout fitting size, and SwiftTerm's internal subviews made that
+/// come out as a small fixed box centered in the pane (the 2026-07-12 sizing
+/// bug). A plain container reports no preferred size, so SwiftUI gives it
+/// the whole pane; the autoresizing pin forwards every size change to the
+/// terminal, whose setFrameSize → processSizeChange → sizeChanged delegate
+/// path reaches TIOCSWINSZ on the pty (verified in SwiftTerm 1.13.0 source),
+/// so the TUI reflows live.
 struct TerminalHostView: NSViewRepresentable {
     let terminalView: LocalProcessTerminalView
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView { terminalView }
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {}
+    /// Pins `terminal` to fill `container`, tracking all future resizes.
+    /// Static so the geometry contract is unit-testable without SwiftUI.
+    @MainActor
+    static func embed(_ terminal: LocalProcessTerminalView, in container: NSView) {
+        terminal.removeFromSuperview()
+        terminal.frame = container.bounds
+        terminal.autoresizingMask = [.width, .height]
+        container.addSubview(terminal)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        Self.embed(terminalView, in: container)
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        // Selecting another task and coming back builds a fresh container;
+        // re-adopt the retained terminal if it isn't ours right now.
+        if terminalView.superview !== container {
+            Self.embed(terminalView, in: container)
+        }
+    }
 }

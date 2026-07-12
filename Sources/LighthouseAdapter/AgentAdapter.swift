@@ -16,6 +16,17 @@ public struct LaunchPlan: Sendable, Equatable {
     /// The session reference to persist on the task (deterministic at launch
     /// when the agent supports pre-assigned session IDs).
     public let sessionRef: String
+
+    public init(
+        executable: String, arguments: [String], environment: [String: String],
+        workingDirectory: URL, sessionRef: String
+    ) {
+        self.executable = executable
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.sessionRef = sessionRef
+    }
 }
 
 /// What a new session should span: the task's primary worktree (cwd) and the
