@@ -13,6 +13,8 @@ import LighthouseTaskEngine
 final class AppRuntime {
     let model: AppModel
     let registry = SessionRegistry()
+    /// Single GitClient shared by the model and the review pane.
+    let git = GitClient()
     private let listener: AttentionSocketListener
     private let adapter = ClaudeCodeAdapter()
 
@@ -43,7 +45,8 @@ final class AppRuntime {
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
             socketPath: listener.socketURL,
-            adapter: adapter)
+            adapter: adapter,
+            git: git)
         do {
             try model.load()
         } catch {
@@ -51,6 +54,32 @@ final class AppRuntime {
         }
         Task { await runAttentionPipeline() }
         setUpGeometryProbeIfRequested()
+        runDiffRenderCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_DIFFRENDER=1: renders the hostile fixture diff
+    /// through the REAL pipeline (page builder → vendored assets → locked
+    /// WKWebView) and logs the page's own DOM assertions — the offscreen
+    /// web process runs without a visible window. Scripts/smoke-run.sh
+    /// asserts the results (the escape proof no unit test can give).
+    private var diffRenderKeepAlive: [AnyObject] = []
+    private func runDiffRenderCheckIfRequested() {
+        guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_DIFFRENDER"] == "1" else { return }
+        do {
+            let directory = try DiffWebViewFactory.makeRenderDirectory()
+            let gate = LocalOnlyNavigationDelegate(allowedRoot: directory) { message in
+                FileHandle.standardOutput.write(Data("DIFFRENDER result \(message)\n".utf8))
+            }
+            let webView = DiffWebViewFactory.makeWebView(
+                renderDirectory: directory, navigationGate: gate)
+            diffRenderKeepAlive = [webView, gate]
+            let page = DiffPageBuilder.page(
+                diff: DiffPageBuilder.hostileFixtureDiff, debugChecks: true)
+            try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
+            FileHandle.standardOutput.write(Data("DIFFRENDER-STAGE loaded\n".utf8))
+        } catch {
+            FileHandle.standardOutput.write(Data("DIFFRENDER-STAGE failed \(error)\n".utf8))
+        }
     }
 
     /// LIGHTHOUSE_DEBUG_GEOMETRY=1: select an ephemeral probe task running a

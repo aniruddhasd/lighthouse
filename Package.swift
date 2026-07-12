@@ -32,7 +32,9 @@ let package = Package(
             dependencies: [
                 "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
-            ]),
+            ],
+            // Vendored diff renderer (docs/diff-renderer.md) — fully offline.
+            resources: [.copy("Resources")]),
         // Test-harness only: generates throwaway git repos with known state.
         // Kept as a separate target so fixtures never ship in an app target.
         .target(name: "LighthouseFixtures"),

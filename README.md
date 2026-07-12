@@ -33,9 +33,12 @@ worktree bookkeeping handled for you.
   behind Cmd+K, and the honest failure formatter.
 - `Sources/LighthouseApp` — the macOS app itself: SwiftUI shell
   (NavigationSplitView, sidebar with attention badges, Cmd+K switcher,
-  guardrail sheets) and the SwiftTerm session layer. Terminals live in a
-  registry keyed by task id, outside the SwiftUI view tree — sessions keep
-  running while unfocused and survive tab switches.
+  guardrail sheets), the SwiftTerm session layer, and the live review pane
+  (per-task repo switcher, changed-files tree, diff-vs-base in a locked-down
+  WKWebView, FSEvents-driven refresh). Terminals live in a registry keyed by
+  task id, outside the SwiftUI view tree — sessions keep running while
+  unfocused and survive tab switches. The diff renderer is vendored
+  diff2html (see `docs/diff-renderer.md`) — fully offline.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway
   git repositories with known state (clean history, dirty trees, detached
   HEAD, content / delete-modify / binary merge conflicts, paths with spaces,

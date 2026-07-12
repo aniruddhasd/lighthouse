@@ -88,6 +88,39 @@ public actor GitClient {
         return try Self.parseNameStatus(result.stdout)
     }
 
+    /// LIVE diff for the review pane: `git diff --merge-base <base> --` —
+    /// per git-diff(1), the working tree relative to the merge base of
+    /// <base> and HEAD. Covers committed + staged + unstaged in one
+    /// invocation and excludes base-side commits (verified live 2026-07-12);
+    /// untracked files are separate (see untrackedFilePatch).
+    public func liveDiff(againstMergeBaseOf base: String, in repository: URL) async throws -> String {
+        let result = try await runExpectingSuccess(
+            ["diff", "--merge-base", base, "--"], in: repository)
+        return result.stdoutText
+    }
+
+    /// File list for the live diff: `git diff --name-status -z --merge-base <base> --`.
+    public func liveDiffNameStatus(
+        againstMergeBaseOf base: String, in repository: URL
+    ) async throws -> [DiffEntry] {
+        let result = try await runExpectingSuccess(
+            ["diff", "--name-status", "-z", "--merge-base", base, "--"], in: repository)
+        return try Self.parseNameStatus(result.stdout)
+    }
+
+    /// Renders an untracked file as an added-file patch:
+    /// `git diff --no-index -- /dev/null <path>`. Like diff(1), --no-index
+    /// exits 1 when differences exist — that is the expected outcome here,
+    /// not a failure (git-diff(1) --exit-code semantics).
+    public func untrackedFilePatch(for path: String, in repository: URL) async throws -> String {
+        let arguments = ["diff", "--no-index", "--", "/dev/null", path]
+        let result = try await run(arguments, in: repository)
+        switch result.exitCode {
+        case 0, 1: return result.stdoutText
+        default: throw classify(result, arguments: arguments, in: repository)
+        }
+    }
+
     // MARK: - Merge
 
     /// `git merge --no-edit <branch>`. A conflict is returned as

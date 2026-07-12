@@ -172,3 +172,73 @@ if not ok:
 print("GEOMETRY GATE: PASS")
 PY
 rm -f "$geometry_log"
+
+# --- Diff render check: the untrusted-content escape gate ------------------
+# Repo file content is hostile input rendered into HTML (spec paragraph 8).
+# LIGHTHOUSE_DEBUG_DIFFRENDER=1 renders a hostile fixture diff (script tags,
+# event handlers, nonce theft) through the REAL pipeline — page builder,
+# vendored diff2html, locked WKWebView — and the page posts its own DOM
+# verdict, which we assert here.
+render_log="$(mktemp)"
+render_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_DIFFRENDER=1 LIGHTHOUSE_CONFIG_DIR="$render_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$render_log" 2>&1 &
+render_pid=$!
+trap 'kill -9 "$render_pid" 2>/dev/null || true; rm -rf "$render_cfg"' EXIT
+
+render_tries=0
+until grep -q "DIFFRENDER result" "$render_log"; do
+    render_tries=$((render_tries + 1))
+    if [ "$render_tries" -gt 100 ]; then
+        echo "DIFFRENDER GATE: FAIL (no render result within 20s)" >&2
+        grep "DIFFRENDER" "$render_log" | tail -5 >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$render_pid" 2>/dev/null; then
+        echo "DIFFRENDER GATE: FAIL (app exited before rendering)" >&2
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$render_pid" 2>/dev/null || true
+render_tries=0
+while kill -0 "$render_pid" 2>/dev/null; do
+    render_tries=$((render_tries + 1))
+    if [ "$render_tries" -gt 15 ]; then
+        kill -9 "$render_pid" 2>/dev/null || true
+    fi
+    if [ "$render_tries" -gt 40 ]; then
+        echo "DIFFRENDER GATE: FAIL (render app would not exit)" >&2
+        exit 1
+    fi
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$render_cfg"
+
+python3 - "$render_log" <<'PY'
+import json, re, sys
+
+line = next((l for l in open(sys.argv[1]) if l.startswith("DIFFRENDER result ")), None)
+assert line, "result line vanished"
+result = json.loads(line.removeprefix("DIFFRENDER result ").strip())
+print(f"DIFFRENDER dom: {result}")
+problems = []
+if result.get("error"):
+    problems.append(f"page error: {result['error']}")
+if result.get("scripts", -1) != 0:
+    problems.append(f"{result.get('scripts')} script tags inside rendered diff")
+if result.get("imgHandlers", -1) != 0:
+    problems.append(f"{result.get('imgHandlers')} img event handlers survived")
+if result.get("pwned") is not False:
+    problems.append("hostile script EXECUTED (window.__pwned set)")
+if result.get("hostileTextPresent") is not True:
+    problems.append("hostile content missing as text — diff not actually rendered")
+if result.get("files", 0) < 2:
+    problems.append(f"expected 2 rendered files, got {result.get('files')}")
+if problems:
+    print("DIFFRENDER GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("DIFFRENDER GATE: PASS")
+PY
+rm -f "$render_log"
