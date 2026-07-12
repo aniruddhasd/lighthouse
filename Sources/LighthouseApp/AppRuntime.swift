@@ -70,11 +70,9 @@ final class AppRuntime {
             sessionRef: "geometry-probe")
         _ = registry.start(taskId: probe.id, plan: plan) { _, _ in }
         selectedTaskId = probe.id
-
-        Task { @MainActor in
-            try? await _Concurrency.Task.sleep(for: .seconds(2.5))
-            NSApp.windows.first?.setContentSize(NSSize(width: 1000, height: 640))
-        }
+        // The scripted resize is event-driven from the first real layout
+        // pass (GeometryResizeDriver) — a wall-clock timer here raced window
+        // creation in other launch contexts and silently no-opped.
     }
 
     private func runAttentionPipeline() async {
