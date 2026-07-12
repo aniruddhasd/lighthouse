@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import LighthouseAdapter
@@ -23,11 +24,19 @@ final class AppRuntime {
     /// badges degrade to unknown (spec §8 fail-safe) — but say so visibly.
     var attentionDegraded: String?
 
-    init(
-        configDirectory: URL = FileManager.default
+    /// LIGHTHOUSE_CONFIG_DIR overrides the config+socket location — used by
+    /// scripted checks so they never touch the real config or unlink a live
+    /// instance's socket.
+    static func defaultConfigDirectory() -> URL {
+        if let override = ProcessInfo.processInfo.environment["LIGHTHOUSE_CONFIG_DIR"] {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Lighthouse", isDirectory: true)
-    ) {
+    }
+
+    init(configDirectory: URL = AppRuntime.defaultConfigDirectory()) {
         // Socket at the config-directory ROOT: unix socket paths cap at ~104
         // bytes (sun_path), so no nesting.
         listener = AttentionSocketListener(directory: configDirectory, adapter: adapter)
@@ -41,6 +50,31 @@ final class AppRuntime {
             lastError = "Could not load config: \(error)"
         }
         Task { await runAttentionPipeline() }
+        setUpGeometryProbeIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_GEOMETRY=1: select an ephemeral probe task running a
+    /// harmless /bin/cat pty so the terminal pane renders without any agent,
+    /// then resize the window once so the geometry check observes two sizes.
+    /// The probe never persists and never marks the session "working", so
+    /// quit stays unconfirmed and the user's config is untouched.
+    private func setUpGeometryProbeIfRequested() {
+        guard GeometryDebug.enabled else { return }
+        let probe = TaskRecord(
+            name: "geometry-probe", branch: "debug/geometry-probe",
+            adapterKind: "debug", sessionRef: nil, state: .done, workspaces: [])
+        model.insertEphemeralTask(probe)
+        let plan = LaunchPlan(
+            executable: "/bin/cat", arguments: [], environment: [:],
+            workingDirectory: FileManager.default.temporaryDirectory,
+            sessionRef: "geometry-probe")
+        _ = registry.start(taskId: probe.id, plan: plan) { _, _ in }
+        selectedTaskId = probe.id
+
+        Task { @MainActor in
+            try? await _Concurrency.Task.sleep(for: .seconds(2.5))
+            NSApp.windows.first?.setContentSize(NSSize(width: 1000, height: 640))
+        }
     }
 
     private func runAttentionPipeline() async {

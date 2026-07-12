@@ -4,13 +4,17 @@ import Testing
 import LighthouseAdapter
 @testable import LighthouseApp
 
-/// Regression tests for the 2026-07-12 sizing bug: the terminal rendered as
-/// a small fixed box centered in the pane instead of filling it, because the
-/// bare terminal view's autolayout fitting size drove SwiftUI's sizing.
-/// These pin the geometry contract of TerminalHostView.embed and the
-/// registry's retain-don't-recreate guarantee. (SwiftUI's own layout pass
-/// and the live TIOCSWINSZ reflow are not unit-testable — the smoke run and
-/// SwiftTerm 1.13.0's setFrameSize→sizeChanged source cover those.)
+/// AppKit-layer contracts for the terminal: TerminalHostView.embed geometry
+/// and the registry's retain-don't-recreate guarantee.
+///
+/// HONEST LIMIT (learned the hard way, 2026-07-12): these tests passed while
+/// the real app still mis-sized, because the actual bug lived in SwiftUI's
+/// layout (HSplitView sizing itself to its children's ideal heights and the
+/// representable's default sizeThatFits) — and SwiftUI performs layout only
+/// with a window server, which `swift test` does not have. The REGRESSION
+/// GATE for that layer is the scripted geometry check in
+/// Scripts/smoke-run.sh (LIGHTHOUSE_DEBUG_GEOMETRY=1), which asserts the
+/// terminal fills the pane at two window sizes inside the running app.
 @MainActor
 @Suite("Terminal sizing and retention")
 struct TerminalSizingTests {

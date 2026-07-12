@@ -67,12 +67,22 @@ struct TaskDetailView: View {
         HSplitView {
             terminalPane
                 .frame(minWidth: 420)
+                .debugSize("terminalPane")
             ContentUnavailableView(
                 "Review pane",
                 systemImage: "doc.text.magnifyingglass",
                 description: Text("Live diff-vs-base lands in a later step."))
-            .frame(minWidth: 220)
+            .frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
+            .debugSize("reviewPane")
         }
+        // Root cause of the sizing bug (pinned by the geometry probes,
+        // 2026-07-12): HSplitView sizes itself to its children's IDEAL
+        // heights — the review placeholder's ~181pt — and the detail column
+        // then centers the whole 181pt strip. Forcing the split (and both
+        // children) to expand makes it adopt the full detail area, and the
+        // representable's sizeThatFits carries that down to the terminal.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .debugSize("hsplit")
         .navigationTitle(task.name)
         .navigationSubtitle(task.branch)
     }
@@ -113,15 +123,17 @@ struct TaskDetailView: View {
 /// Hosts the registry-owned terminal NSView. The terminal is created once
 /// and RETAINED in the registry; this wrapper only reparents it.
 ///
-/// The terminal is pinned inside a plain flexible container instead of being
-/// returned directly: SwiftUI sizes a bare NSViewRepresentable by the view's
-/// own autolayout fitting size, and SwiftTerm's internal subviews made that
-/// come out as a small fixed box centered in the pane (the 2026-07-12 sizing
-/// bug). A plain container reports no preferred size, so SwiftUI gives it
-/// the whole pane; the autoresizing pin forwards every size change to the
-/// terminal, whose setFrameSize → processSizeChange → sizeChanged delegate
-/// path reaches TIOCSWINSZ on the pty (verified in SwiftTerm 1.13.0 source),
-/// so the TUI reflows live.
+/// Sizing scar (2026-07-12, took two attempts): SwiftUI sizes an
+/// NSViewRepresentable by `sizeThatFits`, whose DEFAULT answer derives from
+/// the platform view's own fitting size — measured live at a constant 181pt
+/// tall at every window size — and the enclosing flexible frame then CENTERS
+/// that fixed box on both axes (the user-visible bug). The first fix
+/// (container + autoresizing pin) only guaranteed terminal == container; the
+/// container itself was still sized 181pt by the default negotiation, which
+/// unit tests could not see because only a running app performs SwiftUI
+/// layout. Fix: `sizeThatFits` adopts the proposal outright — a terminal is
+/// a fill-everything view. Proof lives in the scripted geometry check
+/// (Scripts/smoke-run.sh, LIGHTHOUSE_DEBUG_GEOMETRY=1).
 struct TerminalHostView: NSViewRepresentable {
     let terminalView: LocalProcessTerminalView
 
@@ -135,8 +147,17 @@ struct TerminalHostView: NSViewRepresentable {
         container.addSubview(terminal)
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        // Adopt exactly what the pane proposes; unspecified dimensions keep
+        // the current size rather than inventing an "ideal" one.
+        let fallback = nsView.frame.size
+        return CGSize(
+            width: proposal.width ?? fallback.width,
+            height: proposal.height ?? fallback.height)
+    }
+
     func makeNSView(context: Context) -> NSView {
-        let container = NSView()
+        let container = TerminalContainerView()
         Self.embed(terminalView, in: container)
         return container
     }

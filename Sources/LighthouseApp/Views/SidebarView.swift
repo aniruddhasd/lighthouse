@@ -49,7 +49,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .navigationTitle("Lighthouse")
+        .navigationTitle("Lighthouse build \(BuildInfo.stamp)")
         .toolbar {
             ToolbarItem {
                 Menu {

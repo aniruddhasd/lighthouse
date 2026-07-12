@@ -33,6 +33,8 @@ public final class AppModel {
     public private(set) var attention: [UUID: TaskAttentionState] = [:]
     /// Task ids with a live pty right now — maintained by the session layer.
     public private(set) var liveSessions: Set<UUID> = []
+    /// Debug-only tasks (geometry probe): visible to the UI, never persisted.
+    private var ephemeralTaskIds: Set<UUID> = []
 
     /// Global worktrees-root override (config schema v2). nil = per-repo
     /// default: `<repo parent>/lighthouse-worktrees/<task>/<repo>`.
@@ -74,9 +76,19 @@ public final class AppModel {
         try persist()
     }
 
+    /// Inserts a task that exists only for this process (e.g. the geometry
+    /// probe). It renders like any task but is excluded from every save.
+    public func insertEphemeralTask(_ task: TaskRecord) {
+        ephemeralTaskIds.insert(task.id)
+        tasks.append(task)
+        attention[task.id] = task.state
+    }
+
     private func persist() throws {
         try store.save(LighthouseConfig(
-            repos: repos, tasks: tasks, worktreesRootOverride: worktreesRootOverride))
+            repos: repos,
+            tasks: tasks.filter { !ephemeralTaskIds.contains($0.id) },
+            worktreesRootOverride: worktreesRootOverride))
     }
 
     // MARK: - Repo registry

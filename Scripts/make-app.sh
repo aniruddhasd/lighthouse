@@ -11,6 +11,8 @@ configuration="${1:-release}"
 package_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$package_root"
 
+build_stamp="$(git -C "$package_root" rev-parse --short HEAD)$(git -C "$package_root" diff --quiet HEAD 2>/dev/null || printf '%s' '-dirty')"
+
 swift build -c "$configuration" --product Lighthouse
 
 app="$package_root/dist/Lighthouse.app"
@@ -19,7 +21,7 @@ mkdir -p "$app/Contents/MacOS"
 
 cp ".build/$configuration/Lighthouse" "$app/Contents/MacOS/Lighthouse"
 
-cat > "$app/Contents/Info.plist" <<'PLIST'
+cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,7 +39,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$build_stamp</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSPrincipalClass</key>
