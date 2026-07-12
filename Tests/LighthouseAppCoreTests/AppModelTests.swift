@@ -18,7 +18,6 @@ final class AppModelTests {
         storeDirectory = fixtures.root.appendingPathComponent("store", isDirectory: true)
         model = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            worktreesRoot: fixtures.root.appendingPathComponent("worktrees", isDirectory: true),
             socketPath: fixtures.root.appendingPathComponent("attention.sock"),
             adapter: ClaudeCodeAdapter(),
             loginShell: "/bin/zsh")
@@ -93,7 +92,7 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            worktreesRoot: fixtures.root, socketPath: fixtures.root,
+            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.repos == [registered])
@@ -167,6 +166,25 @@ final class AppModelTests {
         #expect(!FileManager.default.fileExists(atPath: siblingSettings.path))
     }
 
+    @Test func worktreesRootOverrideFlowsIntoCreationAndPersists() async throws {
+        let repo = try fixtures.cleanRepo()
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+        let override = fixtures.root.appendingPathComponent("override root", isDirectory: true)
+        try model.setWorktreesRootOverride(override.path)
+
+        let (task, _) = try await model.createTask(
+            name: "ov", branch: "task/ov", repoIds: [registered.id])
+        #expect(task.workspaces[0].worktreePath
+            == override.appendingPathComponent("ov/\(repo.path.lastPathComponent)").path)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.worktreesRootOverride == override.path)
+    }
+
     @Test func removalThroughModelUpdatesStateAndStore() async throws {
         let repo = try fixtures.cleanRepo()
         let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
@@ -229,7 +247,7 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            worktreesRoot: fixtures.root, socketPath: fixtures.root,
+            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.attentionState(of: task.id) == .needsInput)

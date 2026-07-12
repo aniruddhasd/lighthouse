@@ -58,6 +58,26 @@ public actor TaskEngine {
 
     // MARK: - Creation (spec §2.2, guardrail 6)
 
+    /// Directory that groups a repo's task worktrees when no override is set.
+    public static let worktreesDirectoryName = "lighthouse-worktrees"
+
+    /// Where a task's worktree for `repo` goes. Default derives from the
+    /// repo's OWN parent — `<repo parent>/lighthouse-worktrees/<task>/<repo>`
+    /// — so sessions stay inside the directory tree that cwd-keyed tooling
+    /// (per-folder account selectors, direnv) watches; repos living in
+    /// different parents get worktrees near their respective repos. A global
+    /// override replaces the `<repo parent>/lighthouse-worktrees` part.
+    public static func worktreeDestination(
+        for repo: RepoConfig, taskName: String, worktreesRootOverride: URL?
+    ) -> URL {
+        let base = worktreesRootOverride
+            ?? repo.pathURL.deletingLastPathComponent()
+                .appendingPathComponent(worktreesDirectoryName, isDirectory: true)
+        return base
+            .appendingPathComponent(taskName, isDirectory: true)
+            .appendingPathComponent(repo.pathURL.lastPathComponent, isDirectory: true)
+    }
+
     /// Creates one worktree + branch per repo, in order, from each repo's
     /// LOCAL base tip (fully offline — never fetches). Copies env files, runs
     /// the setup script. Any failure at repo N rolls back repos 1..N and
@@ -69,7 +89,7 @@ public actor TaskEngine {
         branch: String,
         adapterKind: String,
         repos: [RepoConfig],
-        worktreesRoot: URL
+        worktreesRootOverride: URL? = nil
     ) async throws -> TaskRecord {
         // ---- Pre-flight (no mutation anywhere) ----
         if let reason = Self.taskNameProblem(name) {
@@ -81,12 +101,11 @@ public actor TaskEngine {
                 repoPath: nil, cause: .invalidBranchName(branch), rollback: .notNeeded)
         }
 
-        let taskDirectory = worktreesRoot.appendingPathComponent(name, isDirectory: true)
         var destinations: [UUID: URL] = [:]
         var seen: Set<String> = []
         for repo in repos {
-            let destination = taskDirectory.appendingPathComponent(
-                repo.pathURL.lastPathComponent, isDirectory: true)
+            let destination = Self.worktreeDestination(
+                for: repo, taskName: name, worktreesRootOverride: worktreesRootOverride)
             guard seen.insert(destination.path).inserted else {
                 throw TaskCreationFailure(
                     repoPath: repo.path,
@@ -100,19 +119,23 @@ public actor TaskEngine {
         // `created` is appended AT the mutation point (inside
         // createWorkspace, right after `worktree add`), so a repo whose
         // provisioning fails AFTER its worktree exists is still rolled back.
+        // `createdParents` records the destination's parent dirs that did NOT
+        // exist before the mutation — the only dirs rollback may delete.
         var created: [CreatedArtifact] = []
+        var createdParents: [URL] = []
         var workspaces: [Workspace] = []
 
         for repo in repos {
             do {
                 let workspace = try await createWorkspace(
                     for: repo, branch: branch, at: destinations[repo.id]!,
-                    recordingArtifactsIn: &created)
+                    recordingArtifactsIn: &created,
+                    recordingCreatedParentsIn: &createdParents)
                 workspaces.append(workspace)
             } catch {
                 let cause = (error as? TaskEngineError)
                     ?? .git(.unexpectedOutput(description: String(describing: error), output: ""))
-                let rollback = await rollBack(created, taskDirectory: taskDirectory)
+                let rollback = await rollBack(created, createdParents: createdParents)
                 throw TaskCreationFailure(repoPath: repo.path, cause: cause, rollback: rollback)
             }
         }
@@ -131,7 +154,8 @@ public actor TaskEngine {
     /// script) still roll this repo back.
     private func createWorkspace(
         for repo: RepoConfig, branch: String, at destination: URL,
-        recordingArtifactsIn created: inout [CreatedArtifact]
+        recordingArtifactsIn created: inout [CreatedArtifact],
+        recordingCreatedParentsIn createdParents: inout [URL]
     ) async throws -> Workspace {
         let repoURL = repo.pathURL
 
@@ -159,6 +183,13 @@ public actor TaskEngine {
         if FileManager.default.fileExists(atPath: destination.path) {
             throw TaskEngineError.worktreeDestinationOccupied(path: destination.path)
         }
+        // The nearest EXISTING ancestor must be writable, or `worktree add`
+        // would fail mid-mutation; fail loud before touching anything.
+        let existingAncestor = Self.nearestExistingAncestor(of: destination)
+        guard FileManager.default.isWritableFile(atPath: existingAncestor.path) else {
+            throw TaskEngineError.worktreeDestinationNotWritable(
+                path: destination.path, unwritableAncestor: existingAncestor.path)
+        }
 
         // Validate env entries before mutating, too.
         let envEntries = repo.envCopyList ?? []
@@ -172,6 +203,17 @@ public actor TaskEngine {
         }
         let script = try resolveSetupScript(for: repo)
 
+        // Record which parent dirs `worktree add` is about to create (it
+        // mkdir -p's the destination) — deepest first, so rollback can
+        // delete in reverse creation order. Only dirs that do NOT yet exist
+        // are recorded: rollback never touches a dir this attempt didn't make.
+        var missingParents: [URL] = []
+        var probe = destination.deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: probe.path) {
+            missingParents.append(probe)
+            probe = probe.deletingLastPathComponent()
+        }
+
         // ---- Mutation point ----
         try await liftGit {
             try await self.git.addWorktree(
@@ -179,6 +221,7 @@ public actor TaskEngine {
         }
         created.append(CreatedArtifact(
             repoPath: repo.path, branch: branch, worktreePath: destination.path))
+        createdParents.append(contentsOf: missingParents)
 
         // Env copies: content moves file-to-file only; never read into
         // config or logs (guardrail 4).
@@ -214,10 +257,30 @@ public actor TaskEngine {
         return Workspace(repoId: repo.id, worktreePath: destination.path, mergeState: .unmerged)
     }
 
+    /// The nearest ancestor of `url` that exists on disk right now.
+    static func nearestExistingAncestor(of url: URL) -> URL {
+        var probe = url.deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: probe.path), probe.path != "/" {
+            probe = probe.deletingLastPathComponent()
+        }
+        return probe
+    }
+
+    /// Removes a directory only if it is empty. Non-empty or missing dirs
+    /// are left exactly as they are.
+    private static func removeIfEmpty(_ url: URL) {
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path),
+              contents.isEmpty else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     /// Best-effort, loud: attempts every artifact in reverse order, records
     /// each failure as debris, never stops early and never swallows.
+    /// `createdParents` are the destination parent dirs this attempt created
+    /// (deepest first per repo) — removed afterwards only if empty; a dir
+    /// that pre-existed the attempt is never in the list.
     private func rollBack(
-        _ created: [CreatedArtifact], taskDirectory: URL
+        _ created: [CreatedArtifact], createdParents: [URL]
     ) async -> RollbackOutcome {
         if created.isEmpty { return .notNeeded }
 
@@ -253,12 +316,12 @@ public actor TaskEngine {
             }
         }
 
-        // The task directory shell is empty once worktrees are gone; removing
-        // it is cosmetic cleanup, not debris accounting.
-        if debris.isEmpty,
-           let contents = try? FileManager.default.contentsOfDirectory(atPath: taskDirectory.path),
-           contents.isEmpty {
-            try? FileManager.default.removeItem(at: taskDirectory)
+        // Directory-husk cleanup, cosmetic (not debris accounting): the
+        // parent dirs this attempt created are now empty shells — remove
+        // them deepest-first, and only while actually empty (a dir holding
+        // rollback debris or anything else stays).
+        for parent in createdParents {
+            Self.removeIfEmpty(parent)
         }
 
         return debris.isEmpty
@@ -372,6 +435,18 @@ public actor TaskEngine {
             outcomes.append(WorkspaceRemovalOutcome(
                 repoId: repo.id, repoPath: repo.path, branch: task.branch,
                 worktree: worktreeOutcome, branchResult: branchOutcome))
+
+            // Husk cleanup: the worktree's parent is this task's grouping
+            // dir — remove it once empty; then its parent too, but ONLY when
+            // it is our own `lighthouse-worktrees` grouping dir (an override
+            // root is user-chosen and never removed). Non-empty dirs always
+            // stay — other tasks' worktrees live there.
+            let taskDir = workspace.worktreeURL.deletingLastPathComponent()
+            Self.removeIfEmpty(taskDir)
+            let groupingDir = taskDir.deletingLastPathComponent()
+            if groupingDir.lastPathComponent == Self.worktreesDirectoryName {
+                Self.removeIfEmpty(groupingDir)
+            }
         }
 
         return TaskRemovalReport(workspaces: outcomes)

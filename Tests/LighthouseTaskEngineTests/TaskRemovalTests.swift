@@ -33,7 +33,7 @@ final class TaskRemovalTests {
     ) async throws -> TaskRecord {
         try await engine.createTask(
             name: name, branch: "task/\(name)", adapterKind: "claude-code",
-            repos: repos, worktreesRoot: worktreesRoot)
+            repos: repos, worktreesRootOverride: worktreesRoot)
     }
 
     /// Commits a file in the workspace — the branch tip moves past base:

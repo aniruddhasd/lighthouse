@@ -55,6 +55,8 @@ public enum FailureDescriber {
             return "Branch '\(branch)' already exists in \(repoPath) — it was NOT touched."
         case .worktreeDestinationOccupied(let path):
             return "Worktree destination already exists: \(path)."
+        case .worktreeDestinationNotWritable(let path, let unwritableAncestor):
+            return "Cannot create worktree at \(path): \(unwritableAncestor) is not writable."
         case .duplicateWorktreeDestination(let path):
             return "Two selected repos would share the worktree path \(path)."
         case .invalidEnvCopyEntry(let entry, let reason):

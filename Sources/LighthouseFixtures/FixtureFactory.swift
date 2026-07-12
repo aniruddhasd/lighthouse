@@ -6,6 +6,11 @@ public struct FixtureRepo: Sendable {
     public let path: URL
     /// The branch the repository was initialized with (`main` unless a scenario says otherwise).
     public let defaultBranch: String
+
+    public init(path: URL, defaultBranch: String) {
+        self.path = path
+        self.defaultBranch = defaultBranch
+    }
 }
 
 /// A repository with all three kinds of dirt in the working tree.

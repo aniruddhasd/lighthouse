@@ -63,5 +63,10 @@ later. `LIGHTHOUSE_SMOKE=1 Scripts/smoke-run.sh` launches the built app,
 checks the attention socket (0600) and clean-quit behavior, and exits.
 
 State locations: config + attention socket in
-`~/Library/Application Support/Lighthouse/`; task worktrees under
-`~/Lighthouse/<task name>/<repo>/`.
+`~/Library/Application Support/Lighthouse/`. Task worktrees are created next
+to each repo — `<repo parent>/lighthouse-worktrees/<task name>/<repo>/` — so
+sessions inherit whatever cwd-keyed environment (per-folder account
+selectors, direnv) applies to that directory tree; a global
+`worktreesRootOverride` path in the config replaces the derived location.
+Tasks created before this scheme keep working from their persisted worktree
+paths.

@@ -34,24 +34,25 @@ public final class AppModel {
     /// Task ids with a live pty right now — maintained by the session layer.
     public private(set) var liveSessions: Set<UUID> = []
 
+    /// Global worktrees-root override (config schema v2). nil = per-repo
+    /// default: `<repo parent>/lighthouse-worktrees/<task>/<repo>`.
+    public private(set) var worktreesRootOverride: String?
+
     private let store: ConfigStore
     private let engine: TaskEngine
     private let git: GitClient
     private let adapter: any AgentAdapter
-    private let worktreesRoot: URL
     private let socketPath: URL
     private let loginShell: String
 
     public init(
         store: ConfigStore,
-        worktreesRoot: URL,
         socketPath: URL,
         adapter: any AgentAdapter,
         git: GitClient = GitClient(),
         loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     ) {
         self.store = store
-        self.worktreesRoot = worktreesRoot
         self.socketPath = socketPath
         self.adapter = adapter
         self.git = git
@@ -64,11 +65,18 @@ public final class AppModel {
         let config = try store.load()
         repos = config.repos
         tasks = config.tasks
+        worktreesRootOverride = config.worktreesRootOverride
         attention = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, $0.state) })
     }
 
+    public func setWorktreesRootOverride(_ path: String?) throws {
+        worktreesRootOverride = path
+        try persist()
+    }
+
     private func persist() throws {
-        try store.save(LighthouseConfig(repos: repos, tasks: tasks))
+        try store.save(LighthouseConfig(
+            repos: repos, tasks: tasks, worktreesRootOverride: worktreesRootOverride))
     }
 
     // MARK: - Repo registry
@@ -148,7 +156,10 @@ public final class AppModel {
         }
         var task = try await engine.createTask(
             name: name, branch: branch, adapterKind: adapter.kind,
-            repos: selected, worktreesRoot: worktreesRoot)
+            repos: selected,
+            worktreesRootOverride: worktreesRootOverride.map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            })
 
         let primary = task.workspaces[0].worktreeURL
         try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)

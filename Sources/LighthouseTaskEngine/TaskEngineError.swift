@@ -15,6 +15,9 @@ public enum TaskEngineError: Error, Sendable {
     /// mutation of that repo, so rollback never touches it (guardrail 6).
     case branchAlreadyExists(repoPath: String, branch: String)
     case worktreeDestinationOccupied(path: String)
+    /// The destination's nearest existing ancestor is not writable —
+    /// detected pre-mutation so creation fails before touching anything.
+    case worktreeDestinationNotWritable(path: String, unwritableAncestor: String)
     case duplicateWorktreeDestination(path: String)
     /// envCopyList entries must be relative and stay inside the repo.
     case invalidEnvCopyEntry(entry: String, reason: String)

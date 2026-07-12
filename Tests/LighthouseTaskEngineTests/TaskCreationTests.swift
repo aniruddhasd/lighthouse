@@ -75,7 +75,7 @@ final class TaskCreationTests {
                 name: "atomic-test", branch: "task/atomic", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1), self.repoConfig(r2),
                         self.repoConfig(r3, setupScript: "setup.sh")],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
 
         guard case .setupScriptFailed(let repoPath, _, let exitCode, let stderr) = failure.cause else {
@@ -108,7 +108,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "collide-2", branch: "task/collide", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1), self.repoConfig(r2), self.repoConfig(r3)],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
 
         guard case .branchAlreadyExists(let repoPath, let branch) = failure.cause else {
@@ -138,7 +138,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "collide-3", branch: "task/collide3", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1), self.repoConfig(r2), self.repoConfig(r3)],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
 
         guard case .branchAlreadyExists = failure.cause else {
@@ -173,7 +173,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "sabotage", branch: "task/sabotage", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1), self.repoConfig(r2, setupScript: "sabotage.sh")],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
 
         guard case .setupScriptFailed = failure.cause else {
@@ -204,7 +204,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "ghost", branch: "task/ghost", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1), ghost],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
         guard case .repoNotFound(let path) = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -224,7 +224,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "notrepo", branch: "task/notrepo", adapterKind: "claude-code",
                 repos: [RepoConfig(path: notRepo.path, baseBranch: "main")],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
         guard case .repoNotFound = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -244,7 +244,7 @@ final class TaskCreationTests {
         let failure = try await creationFailure {
             try await self.engine.createTask(
                 name: "nobase", branch: "task/nobase", adapterKind: "claude-code",
-                repos: [config], worktreesRoot: self.worktreesRoot)
+                repos: [config], worktreesRootOverride: self.worktreesRoot)
         }
         guard case .baseBranchMissing(let repoPath, let base) = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -260,7 +260,7 @@ final class TaskCreationTests {
         let failure = try await creationFailure {
             try await self.engine.createTask(
                 name: "bad/name", branch: "task/ok", adapterKind: "claude-code",
-                repos: [self.repoConfig(r1)], worktreesRoot: self.worktreesRoot)
+                repos: [self.repoConfig(r1)], worktreesRootOverride: self.worktreesRoot)
         }
         guard case .invalidTaskName = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -273,7 +273,7 @@ final class TaskCreationTests {
         let failure = try await creationFailure {
             try await self.engine.createTask(
                 name: "okname", branch: "bad name", adapterKind: "claude-code",
-                repos: [self.repoConfig(r1)], worktreesRoot: self.worktreesRoot)
+                repos: [self.repoConfig(r1)], worktreesRootOverride: self.worktreesRoot)
         }
         guard case .invalidBranchName("bad name") = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -292,7 +292,7 @@ final class TaskCreationTests {
         let failure = try await creationFailure {
             try await self.engine.createTask(
                 name: "occupied", branch: "task/occupied", adapterKind: "claude-code",
-                repos: [self.repoConfig(r1)], worktreesRoot: self.worktreesRoot)
+                repos: [self.repoConfig(r1)], worktreesRootOverride: self.worktreesRoot)
         }
         guard case .worktreeDestinationOccupied(let path) = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -308,7 +308,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "noenv", branch: "task/noenv", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1, envCopyList: [".env"])],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
         guard case .envCopySourceMissing(_, let entry) = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -324,7 +324,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "escape", branch: "task/escape", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1, envCopyList: ["../outside.env"])],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
         guard case .invalidEnvCopyEntry(let entry, _) = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -339,7 +339,7 @@ final class TaskCreationTests {
             try await self.engine.createTask(
                 name: "noscript", branch: "task/noscript", adapterKind: "claude-code",
                 repos: [self.repoConfig(r1, setupScript: "nope.sh")],
-                worktreesRoot: self.worktreesRoot)
+                worktreesRootOverride: self.worktreesRoot)
         }
         guard case .setupScriptNotFound = failure.cause else {
             Issue.record("wrong cause: \(failure.cause)")
@@ -365,7 +365,7 @@ final class TaskCreationTests {
                 repoConfig(r1, setupScript: "setup.sh", envCopyList: [".env"]),
                 repoConfig(r2),
             ],
-            worktreesRoot: worktreesRoot)
+            worktreesRootOverride: worktreesRoot)
 
         #expect(task.name == "payments-fix")
         #expect(task.branch == "task/payments-fix")

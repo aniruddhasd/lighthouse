@@ -42,7 +42,7 @@ final class ConfigStoreTests {
         #expect {
             _ = try self.store.load()
         } throws: { error in
-            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 1)
+            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 2)
         }
         // Never silently rewritten: byte-identical after the failed load.
         #expect(try Data(contentsOf: store.fileURL) == futureFile)
@@ -109,6 +109,38 @@ final class ConfigStoreTests {
         #expect(try store.load() == config)
     }
 
+    @Test func worktreesRootOverrideRoundTrips() throws {
+        var config = sampleConfig()
+        config.worktreesRootOverride = "/Users/dev/my worktrees"
+        try store.save(config)
+        #expect(try store.load().worktreesRootOverride == "/Users/dev/my worktrees")
+    }
+
+    /// A real v1 file (written before the override existed) must load and
+    /// migrate: same repos/tasks, no override configured, worktree paths
+    /// untouched (they are per-workspace data, so old-style locations keep
+    /// working).
+    @Test func v1FileMigratesToCurrentShape() throws {
+        let repoId = UUID()
+        let v1 = """
+        {"schemaVersion": 1,
+         "repos": [{"id": "\(repoId.uuidString)", "path": "/tmp/repos/alpha", "baseBranch": "main"}],
+         "tasks": [{"id": "\(UUID().uuidString)", "name": "old task", "branch": "task/old",
+                    "adapterKind": "claude-code", "state": "done",
+                    "workspaces": [{"repoId": "\(repoId.uuidString)",
+                                    "worktreePath": "/Users/dev/Lighthouse/old task/alpha",
+                                    "mergeState": "unmerged"}]}]}
+        """
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(v1.utf8).write(to: store.fileURL)
+
+        let migrated = try store.load()
+        #expect(migrated.worktreesRootOverride == nil)
+        #expect(migrated.repos.count == 1)
+        #expect(migrated.tasks.first?.workspaces.first?.worktreePath
+            == "/Users/dev/Lighthouse/old task/alpha")
+    }
+
     @Test func optionalFieldsAbsentRoundTrip() throws {
         let config = LighthouseConfig(
             repos: [RepoConfig(path: "/tmp/r", baseBranch: "main")],
@@ -135,6 +167,6 @@ final class ConfigStoreTests {
     @Test func schemaVersionIsWrittenFromDayOne() throws {
         try store.save(.empty)
         let text = String(decoding: try Data(contentsOf: store.fileURL), as: UTF8.self)
-        #expect(text.contains(#""schemaVersion" : 1"#))
+        #expect(text.contains(#""schemaVersion" : 2"#))
     }
 }

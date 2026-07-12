@@ -6,10 +6,20 @@ import Foundation
 public struct LighthouseConfig: Codable, Sendable, Equatable {
     public var repos: [RepoConfig]
     public var tasks: [TaskRecord]
+    /// Global override for where task worktrees are created. nil (the
+    /// default) derives the location per repo — `<repo parent>/
+    /// lighthouse-worktrees/<task>/<repo>` — which keeps sessions inside the
+    /// directory trees that cwd-keyed tooling (per-folder account selectors,
+    /// direnv) watches. Added in schema v2.
+    public var worktreesRootOverride: String?
 
-    public init(repos: [RepoConfig] = [], tasks: [TaskRecord] = []) {
+    public init(
+        repos: [RepoConfig] = [], tasks: [TaskRecord] = [],
+        worktreesRootOverride: String? = nil
+    ) {
         self.repos = repos
         self.tasks = tasks
+        self.worktreesRootOverride = worktreesRootOverride
     }
 
     public static let empty = LighthouseConfig()
@@ -28,7 +38,7 @@ public enum ConfigStoreError: Error, Sendable, Equatable {
 /// same directory, then rename over the target). The directory is injected;
 /// production uses `ConfigStore.defaultDirectory()`, tests use temp dirs.
 public struct ConfigStore: Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
     public static let fileName = "config.json"
 
     public let directory: URL
@@ -75,6 +85,16 @@ public struct ConfigStore: Sendable {
                 throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
             }
             return Self.migrateV1(stored)
+        case 2:
+            let stored: StoredConfigV2
+            do {
+                stored = try decoder.decode(StoredConfigV2.self, from: data)
+            } catch {
+                throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
+            }
+            return LighthouseConfig(
+                repos: stored.repos, tasks: stored.tasks,
+                worktreesRootOverride: stored.worktreesRootOverride)
         default:
             throw ConfigStoreError.unsupportedSchemaVersion(
                 found: probe.schemaVersion, newest: Self.currentSchemaVersion)
@@ -82,10 +102,11 @@ public struct ConfigStore: Sendable {
     }
 
     public func save(_ config: LighthouseConfig) throws {
-        let stored = StoredConfigV1(
+        let stored = StoredConfigV2(
             schemaVersion: Self.currentSchemaVersion,
             repos: config.repos,
-            tasks: config.tasks)
+            tasks: config.tasks,
+            worktreesRootOverride: config.worktreesRootOverride)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data: Data
@@ -126,9 +147,19 @@ public struct ConfigStore: Sendable {
         var tasks: [TaskRecord]
     }
 
-    /// v1 is the current shape: identity migration. The dispatch above is the
-    /// mechanism future versions plug into.
+    /// v2 (2026-07-12): adds the optional global worktrees-root override;
+    /// default (absent) means per-repo derivation next to each repo.
+    private struct StoredConfigV2: Codable {
+        var schemaVersion: Int
+        var repos: [RepoConfig]
+        var tasks: [TaskRecord]
+        var worktreesRootOverride: String?
+    }
+
+    /// v1 → current: same repos/tasks; no override configured. Existing
+    /// tasks keep their persisted per-workspace worktreePath values, so old
+    /// worktree locations keep working untouched.
     private static func migrateV1(_ stored: StoredConfigV1) -> LighthouseConfig {
-        LighthouseConfig(repos: stored.repos, tasks: stored.tasks)
+        LighthouseConfig(repos: stored.repos, tasks: stored.tasks, worktreesRootOverride: nil)
     }
 }

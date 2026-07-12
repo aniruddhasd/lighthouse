@@ -26,8 +26,6 @@ final class AppRuntime {
     init(
         configDirectory: URL = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Lighthouse", isDirectory: true),
-        worktreesRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Lighthouse", isDirectory: true)
     ) {
         // Socket at the config-directory ROOT: unix socket paths cap at ~104
@@ -35,7 +33,6 @@ final class AppRuntime {
         listener = AttentionSocketListener(directory: configDirectory, adapter: adapter)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
-            worktreesRoot: worktreesRoot,
             socketPath: listener.socketURL,
             adapter: adapter)
         do {
