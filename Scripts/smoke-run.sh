@@ -15,6 +15,13 @@ fi
 package_root="$(cd "$(dirname "$0")/.." && pwd)"
 socket="$HOME/Library/Application Support/Lighthouse/attention.sock"
 
+# Supply-chain gates up front (make-app re-runs them too, and its build uses
+# --force-resolved-versions — this makes the gate independently fail fast).
+"$package_root/Scripts/verify-vendored-assets.sh" \
+    "$package_root/Sources/LighthouseApp/Resources/diff2html"
+"$package_root/Scripts/verify-pins.sh" \
+    "$package_root/Package.resolved" "$package_root/Scripts/pinned-revisions.txt"
+
 "$package_root/Scripts/make-app.sh" release
 
 "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" &

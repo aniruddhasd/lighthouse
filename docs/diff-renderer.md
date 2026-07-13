@@ -18,16 +18,27 @@ editor-oriented, wildly over-scoped for a read-only review pane.
 ## Vendored assets (pinned, committed)
 
 From `cdn.jsdelivr.net/npm/diff2html@3.4.56/bundles/`, committed at
-`Sources/LighthouseApp/Resources/diff2html/`:
+`Sources/LighthouseApp/Resources/diff2html/`.
 
-```
-a2110a09cee157bd5466da77be02107ac81a0baa2bc1f3fe81aac8183314598e  diff2html.min.js
-d3ecc0e9b2b1e5c8466c19de29bed052fd0863475d25829ecc858446efded372  diff2html.min.css
-```
+The canonical sha256 checksums live in
+`Sources/LighthouseApp/Resources/diff2html/SHA256SUMS` — the single source of
+truth, asserted on every build by `Scripts/verify-vendored-assets.sh` (run
+from `make-app.sh` and `smoke-run.sh`). They are deliberately NOT duplicated
+here; read that file for the exact hashes.
 
 The base bundle is used (not `diff2html-ui`, which pulls highlight.js) —
 no syntax highlighting in v1, no extra attack surface. To upgrade: verify
-the new version on the npm registry, re-download, update these checksums.
+the new version on the npm registry, re-download, and update `SHA256SUMS`.
+
+## Dependency pins (supply-chain lock)
+
+`swift build --force-resolved-versions` builds only from `Package.resolved`
+and errors on manifest/lockfile disagreement (no silent re-resolution).
+Beyond that, `Scripts/verify-pins.sh` asserts the resolved revisions against
+the canonical known-good values in `Scripts/pinned-revisions.txt`. A drifted
+pin fails the build and points at the upgrade ritual (`/dep-audit` →
+review the upstream diff → re-pin in `Package.swift` → update
+`pinned-revisions.txt`) — never blind acceptance.
 
 ## Security posture (spec §8 — diff content is untrusted repo content)
 

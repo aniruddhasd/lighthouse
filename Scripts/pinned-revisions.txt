@@ -1,0 +1,10 @@
+# Canonical known-good pinned dependency revisions (supply-chain lock).
+# Single source of truth — Package.resolved is asserted against THIS file by
+# Scripts/verify-pins.sh in make-app.sh and smoke-run.sh. Drift is a loud
+# failure: do NOT edit these to match a changed Package.resolved. To upgrade a
+# dependency, run the ritual — /dep-audit, review the upstream diff, re-pin
+# in Package.swift, then update this file — never blindly accept a new hash.
+#
+# Format: <package identity> <full git revision>
+swiftterm 8e7a1e154f470e19c709a00a8768df348ba5fc43
+swift-argument-parser 6a52f3251125d74daf04fcbd5e6f08a75d074382
