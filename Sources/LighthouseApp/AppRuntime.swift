@@ -13,6 +13,9 @@ import LighthouseTaskEngine
 final class AppRuntime {
     let model: AppModel
     let registry = SessionRegistry()
+    /// Routes wheel events over terminals into mouse reports when the TUI
+    /// owns the mouse (see LighthouseTerminalView).
+    private let wheelMonitor = WheelReportMonitor()
     /// Single GitClient shared by the model and the review pane.
     let git = GitClient()
     private let listener: AttentionSocketListener
@@ -89,9 +92,19 @@ final class AppRuntime {
     /// quit stays unconfirmed and the user's config is untouched.
     private func setUpGeometryProbeIfRequested() {
         guard GeometryDebug.enabled else { return }
+        // LIGHTHOUSE_DEBUG_REVIEWPANE=<repo path> gives the probe task a real
+        // workspace (an outside-created fixture repo on branch "task",
+        // base "main") so the review pane renders populated in the gate.
+        var workspaces: [Workspace] = []
+        if let repoPath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_REVIEWPANE"] {
+            let repo = RepoConfig(path: repoPath, baseBranch: "main")
+            model.insertEphemeralRepo(repo)
+            workspaces = [Workspace(
+                repoId: repo.id, worktreePath: repoPath, mergeState: .unmerged)]
+        }
         let probe = TaskRecord(
             name: "geometry-probe", branch: "debug/geometry-probe",
-            adapterKind: "debug", sessionRef: nil, state: .done, workspaces: [])
+            adapterKind: "debug", sessionRef: nil, state: .done, workspaces: workspaces)
         model.insertEphemeralTask(probe)
         let plan = LaunchPlan(
             executable: "/bin/cat", arguments: [], environment: [:],

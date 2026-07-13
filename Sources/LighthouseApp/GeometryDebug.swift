@@ -17,8 +17,15 @@ import SwiftUI
 enum GeometryDebug {
     static let enabled = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_GEOMETRY"] == "1"
 
+    /// The last window content size a sample line was actually EMITTED for —
+    /// the driver keys its phases off this instead of wall-clock settling
+    /// (SwiftUI coalesces layout passes; a size read from the window can be
+    /// true without any layout ever running at it). Main-thread only.
+    nonisolated(unsafe) static var lastLoggedWindowSize: NSSize?
+
     static func log(window: NSSize, container: NSRect, terminal: NSRect) {
         guard enabled else { return }
+        lastLoggedWindowSize = window
         let line = String(
             format: "GEOMETRY window=%.0fx%.0f container=%.0fx%.0f terminal=%.0fx%.0f terminalOrigin=%.0f,%.0f\n",
             window.width, window.height,
@@ -61,19 +68,35 @@ final class GeometryResizeDriver {
         Task { @MainActor [weak window] in
             // Phase A — normalize: macOS saved-state restoration carries the
             // PREVIOUS run's resized frame into this one, so the starting
-            // size is unpredictable run-to-run. Drive to a known baseline
-            // first (width above SwiftUI's observed ~1436 minimum).
-            let baseline = NSSize(width: 1500, height: 800)
-            for _ in 1...8 {
+            // size is unpredictable run-to-run. Drive toward a baseline
+            // (SwiftUI clamps to its own content minimums — that is fine,
+            // any stable size works), then WAIT until a sample has actually
+            // been LOGGED at the current size: a size read off the window
+            // can be true without any layout pass ever running at it
+            // (coalescing), and the parser can only assert on logged samples.
+            let requested = NSSize(width: 1500, height: 800)
+            for _ in 1...4 {
                 guard let window else { return }
-                window.setContentSize(baseline)
+                window.setContentSize(requested)
                 try? await Task.sleep(for: .milliseconds(250))
-                if abs(window.contentLayoutRect.width - baseline.width) <= 2 { break }
+                if abs(window.contentLayoutRect.width - requested.width) <= 2 { break }
             }
             guard let window else { return }
-            let initial = window.contentLayoutRect.size
+            var initial = window.contentLayoutRect.size
+            for _ in 1...20 {
+                if let logged = GeometryDebug.lastLoggedWindowSize,
+                   abs(logged.width - initial.width) <= 2,
+                   abs(logged.height - initial.height) <= 2 {
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+                initial = window.contentLayoutRect.size
+            }
+            if let logged = GeometryDebug.lastLoggedWindowSize {
+                // The parser asserts on logged samples; report THAT size.
+                initial = logged
+            }
             GeometryDebug.stage("baseline content=\(Int(initial.width))x\(Int(initial.height))")
-            try? await Task.sleep(for: .milliseconds(750)) // sample the baseline
 
             // Phase B — produce a DIFFERENT size. Exact targets are
             // SwiftUI-clamped (min content width ~1436 observed), so success

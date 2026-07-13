@@ -39,13 +39,13 @@ final class SessionRegistry {
 @MainActor
 final class SessionController: NSObject {
     let taskId: UUID
-    let terminalView: LocalProcessTerminalView
+    let terminalView: LighthouseTerminalView
     private(set) var isRunning = false
     var onExit: (@MainActor (UUID, Int32?) -> Void)?
 
     init(taskId: UUID) {
         self.taskId = taskId
-        self.terminalView = LocalProcessTerminalView(
+        self.terminalView = LighthouseTerminalView(
             frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         super.init()
         terminalView.processDelegate = self

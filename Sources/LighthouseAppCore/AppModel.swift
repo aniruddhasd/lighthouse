@@ -33,8 +33,10 @@ public final class AppModel {
     public private(set) var attention: [UUID: TaskAttentionState] = [:]
     /// Task ids with a live pty right now — maintained by the session layer.
     public private(set) var liveSessions: Set<UUID> = []
-    /// Debug-only tasks (geometry probe): visible to the UI, never persisted.
+    /// Debug-only tasks/repos (geometry + review probes): visible to the
+    /// UI, never persisted.
     private var ephemeralTaskIds: Set<UUID> = []
+    private var ephemeralRepoIds: Set<UUID> = []
 
     /// Global worktrees-root override (config schema v2). nil = per-repo
     /// default: `<repo parent>/lighthouse-worktrees/<task>/<repo>`.
@@ -84,9 +86,16 @@ public final class AppModel {
         attention[task.id] = task.state
     }
 
+    /// Debug-only sibling of insertEphemeralTask for the repo the probe's
+    /// workspace points at — visible to the UI, excluded from every save.
+    public func insertEphemeralRepo(_ repo: RepoConfig) {
+        ephemeralRepoIds.insert(repo.id)
+        repos.append(repo)
+    }
+
     private func persist() throws {
         try store.save(LighthouseConfig(
-            repos: repos,
+            repos: repos.filter { !ephemeralRepoIds.contains($0.id) },
             tasks: tasks.filter { !ephemeralTaskIds.contains($0.id) },
             worktreesRootOverride: worktreesRootOverride))
     }

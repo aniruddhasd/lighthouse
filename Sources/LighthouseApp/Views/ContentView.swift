@@ -58,7 +58,7 @@ struct ContentView: View {
     }
 }
 
-/// Terminal on the left; the review pane (build step 5) is a placeholder.
+/// Terminal on the left; the live review pane on the right.
 struct TaskDetailView: View {
     @Environment(AppRuntime.self) private var runtime
     let task: TaskRecord
@@ -68,12 +68,11 @@ struct TaskDetailView: View {
             terminalPane
                 .frame(minWidth: 420)
                 .debugSize("terminalPane")
-            ContentUnavailableView(
-                "Review pane",
-                systemImage: "doc.text.magnifyingglass",
-                description: Text("Live diff-vs-base lands in a later step."))
-            .frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
-            .debugSize("reviewPane")
+            ReviewPaneView(task: task)
+                // Expand, never ideal-size: this child's ideal height is what
+                // collapsed the whole split before (see comment below).
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                .debugSize("reviewPane")
         }
         // Root cause of the sizing bug (pinned by the geometry probes,
         // 2026-07-12): HSplitView sizes itself to its children's IDEAL

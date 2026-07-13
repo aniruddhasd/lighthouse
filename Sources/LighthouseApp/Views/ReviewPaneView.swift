@@ -110,26 +110,43 @@ final class ReviewPaneModel {
             renderError = nil
             try DiffWebViewFactory.load(
                 page: html, into: webView, renderDirectory: renderDirectory)
+            ReviewDebug.stage(
+                "populated files=\(diff.entries.count) untracked=\(diff.untracked.count)")
         } catch {
             renderError = String(describing: error)
+            ReviewDebug.stage("error \(error)")
         }
     }
 }
 
+/// Watcher lifecycle contract: the FSEvents watcher runs exactly while this
+/// pane is on screen for the SELECTED task and the app is active. Task
+/// switches recreate the pane (view identity is the task id) — onDisappear
+/// stops the old watcher, onAppear starts the new one; backgrounding the
+/// app stops it, foregrounding restarts it. Never more than one watcher.
 struct ReviewPaneView: View {
     @Environment(AppRuntime.self) private var runtime
+    @Environment(\.scenePhase) private var scenePhase
     let task: TaskRecord
     @State private var model: ReviewPaneModel?
 
     var body: some View {
-        Group {
+        // ZStack, NOT Group: Group is transparent, so modifiers attach to
+        // each branch — the ProgressView→content switch re-fired onAppear,
+        // recreating the model in an endless loop (caught by the REVIEWPANE
+        // gate, 2026-07-13). A real container fires appear once; the guard
+        // is belt-and-braces.
+        ZStack {
             if let model {
                 ReviewPaneContent(model: model)
             } else {
                 ProgressView()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            guard model == nil else { return }
+            ReviewDebug.stage("appear task=\(task.name)")
             let model = ReviewPaneModel(
                 task: task, repos: runtime.model.repos, git: runtime.git)
             self.model = model
@@ -139,6 +156,24 @@ struct ReviewPaneView: View {
             model?.stop()
             model = nil
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                model?.start()
+            } else {
+                model?.stop()
+            }
+        }
+    }
+}
+
+/// Stage logging for the REVIEWPANE gate; inert unless a debug env is set.
+enum ReviewDebug {
+    static let enabled = GeometryDebug.enabled
+        || ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_REVIEWPANE"] != nil
+
+    static func stage(_ message: String) {
+        guard enabled else { return }
+        FileHandle.standardOutput.write(Data("REVIEWPANE-STAGE \(message)\n".utf8))
     }
 }
 

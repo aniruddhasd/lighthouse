@@ -73,9 +73,32 @@ echo "SMOKE OK: launched, socket 0600, stayed alive, quit cleanly, socket unlink
 # window once so the check sees two widths. Every stage has its own deadline
 # and failure message; no fixed sleeps, no kill-and-hope. An isolated config
 # dir keeps the user's config and any live instance's socket untouched.
+# The feature must be wired, not just built: the placeholder must be gone
+# from the app target (regression check for the step-5 integration miss).
+if grep -rq "Live diff-vs-base lands in a later step" "$package_root/Sources/LighthouseApp"; then
+    echo "REVIEWPANE GATE: FAIL (placeholder still present in the app target)" >&2
+    exit 1
+fi
+
+# Fixture repo so the probe task's review pane has real content: one tracked
+# modification and one untracked file vs base.
+geometry_repo="$(mktemp -d)/repo"
+mkdir -p "$geometry_repo"
+git -C "$geometry_repo" init -q -b main
+git -C "$geometry_repo" config user.name smoke
+git -C "$geometry_repo" config user.email smoke@lighthouse.invalid
+git -C "$geometry_repo" config commit.gpgsign false
+printf 'base\n' > "$geometry_repo/tracked.txt"
+git -C "$geometry_repo" add tracked.txt
+git -C "$geometry_repo" commit -qm base
+git -C "$geometry_repo" checkout -qb task
+printf 'changed\n' >> "$geometry_repo/tracked.txt"
+printf 'brand new\n' > "$geometry_repo/untracked.txt"
+
 geometry_log="$(mktemp)"
 geometry_cfg="$(mktemp -d)"
-LIGHTHOUSE_DEBUG_GEOMETRY=1 LIGHTHOUSE_CONFIG_DIR="$geometry_cfg" \
+LIGHTHOUSE_DEBUG_GEOMETRY=1 LIGHTHOUSE_DEBUG_REVIEWPANE="$geometry_repo" \
+    LIGHTHOUSE_CONFIG_DIR="$geometry_cfg" \
     "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$geometry_log" 2>&1 &
 geo_pid=$!
 trap 'kill -9 "$geo_pid" 2>/dev/null || true; rm -rf "$geometry_cfg"' EXIT
@@ -117,6 +140,8 @@ baseline_size="$(sed -n 's/.*GEOMETRY-STAGE baseline content=\([0-9]*x[0-9]*\).*
 resized_size="$(sed -n 's/.*GEOMETRY-STAGE resize-applied observed=\([0-9]*x[0-9]*\).*/\1/p' "$geometry_log" | head -1)"
 wait_for 10 "no-layout-sample-at-baseline-size-$baseline_size" "GEOMETRY window=$baseline_size "
 wait_for 10 "no-layout-sample-at-resized-size-$resized_size" "GEOMETRY window=$resized_size "
+# The review pane must have rendered REAL content in the running app.
+wait_for 15 "review-pane-never-populated" "REVIEWPANE-STAGE populated files="
 sleep 0.5
 
 kill -TERM "$geo_pid" 2>/dev/null || true
@@ -171,7 +196,22 @@ if not ok:
     sys.exit(1)
 print("GEOMETRY GATE: PASS")
 PY
+
+python3 - "$geometry_log" <<'PY'
+import re, sys
+populated = [m for l in open(sys.argv[1])
+             if (m := re.search(r"REVIEWPANE-STAGE populated files=(\d+) untracked=(\d+)", l))]
+assert populated, "populated line vanished"
+files, untracked = map(int, populated[-1].groups())
+print(f"REVIEWPANE populated: files={files} untracked={untracked}")
+if files >= 1 and untracked >= 1:
+    print("REVIEWPANE GATE: PASS")
+else:
+    print(f"REVIEWPANE GATE: FAIL (expected >=1 tracked and >=1 untracked, got {files}/{untracked})")
+    sys.exit(1)
+PY
 rm -f "$geometry_log"
+rm -rf "$(dirname "$geometry_repo")"
 
 # --- Diff render check: the untrusted-content escape gate ------------------
 # Repo file content is hostile input rendered into HTML (spec paragraph 8).
