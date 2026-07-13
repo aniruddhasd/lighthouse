@@ -77,23 +77,25 @@ struct ClaudeCodeAdapterTests {
 
     // MARK: Launch plans
 
-    @Test func launchPlanRunsThroughInteractiveLoginShell() throws {
+    @Test func launchPlanRunsPersistentInteractiveLoginShell() throws {
         let plan = try adapter.launchPlan(for: spec())
+        // Persistent shell: -l -i and NO -c/exec (2026-07-13). The claude
+        // command is typed in, so Claude's exit returns the user's prompt.
         #expect(plan.executable == "/bin/zsh")
-        #expect(plan.arguments.count == 4)
-        #expect(Array(plan.arguments.prefix(3)) == ["-l", "-i", "-c"])
-        #expect(plan.arguments[3].hasPrefix("exec "))
+        #expect(plan.arguments == ["-l", "-i"])
         #expect(plan.workingDirectory.path == "/tmp/wt/primary repo")
         #expect(plan.environment.isEmpty)
+        let command = try #require(plan.typedCommand)
+        #expect(!command.contains("exec"))
+        #expect(command.hasPrefix("'claude'") || command.hasPrefix("claude"))
     }
 
     @Test func launchPlanPreassignsSessionIdAsSessionRef() throws {
         let plan = try adapter.launchPlan(for: spec())
-        // sessionRef is a UUID and appears in the command via --session-id.
+        let command = try #require(plan.typedCommand)
         #expect(UUID(uuidString: plan.sessionRef) != nil)
-        #expect(plan.arguments[3].contains("--session-id"))
-        #expect(plan.arguments[3].contains(plan.sessionRef))
-        // Two launches never share a session.
+        #expect(command.contains("--session-id"))
+        #expect(command.contains(plan.sessionRef))
         let second = try adapter.launchPlan(for: spec())
         #expect(second.sessionRef != plan.sessionRef)
     }
@@ -101,23 +103,21 @@ struct ClaudeCodeAdapterTests {
     @Test func resumePlanUsesStoredSessionRef() throws {
         let ref = "0e984725-c51c-4bf4-9960-e1c80e27aba0"
         let plan = try adapter.resumePlan(for: spec(), sessionRef: ref)
-        #expect(plan.arguments[3].contains("--resume"))
-        #expect(plan.arguments[3].contains(ref))
+        let command = try #require(plan.typedCommand)
+        #expect(command.contains("--resume"))
+        #expect(command.contains(ref))
         #expect(plan.sessionRef == ref)
-        #expect(!plan.arguments[3].contains("--session-id"))
+        #expect(!command.contains("--session-id"))
     }
 
     @Test func additionalWorktreesWithSpacesBecomeQuotedAddDirs() async throws {
         let plan = try adapter.launchPlan(for: spec(
             primary: "/tmp/wt/repo one",
             additional: ["/tmp/wt/repo two", "/tmp/wt/repo three (copy)"]))
-        let command = plan.arguments[3]
-        // Prove word boundaries with a real shell: replace `exec claude`
-        // with printf and let the shell parse the exact command string.
-        // Probe with a plain (non-login) shell: quoting semantics are
-        // identical, and this avoids sourcing the developer's real rc files.
-        let probe = command.replacingOccurrences(
-            of: "exec 'claude'", with: "printf '[%s]'")
+        let command = try #require(plan.typedCommand)
+        // Prove word boundaries with a real shell: the typed command, with
+        // `claude` swapped for printf, must parse into exact words.
+        let probe = command.replacingOccurrences(of: "'claude'", with: "printf '[%s]'")
         let result = try await ProcessRunner.run(
             executable: "/bin/zsh", arguments: ["-c", probe],
             workingDirectory: FileManager.default.temporaryDirectory)
@@ -125,16 +125,31 @@ struct ClaudeCodeAdapterTests {
         #expect(words.contains("[--add-dir][/tmp/wt/repo two][--add-dir][/tmp/wt/repo three (copy)]"))
     }
 
-    @Test func hostileWorktreePathsCannotEscapeTheCommand() async throws {
+    @Test func hostileWorktreePathsCannotEscapeTheTypedCommand() async throws {
         let evil = "/tmp/x'; touch /tmp/lighthouse-pwned; '"
         let plan = try adapter.launchPlan(for: spec(additional: [evil]))
-        let probe = plan.arguments[3].replacingOccurrences(
-            of: "exec 'claude'", with: "printf '[%s]'")
+        let command = try #require(plan.typedCommand)
+        let probe = command.replacingOccurrences(of: "'claude'", with: "printf '[%s]'")
         let result = try await ProcessRunner.run(
             executable: "/bin/sh", arguments: ["-c", probe],
             workingDirectory: FileManager.default.temporaryDirectory)
-        // The path arrives as ONE word, verbatim; nothing was executed.
         #expect(String(decoding: result.stdout, as: UTF8.self).contains("[\(evil)]"))
         #expect(!FileManager.default.fileExists(atPath: "/tmp/lighthouse-pwned"))
+    }
+
+    @Test func hostileTaskNameInTypedCommandCannotBreakOut() async throws {
+        // The task name flows into `-n <name>`; a hostile name must stay one
+        // word (composed by ShellQuoter).
+        let evil = "task$(touch /tmp/lighthouse-name-pwned)`id`; rm -rf /"
+        let plan = try adapter.launchPlan(for: SessionSpec(
+            primaryWorktree: URL(fileURLWithPath: "/tmp/wt"),
+            loginShell: "/bin/zsh", displayName: evil))
+        let command = try #require(plan.typedCommand)
+        let probe = command.replacingOccurrences(of: "'claude'", with: "printf '[%s]'")
+        let result = try await ProcessRunner.run(
+            executable: "/bin/sh", arguments: ["-c", probe],
+            workingDirectory: FileManager.default.temporaryDirectory)
+        #expect(String(decoding: result.stdout, as: UTF8.self).contains("[\(evil)]"))
+        #expect(!FileManager.default.fileExists(atPath: "/tmp/lighthouse-name-pwned"))
     }
 }

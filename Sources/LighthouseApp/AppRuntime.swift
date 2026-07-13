@@ -174,7 +174,9 @@ final class AppRuntime {
             executable: "/bin/cat", arguments: [], environment: [:],
             workingDirectory: FileManager.default.temporaryDirectory,
             sessionRef: "geometry-probe")
-        _ = registry.start(taskId: probe.id, plan: plan) { _, _ in }
+        registry.open(taskId: probe.id, tabId: TabID.agent, plan: plan) { _, _ in }
+        tabs[probe.id] = [TerminalTab(id: TabID.agent, title: "Agent", isAgent: true)]
+        focusedTab[probe.id] = TabID.agent
         selectedTaskId = probe.id
         // The scripted resize is event-driven from the first real layout
         // pass (GeometryResizeDriver) — a wall-clock timer here raced window
@@ -200,6 +202,18 @@ final class AppRuntime {
         }
     }
 
+    // MARK: - Terminal tabs (UI-only, not persisted; die with the app)
+
+    /// Ordered terminal tabs per task; the first is always the agent tab.
+    var tabs: [UUID: [TerminalTab]] = [:]
+    /// Focused tab per task.
+    var focusedTab: [UUID: UUID] = [:]
+
+    private func loginShellURL(for task: TaskRecord) -> URL? {
+        guard let workspace = task.workspaces.first else { return nil }
+        return workspace.worktreeURL
+    }
+
     // MARK: - Task + session flows
 
     func createTaskAndStartSession(name: String, branch: String, repoIds: [UUID]) async {
@@ -207,7 +221,7 @@ final class AppRuntime {
             let (task, plan) = try await model.createTask(
                 name: name, branch: branch, repoIds: repoIds)
             await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
-            startSession(taskId: task.id, plan: plan)
+            startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
         } catch let failure as TaskCreationFailure {
             lastError = FailureDescriber.describe(failure)
@@ -218,26 +232,82 @@ final class AppRuntime {
         }
     }
 
-    /// Resume: `claude --resume <id>`. A dead/unknown id fails fast and
-    /// visibly inside the terminal (verified: "No conversation found…",
-    /// exit 1) — the exit lands as sessionDied, and resume stays available.
+    /// Resume `claude --resume <id>`. If the agent shell is still alive (Claude
+    /// exited to the prompt), the command is TYPED into it; otherwise a fresh
+    /// agent shell tab is opened and the command typed there. A dead/unknown
+    /// id fails visibly inside the terminal ("No conversation found…") — the
+    /// shell survives, so the user is not trapped.
     func resumeSession(for task: TaskRecord) {
         do {
             guard let plan = try model.resumePlan(for: task) else {
                 lastError = "\(task.name) has no stored session to resume."
                 return
             }
-            startSession(taskId: task.id, plan: plan)
+            if let controller = registry.agentController(taskId: task.id), controller.isRunning,
+               let command = plan.typedCommand {
+                registry.runCommand(taskId: task.id, tabId: TabID.agent, command: command)
+                model.noteSessionStarted(taskId: task.id)
+            } else {
+                startAgentSession(taskId: task.id, plan: plan) // calls noteSessionStarted
+            }
         } catch {
             lastError = String(describing: error)
         }
     }
 
-    private func startSession(taskId: UUID, plan: LaunchPlan) {
-        _ = registry.start(taskId: taskId, plan: plan) { [weak self] id, _ in
-            self?.model.noteSessionEnded(taskId: id)
+    private func startAgentSession(taskId: UUID, plan: LaunchPlan) {
+        registry.open(taskId: taskId, tabId: TabID.agent, plan: plan) { [weak self] key, _ in
+            // The agent SHELL exited (user typed `exit`) — the tab is gone.
+            // Not the agent-end signal (that is the SessionEnd hook); this
+            // keeps liveSessions accurate and removes the tab.
+            self?.handleTerminalExit(key)
         }
+        tabs[taskId, default: []].removeAll { $0.id == TabID.agent }
+        tabs[taskId, default: []].insert(TerminalTab(id: TabID.agent, title: "Agent", isAgent: true), at: 0)
+        focusedTab[taskId] = TabID.agent
         model.noteSessionStarted(taskId: taskId)
+    }
+
+    /// Cmd+T: a plain persistent login shell in the task's primary worktree —
+    /// no hooks, no session, no attention effect; dies with the app.
+    func openShellTab(for task: TaskRecord) {
+        guard let cwd = loginShellURL(for: task) else { return }
+        let tabId = UUID()
+        let plan = LaunchPlan(
+            executable: loginShell, arguments: ["-l", "-i"], environment: [:],
+            workingDirectory: cwd, sessionRef: "", typedCommand: nil)
+        registry.open(taskId: task.id, tabId: tabId, plan: plan) { [weak self] key, _ in
+            self?.handleTerminalExit(key)
+        }
+        let existing = tabs[task.id]?.filter { !$0.isAgent }.count ?? 0
+        tabs[task.id, default: []].append(
+            TerminalTab(id: tabId, title: "shell \(existing + 1)", isAgent: false))
+        focusedTab[task.id] = tabId
+    }
+
+    /// Cmd+W: close the focused non-agent tab (the agent tab is closed only
+    /// via task removal / explicit confirmation elsewhere).
+    func closeFocusedTab(for taskId: UUID) {
+        guard let focused = focusedTab[taskId], focused != TabID.agent else { return }
+        closeTab(taskId: taskId, tabId: focused)
+    }
+
+    func closeTab(taskId: UUID, tabId: UUID) {
+        registry.closeTab(taskId: taskId, tabId: tabId)
+        tabs[taskId]?.removeAll { $0.id == tabId }
+        if focusedTab[taskId] == tabId {
+            focusedTab[taskId] = tabs[taskId]?.first?.id
+        }
+    }
+
+    private func handleTerminalExit(_ key: TabKey) {
+        if key.tabId == TabID.agent {
+            model.noteSessionEnded(taskId: key.taskId)
+        }
+        tabs[key.taskId]?.removeAll { $0.id == key.tabId }
+        if focusedTab[key.taskId] == key.tabId {
+            focusedTab[key.taskId] = tabs[key.taskId]?.first?.id
+        }
     }
 
     func removeTask(_ task: TaskRecord, mode: TaskRemovalMode) async -> Bool {
@@ -245,7 +315,9 @@ final class AppRuntime {
             if let ref = task.sessionRef {
                 await listener.unregister(sessionRef: ref)
             }
-            registry.discard(taskId: task.id)
+            registry.discardTask(taskId: task.id)
+            tabs[task.id] = nil
+            focusedTab[task.id] = nil
             _ = try await model.removeTask(task, mode: mode)
             if selectedTaskId == task.id { selectedTaskId = nil }
             return true

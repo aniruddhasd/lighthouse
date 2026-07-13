@@ -24,7 +24,7 @@ final class WheelReportTests {
         try? FileManager.default.removeItem(at: captureFile)
     }
 
-    private func startCapturingController() -> SessionController {
+    private func startCapturingController() -> TerminalController {
         // raw -echo: like a real TUI, so report bytes (which carry no
         // newline) leave the tty's line buffer immediately instead of
         // being held and echoed.
@@ -34,7 +34,7 @@ final class WheelReportTests {
             environment: [:],
             workingDirectory: FileManager.default.temporaryDirectory,
             sessionRef: "wheel-test")
-        return registry.start(taskId: taskId, plan: plan) { _, _ in }
+        return registry.open(taskId: taskId, tabId: TabID.agent, plan: plan) { _, _ in }
     }
 
     private func capturedBytes(deadline: Duration = .seconds(3)) async throws -> Data {
@@ -54,7 +54,7 @@ final class WheelReportTests {
 
     @Test func withoutMouseTrackingWheelSendsNothingToThePty() async throws {
         let controller = startCapturingController()
-        defer { registry.discard(taskId: taskId) }
+        defer { registry.discardTask(taskId: taskId) }
         // mouseMode is .off by default — the core must decline.
         let consumed = controller.terminalView.sendWheelReportIfTrackingMouse(
             deltaY: 3, at: (col: 0, row: 0))
@@ -67,7 +67,7 @@ final class WheelReportTests {
 
     @Test func wheelBecomesSGRReportsUnderClaudeCodeModes() async throws {
         let controller = startCapturingController()
-        defer { registry.discard(taskId: taskId) }
+        defer { registry.discardTask(taskId: taskId) }
         // Simulate the child enabling Claude Code's modes (any-event
         // tracking + SGR), as if these bytes came from the pty.
         controller.terminalView.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
@@ -86,7 +86,7 @@ final class WheelReportTests {
 
     @Test func wheelDownSendsButton65() async throws {
         let controller = startCapturingController()
-        defer { registry.discard(taskId: taskId) }
+        defer { registry.discardTask(taskId: taskId) }
         controller.terminalView.feed(text: "\u{1b}[?1000h\u{1b}[?1006h") // plain vt200 tracking
 
         let consumed = controller.terminalView.sendWheelReportIfTrackingMouse(
@@ -101,7 +101,7 @@ final class WheelReportTests {
 
     @Test func constructedScrollEventFlowsThroughHandleWheel() async throws {
         let controller = startCapturingController()
-        defer { registry.discard(taskId: taskId) }
+        defer { registry.discardTask(taskId: taskId) }
         controller.terminalView.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
 
         let cgEvent = try #require(CGEvent(

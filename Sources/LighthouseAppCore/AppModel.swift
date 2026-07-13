@@ -303,9 +303,12 @@ public final class AppModel {
 
     // MARK: - Derivations for the UI
 
-    /// A task can be resumed when it has a persisted session and no live pty.
+    /// A task can be resumed whenever it has a persisted session and the agent
+    /// is not actively working. With persistent shells the pty outlives
+    /// Claude, so "no live pty" is no longer the signal — the runtime resumes
+    /// by typing `claude --resume` into the live shell (or a fresh tab).
     public func canResume(_ task: TaskRecord) -> Bool {
-        task.sessionRef != nil && !liveSessions.contains(task.id)
+        task.sessionRef != nil && attentionState(of: task.id) != .working
     }
 
     /// Quitting kills in-flight agent work (pty death); these tasks make the

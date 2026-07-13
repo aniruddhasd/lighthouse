@@ -159,8 +159,9 @@ final class AppModelTests {
         #expect(UUID(uuidString: plan.sessionRef) != nil)
         #expect(model.tasks == [task])
 
-        // The command: session id, display name, sibling add-dir.
-        let command = plan.arguments[3]
+        // The typed command: session id, display name, sibling add-dir.
+        let command = try #require(plan.typedCommand)
+        #expect(plan.arguments == ["-l", "-i"])
         #expect(command.contains("--session-id"))
         #expect(command.contains("-n"))
         #expect(command.contains("'cross repo'"))
@@ -268,13 +269,18 @@ final class AppModelTests {
     // MARK: Derivations
 
     @Test func resumeAffordanceMatrix() async throws {
+        // Persistent-shell model: resume is available whenever there's a
+        // session and the agent is not actively working (the runtime types
+        // `claude --resume` into the live shell, or opens a new tab).
         let task = try await makeTask()
-        // sessionRef set, no live pty → resumable (the relaunch case).
-        #expect(model.canResume(task))
-        model.noteSessionStarted(taskId: task.id)
-        #expect(!model.canResume(task))
-        model.noteSessionEnded(taskId: task.id)
-        #expect(model.canResume(task))
+        #expect(model.canResume(task))                       // freshly created, done
+        model.noteSessionStarted(taskId: task.id)            // launching → working
+        #expect(!model.canResume(task))                      // not while working
+        model.apply(TaskAttentionSignal(
+            taskId: task.id, sessionRef: task.sessionRef!, event: .agentStopped))
+        #expect(model.canResume(task))                       // agent idle → resumable
+        model.noteSessionEnded(taskId: task.id)              // shell exited → dirty
+        #expect(model.canResume(task))                       // still resumable
         // A task with no sessionRef is never resumable.
         var bare = task
         bare.sessionRef = nil

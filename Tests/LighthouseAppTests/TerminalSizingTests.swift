@@ -20,7 +20,7 @@ import LighthouseAdapter
 struct TerminalSizingTests {
 
     @Test func embeddedTerminalFillsContainerAndTracksResize() {
-        let controller = SessionController(taskId: UUID())
+        let controller = TerminalController(key: TabKey(taskId: UUID(), tabId: TabID.agent))
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
 
         TerminalHostView.embed(controller.terminalView, in: container)
@@ -36,7 +36,7 @@ struct TerminalSizingTests {
     @Test func widerFrameMeansMoreTerminalColumns() {
         // The grid must reflow with geometry — this is what makes the TUI
         // usable, not just the pixels.
-        let controller = SessionController(taskId: UUID())
+        let controller = TerminalController(key: TabKey(taskId: UUID(), tabId: TabID.agent))
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         TerminalHostView.embed(controller.terminalView, in: container)
         let narrowCols = controller.terminalView.getTerminal().cols
@@ -50,7 +50,7 @@ struct TerminalSizingTests {
     @Test func reembeddingIntoANewContainerAdoptsTheSameView() {
         // Task switch: SwiftUI builds a fresh container; the RETAINED view
         // moves over — never a new terminal instance.
-        let controller = SessionController(taskId: UUID())
+        let controller = TerminalController(key: TabKey(taskId: UUID(), tabId: TabID.agent))
         let first = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
         TerminalHostView.embed(controller.terminalView, in: first)
         let instanceBefore = ObjectIdentifier(controller.terminalView)
@@ -63,7 +63,7 @@ struct TerminalSizingTests {
         #expect(controller.terminalView.frame == second.bounds)
     }
 
-    @Test func registryRetainsControllerAndViewAcrossStarts() {
+    @Test func registryRetainsControllerAndViewAcrossReopens() {
         let registry = SessionRegistry()
         let taskId = UUID()
         let plan = LaunchPlan(
@@ -71,15 +71,37 @@ struct TerminalSizingTests {
             workingDirectory: FileManager.default.temporaryDirectory,
             sessionRef: "test-session")
 
-        let first = registry.start(taskId: taskId, plan: plan) { _, _ in }
+        let first = registry.open(taskId: taskId, tabId: TabID.agent, plan: plan) { _, _ in }
         let viewBefore = ObjectIdentifier(first.terminalView)
-        defer { registry.discard(taskId: taskId) }
+        defer { registry.discardTask(taskId: taskId) }
 
-        // A second start (the resume path) must reuse controller AND view —
-        // recreating either would orphan the pty or drop scrollback.
-        let second = registry.start(taskId: taskId, plan: plan) { _, _ in }
+        // Reopening the same tab must reuse controller AND view — recreating
+        // either would orphan the pty or drop scrollback.
+        let second = registry.open(taskId: taskId, tabId: TabID.agent, plan: plan) { _, _ in }
         #expect(first === second)
         #expect(ObjectIdentifier(second.terminalView) == viewBefore)
-        #expect(registry.controller(for: taskId) === first)
+        #expect(registry.agentController(taskId: taskId) === first)
+    }
+
+    @Test func distinctTabsGetDistinctRetainedTerminals() {
+        let registry = SessionRegistry()
+        let taskId = UUID()
+        let shellId = UUID()
+        let plan = LaunchPlan(
+            executable: "/bin/cat", arguments: [], environment: [:],
+            workingDirectory: FileManager.default.temporaryDirectory, sessionRef: "")
+        defer { registry.discardTask(taskId: taskId) }
+
+        let agent = registry.open(taskId: taskId, tabId: TabID.agent, plan: plan) { _, _ in }
+        let shell = registry.open(taskId: taskId, tabId: shellId, plan: plan) { _, _ in }
+        #expect(agent !== shell)
+        #expect(ObjectIdentifier(agent.terminalView) != ObjectIdentifier(shell.terminalView))
+        // Each key resolves to its own retained instance across lookups.
+        #expect(registry.controller(taskId: taskId, tabId: shellId) === shell)
+        #expect(registry.agentController(taskId: taskId) === agent)
+        // Closing one tab leaves the other's terminal instance intact.
+        registry.closeTab(taskId: taskId, tabId: shellId)
+        #expect(registry.controller(taskId: taskId, tabId: shellId) == nil)
+        #expect(registry.agentController(taskId: taskId) === agent)
     }
 }

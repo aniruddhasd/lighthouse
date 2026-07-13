@@ -3,12 +3,19 @@ import LighthouseTaskEngine
 
 /// Everything the pty layer needs to start an agent session. The adapter
 /// BUILDS this; it never spawns the interactive session itself.
+///
+/// The pty runs a PERSISTENT interactive login shell (`executable` +
+/// `arguments`), and the agent is launched by TYPING `typedCommand` into that
+/// shell (2026-07-13). Rationale: `exec claude` replaced the shell, so when
+/// Claude exited the pty died and the terminal became a corpse — the opposite
+/// of a real terminal. With a persistent shell, Claude exits back to the
+/// user's prompt in the worktree, with the same per-folder account env (the
+/// `.zshrc` account selector applies to the interactive shell identically).
 public struct LaunchPlan: Sendable, Equatable {
     /// Executable to spawn (for Claude Code: the user's login shell).
     public let executable: String
-    /// Argument array for the executable. Never interpolated into a shell by
-    /// the consumer — where a shell command string exists, it is one element
-    /// of this array, built by ShellQuoter.
+    /// Argument array for the executable — the persistent-shell flags
+    /// (`-l -i`), NOT `-c <command>`. Never a shell string.
     public let arguments: [String]
     /// Extra environment merged over the inherited environment by the pty layer.
     public let environment: [String: String]
@@ -16,16 +23,22 @@ public struct LaunchPlan: Sendable, Equatable {
     /// The session reference to persist on the task (deterministic at launch
     /// when the agent supports pre-assigned session IDs).
     public let sessionRef: String
+    /// The command to TYPE into the shell after it starts (the pty layer adds
+    /// the trailing newline). ShellQuoter-composed — every argument is one
+    /// shell word, so task/session names never break out. nil for a plain
+    /// shell tab.
+    public let typedCommand: String?
 
     public init(
         executable: String, arguments: [String], environment: [String: String],
-        workingDirectory: URL, sessionRef: String
+        workingDirectory: URL, sessionRef: String, typedCommand: String? = nil
     ) {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.sessionRef = sessionRef
+        self.typedCommand = typedCommand
     }
 }
 

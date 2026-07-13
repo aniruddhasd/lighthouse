@@ -3,75 +3,130 @@ import Foundation
 import LighthouseAdapter
 import SwiftTerm
 
-/// Owns one terminal view + pty per task. Lives OUTSIDE the SwiftUI view
-/// tree on purpose: switching tasks swaps which NSView is displayed, but the
-/// controller (and its child process) is retained here, keyed by task id —
-/// sessions keep running while unfocused (spec §3).
+/// A terminal's identity: which task, and which tab within it. The agent tab
+/// uses the well-known `TabID.agent`; extra shell tabs get fresh UUIDs.
+struct TabKey: Hashable {
+    let taskId: UUID
+    let tabId: UUID
+}
+
+enum TabID {
+    /// Stable id for a task's single agent tab (spec: one agent session per
+    /// task — the multi-session non-goal stands; extra tabs are plain shells).
+    static let agent = UUID(uuidString: "A6E17000-0000-4000-8000-000000000001")!
+}
+
+/// A terminal tab under a task (UI model; not persisted). The first tab is
+/// the agent session; the rest are plain shells opened with Cmd+T.
+struct TerminalTab: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    let isAgent: Bool
+}
+
+/// Owns one terminal view + persistent shell pty per (task, tab). Lives
+/// OUTSIDE the SwiftUI view tree: switching tasks/tabs swaps which NSView is
+/// displayed, but controllers (and their shells) are retained here so
+/// terminals keep running unfocused and survive tab switches (spec §3).
 @MainActor
 final class SessionRegistry {
-    private(set) var controllers: [UUID: SessionController] = [:]
+    private(set) var controllers: [TabKey: TerminalController] = [:]
 
-    /// Starts (or restarts, for resume) the session for a task.
-    func start(
-        taskId: UUID, plan: LaunchPlan,
-        onExit: @escaping @MainActor (UUID, Int32?) -> Void
-    ) -> SessionController {
-        let controller = controllers[taskId] ?? SessionController(taskId: taskId)
+    /// Time to let the interactive shell initialise (rc files, ZLE) before
+    /// typing the launch command — writing into the master before the line
+    /// editor is up can drop or mangle the input. Real payloads confirm the
+    /// command lands; the pty stays alive regardless.
+    static let commandTypingDelay: Duration = .milliseconds(500)
+
+    /// Opens (or returns) a terminal for a tab. The agent tab passes the
+    /// adapter's LaunchPlan (shell + typedCommand); shell tabs pass a plain
+    /// shell plan (typedCommand nil).
+    @discardableResult
+    func open(
+        taskId: UUID, tabId: UUID, plan: LaunchPlan,
+        onExit: @escaping @MainActor (TabKey, Int32?) -> Void
+    ) -> TerminalController {
+        let key = TabKey(taskId: taskId, tabId: tabId)
+        let controller = controllers[key] ?? TerminalController(key: key)
         controller.onExit = onExit
-        controllers[taskId] = controller
-        controller.start(plan: plan)
+        controllers[key] = controller
+        controller.start(plan: plan, typingDelay: Self.commandTypingDelay)
         return controller
     }
 
-    func controller(for taskId: UUID) -> SessionController? {
-        controllers[taskId]
+    func controller(taskId: UUID, tabId: UUID) -> TerminalController? {
+        controllers[TabKey(taskId: taskId, tabId: tabId)]
     }
 
-    func discard(taskId: UUID) {
-        controllers[taskId]?.terminateIfRunning()
-        controllers.removeValue(forKey: taskId)
+    func agentController(taskId: UUID) -> TerminalController? {
+        controller(taskId: taskId, tabId: TabID.agent)
     }
 
-    /// Types `text` into the task's pty WITHOUT submitting it (no trailing
-    /// newline) — the "Ask Claude to resolve" hatch leaves the composed
-    /// prompt for the user to review and press Enter (spec §2.5: the app
-    /// hands work to the agent, it does not act on the user's behalf).
-    /// Returns false if the task has no live session.
+    /// Closes one tab's terminal.
+    func closeTab(taskId: UUID, tabId: UUID) {
+        let key = TabKey(taskId: taskId, tabId: tabId)
+        controllers[key]?.terminateIfRunning()
+        controllers.removeValue(forKey: key)
+    }
+
+    /// Closes every tab of a task (task removal / app teardown).
+    func discardTask(taskId: UUID) {
+        for key in controllers.keys where key.taskId == taskId {
+            controllers[key]?.terminateIfRunning()
+            controllers.removeValue(forKey: key)
+        }
+    }
+
+    /// Types `text` into a live terminal WITHOUT a trailing newline (leaves it
+    /// for the user to review/submit — the "Ask Claude to resolve" hatch).
     @discardableResult
     func typeIntoSession(taskId: UUID, text: String) -> Bool {
-        guard let controller = controllers[taskId], controller.isRunning else { return false }
-        controller.terminalView.send(txt: text)
+        guard let controller = agentController(taskId: taskId), controller.isRunning else {
+            return false
+        }
+        controller.type(text: text)
+        return true
+    }
+
+    /// Runs a command line in a live terminal (adds the newline). Used by the
+    /// resume affordance to `claude --resume …` inside an existing agent
+    /// shell rather than spawning a fresh pty.
+    @discardableResult
+    func runCommand(taskId: UUID, tabId: UUID, command: String) -> Bool {
+        guard let controller = controller(taskId: taskId, tabId: tabId), controller.isRunning else {
+            return false
+        }
+        controller.type(text: command + "\n")
         return true
     }
 }
 
-/// One task's terminal: the SwiftTerm view, the pty process state, and the
-/// exit callback. The NSView is created once and reparented as the UI
-/// switches tasks — never recreated per render.
+/// One terminal: a SwiftTerm view backed by a persistent interactive login
+/// shell. The NSView is created once and reparented as the UI switches
+/// tasks/tabs — never recreated per render.
 @MainActor
-final class SessionController: NSObject {
-    let taskId: UUID
+final class TerminalController: NSObject {
+    let key: TabKey
     let terminalView: LighthouseTerminalView
     private(set) var isRunning = false
-    var onExit: (@MainActor (UUID, Int32?) -> Void)?
+    /// Fires when the SHELL exits (the user typed `exit` — the tab is gone).
+    /// This is NOT the agent-end signal any more; the SessionEnd hook is
+    /// (the shell outlives Claude).
+    var onExit: (@MainActor (TabKey, Int32?) -> Void)?
+    private var pendingCommand: String?
 
-    init(taskId: UUID) {
-        self.taskId = taskId
+    init(key: TabKey) {
+        self.key = key
         self.terminalView = LighthouseTerminalView(
             frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         super.init()
         terminalView.processDelegate = self
     }
 
-    func start(plan: LaunchPlan) {
+    func start(plan: LaunchPlan, typingDelay: Duration) {
         guard !isRunning else { return }
-        // Full user environment + the plan's extras + sane terminal vars.
-        // The login shell rebuilds most of this, but TERM must be right for
-        // SwiftTerm's emulation from the first byte.
         var environment = ProcessInfo.processInfo.environment
-        for (key, value) in plan.environment {
-            environment[key] = value
-        }
+        for (key, value) in plan.environment { environment[key] = value }
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         if environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
@@ -83,6 +138,22 @@ final class SessionController: NSObject {
             environment: environment.map { "\($0.key)=\($0.value)" },
             execName: nil,
             currentDirectory: plan.workingDirectory.path)
+
+        if let command = plan.typedCommand {
+            pendingCommand = command
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: typingDelay)
+                guard let self, self.isRunning, let command = self.pendingCommand else { return }
+                self.pendingCommand = nil
+                self.terminalView.send(txt: command + "\n")
+            }
+        }
+    }
+
+    /// Sends text verbatim to the pty (caller controls any newline).
+    func type(text: String) {
+        guard isRunning else { return }
+        terminalView.send(txt: text)
     }
 
     func terminateIfRunning() {
@@ -92,21 +163,16 @@ final class SessionController: NSObject {
     }
 }
 
-/// SwiftTerm invokes these on the main queue by default (LocalProcess's
-/// dispatchQueue), but the protocol is not actor-isolated — hop explicitly
-/// so an off-main call can never corrupt state.
-extension SessionController: LocalProcessTerminalViewDelegate {
+extension TerminalController: LocalProcessTerminalViewDelegate {
     nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-
     nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
     nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
         Task { @MainActor in
             guard self.isRunning else { return }
             self.isRunning = false
-            self.onExit?(self.taskId, exitCode)
+            self.onExit?(self.key, exitCode)
         }
     }
 }

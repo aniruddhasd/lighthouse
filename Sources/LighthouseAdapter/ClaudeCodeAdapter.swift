@@ -47,21 +47,21 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         dirs.flatMap { ["--add-dir", $0.path] }
     }
 
-    /// The session must run through the user's login+interactive shell: this
-    /// user selects between two Claude accounts with a shell FUNCTION
-    /// (`.zshrc`) that sets CLAUDE_CONFIG_DIR per folder, and `.zshrc` only
-    /// loads for interactive shells — `-l -c` alone would silently pick the
-    /// wrong account (verified 2026-07-09, see docs/claude-code-contract.md).
-    /// The plan targets a pty (step 4), where an interactive shell is normal.
-    /// `exec` replaces the shell so the pty owns claude directly.
+    /// The session runs inside a PERSISTENT interactive login shell
+    /// (`$SHELL -l -i`, no `-c`/`exec`): the claude command is TYPED into that
+    /// shell (`typedCommand`), so Claude's exit drops the user back to their
+    /// prompt in the worktree instead of killing the pty (2026-07-13 fix).
+    /// Interactive+login is required for this user's per-folder account
+    /// selector, a `.zshrc` function that only loads for interactive shells
+    /// (verified 2026-07-09, see docs/claude-code-contract.md).
     private func plan(argv: [String], spec: SessionSpec, sessionRef: String) -> LaunchPlan {
-        let command = "exec " + ShellQuoter.command(argv)
-        return LaunchPlan(
+        LaunchPlan(
             executable: spec.loginShell,
-            arguments: ["-l", "-i", "-c", command],
+            arguments: ["-l", "-i"],
             environment: [:],
             workingDirectory: spec.primaryWorktree,
-            sessionRef: sessionRef)
+            sessionRef: sessionRef,
+            typedCommand: ShellQuoter.command(argv))
     }
 
     // MARK: - Attention wiring

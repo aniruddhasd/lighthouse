@@ -25,6 +25,24 @@ struct LighthouseMain: App {
                 }
                 .keyboardShortcut("k", modifiers: .command)
             }
+            // Cmd+T / Cmd+W for terminal tabs. Ctrl+T is deliberately NOT
+            // used — it is a control byte that TUIs (Claude Code) intercept.
+            CommandGroup(after: .newItem) {
+                Button("New Terminal Tab") {
+                    if let id = runtime.selectedTaskId,
+                       let task = runtime.model.tasks.first(where: { $0.id == id }) {
+                        runtime.openShellTab(for: task)
+                    }
+                }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(runtime.selectedTaskId == nil)
+
+                Button("Close Terminal Tab") {
+                    if let id = runtime.selectedTaskId { runtime.closeFocusedTab(for: id) }
+                }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(runtime.selectedTaskId == nil)
+            }
         }
     }
 }
