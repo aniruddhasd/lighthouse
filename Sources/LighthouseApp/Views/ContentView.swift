@@ -68,7 +68,7 @@ struct TaskDetailView: View {
             terminalPane
                 .frame(minWidth: 420)
                 .debugSize("terminalPane")
-            ReviewPaneView(task: task)
+            rightPane
                 // Expand, never ideal-size: this child's ideal height is what
                 // collapsed the whole split before (see comment below).
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
@@ -84,6 +84,30 @@ struct TaskDetailView: View {
         .debugSize("hsplit")
         .navigationTitle(task.name)
         .navigationSubtitle(task.branch)
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    Task {
+                        await runtime.startMergeWalk(
+                            for: task, orderedRepoIds: task.workspaces.map(\.repoId))
+                    }
+                } label: {
+                    Label("Merge to base", systemImage: "arrow.triangle.merge")
+                }
+                .disabled(runtime.mergeWalk != nil)
+            }
+        }
+    }
+
+    /// The conflict pane takes over the right side during a paused merge walk
+    /// for this task; otherwise the live review pane (spec §2.5).
+    @ViewBuilder
+    private var rightPane: some View {
+        if let walk = runtime.mergeWalk, walk.task.id == task.id {
+            ConflictPaneView(controller: walk)
+        } else {
+            ReviewPaneView(task: task)
+        }
     }
 
     @ViewBuilder

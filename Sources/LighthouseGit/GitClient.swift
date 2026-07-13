@@ -161,6 +161,54 @@ public actor GitClient {
             ["checkout", "--conflict=zdiff3", "--", path], in: repository)
     }
 
+    /// `git merge --abort` — restores the pre-merge state (index + working
+    /// tree). Non-destructive to committed work (verified git 2.50.1); the
+    /// in-app exit from a paused merge in the user's clone.
+    public func abortMerge(in repository: URL) async throws {
+        try await runExpectingSuccess(["merge", "--abort"], in: repository)
+    }
+
+    /// Which side of a conflict to take whole-file, for binary and
+    /// delete/modify cases where text markers do not exist.
+    public enum ConflictSide: Sendable { case ours, theirs }
+
+    /// `git checkout --ours|--theirs -- <path>` then stage it — whole-file
+    /// resolution for a binary conflict (no text transform possible).
+    public func takeWholeFile(_ side: ConflictSide, path: String, in repository: URL) async throws {
+        let flag = side == .ours ? "--ours" : "--theirs"
+        try await runExpectingSuccess(["checkout", flag, "--", path], in: repository)
+        try await stage(paths: [path], in: repository)
+    }
+
+    /// Stages resolved paths: `git add -- <paths>`. Used after a conflict
+    /// transform writes resolved content, or to mark a whole-file/
+    /// keep-modified choice. Paths are pathspecs (not revisions); the `--`
+    /// separator keeps a path beginning with `-` out of the option parser
+    /// (`git add` does not accept `--end-of-options`; verified git 2.50.1).
+    public func stage(paths: [String], in repository: URL) async throws {
+        guard !paths.isEmpty else { return }
+        try await runExpectingSuccess(["add", "--"] + paths, in: repository)
+    }
+
+    /// `git rm -- <path>` — the keep-deleted resolution for a delete/modify
+    /// conflict (records the deletion in the index).
+    public func removeConflictedPath(_ path: String, in repository: URL) async throws {
+        try await runExpectingSuccess(["rm", "--", path], in: repository)
+    }
+
+    /// True when a conflicted path is binary: `git diff --numstat` between
+    /// its ours-stage (`:2:`) and theirs-stage (`:3:`) blobs prints `-` for
+    /// binary content (verified git 2.50.1). Callers must pass a genuinely
+    /// both-modified conflict (both stages present); delete/modify is
+    /// classified from the status `u` line instead.
+    public func isConflictBinary(path: String, in repository: URL) async throws -> Bool {
+        let result = try await runExpectingSuccess(
+            ["diff", "--numstat", "--end-of-options", ":2:\(path)", ":3:\(path)"],
+            in: repository)
+        // Format: "<added>\t<deleted>\t<path>"; binary → "-\t-\t<path>".
+        return result.stdoutText.hasPrefix("-\t-")
+    }
+
     // MARK: - Branches
 
     /// `git branch --end-of-options <name> <startPoint>`. `--end-of-options`

@@ -30,7 +30,12 @@ worktree bookkeeping handled for you.
 - `Sources/LighthouseAppCore` — the app's testable core, free of UI imports:
   the observable `AppModel` (repo registry, task list, attention reducer,
   switcher/inbox ordering, quit and resume derivations), the fuzzy matcher
-  behind Cmd+K, and the honest failure formatter.
+  behind Cmd+K, the honest failure formatter, and the merge-back conflict
+  engine (byte-exact zdiff3 parser + transform, and the `ConflictResolver`
+  classifying text/binary/delete-modify from status — never text-parsing
+  binary). The `MergeWalk` engine (task-level merge-to-base over the
+  registered clones in user order, with precondition/conflict pauses and
+  guardrail-5 enforcement) lives in `LighthouseTaskEngine`.
 - `Sources/LighthouseApp` — the macOS app itself: SwiftUI shell
   (NavigationSplitView, sidebar with attention badges, Cmd+K switcher,
   guardrail sheets), the SwiftTerm session layer, and the live review pane

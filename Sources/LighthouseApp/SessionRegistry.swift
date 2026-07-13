@@ -31,6 +31,18 @@ final class SessionRegistry {
         controllers[taskId]?.terminateIfRunning()
         controllers.removeValue(forKey: taskId)
     }
+
+    /// Types `text` into the task's pty WITHOUT submitting it (no trailing
+    /// newline) — the "Ask Claude to resolve" hatch leaves the composed
+    /// prompt for the user to review and press Enter (spec §2.5: the app
+    /// hands work to the agent, it does not act on the user's behalf).
+    /// Returns false if the task has no live session.
+    @discardableResult
+    func typeIntoSession(taskId: UUID, text: String) -> Bool {
+        guard let controller = controllers[taskId], controller.isRunning else { return false }
+        controller.terminalView.send(txt: text)
+        return true
+    }
 }
 
 /// One task's terminal: the SwiftTerm view, the pty process state, and the
