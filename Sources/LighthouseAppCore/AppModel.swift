@@ -11,6 +11,11 @@ public enum RepoRegistrationError: Error, Sendable, Equatable {
     /// would make every worktree/merge computation subtly wrong.
     case notTheRepositoryRoot(path: String, actualRoot: String)
     case alreadyRegistered(path: String)
+    /// The base branch name is not a syntactically valid git ref (e.g. it
+    /// begins with `-` and would ride into git's option parser). Rejected at
+    /// registration so it can never be persisted, quite apart from the
+    /// `--end-of-options` guard in every GitClient invocation.
+    case invalidBaseBranchName(String)
     case baseBranchMissing(path: String, baseBranch: String)
 }
 
@@ -113,6 +118,14 @@ public final class AppModel {
         }
         guard try await git.isInsideWorkTree(at: path) else {
             throw RepoRegistrationError.notAGitRepository(path.path)
+        }
+        // Reject option-lookalikes explicitly: `git check-ref-format
+        // refs/heads/<name>` accepts a leading-dash name (the `refs/heads/`
+        // prefix hides it), so isValidBranchName alone would pass
+        // "--output=…". The leading-dash guard is the real option-injection
+        // block; isValidBranchName covers the rest of ref syntax.
+        guard !baseBranch.hasPrefix("-"), try await git.isValidBranchName(baseBranch) else {
+            throw RepoRegistrationError.invalidBaseBranchName(baseBranch)
         }
         let root = try await git.topLevel(of: path)
         let canonicalPath = path.resolvingSymlinksInPath().path

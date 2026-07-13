@@ -71,11 +71,22 @@ final class LocalOnlyNavigationDelegate: NSObject, WKNavigationDelegate, WKScrip
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         guard let url = navigationAction.request.url, url.isFileURL,
-              url.resolvingSymlinksInPath().path.hasPrefix(allowedRoot.path) else {
+              Self.isContained(url.resolvingSymlinksInPath(), within: allowedRoot) else {
             decisionHandler(.cancel)
             return
         }
         decisionHandler(.allow)
+    }
+
+    /// True iff `url` is `root` itself or a descendant of it. A raw
+    /// `hasPrefix(root.path)` string check would also accept a SIBLING whose
+    /// name extends root's (e.g. `/tmp/render-abc` vs `/tmp/render-abcEVIL`);
+    /// comparing normalized path COMPONENTS closes that (fixed 2026-07-13).
+    static func isContained(_ url: URL, within root: URL) -> Bool {
+        let rootComponents = root.standardizedFileURL.pathComponents
+        let urlComponents = url.standardizedFileURL.pathComponents
+        guard urlComponents.count >= rootComponents.count else { return false }
+        return Array(urlComponents.prefix(rootComponents.count)) == rootComponents
     }
 
     func userContentController(

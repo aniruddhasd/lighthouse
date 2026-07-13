@@ -173,6 +173,15 @@ public actor TaskEngine {
             throw TaskEngineError.branchAlreadyExists(repoPath: repo.path, branch: branch)
         }
 
+        // Re-validate the base branch name at consumption (defence in depth
+        // alongside registration-time validation and the `--end-of-options`
+        // guard): a config edited by hand could carry an option-lookalike.
+        // The leading-dash check is what actually blocks option injection —
+        // isValidBranchName prefixes refs/heads/ and would pass "--output=…".
+        guard !repo.baseBranch.hasPrefix("-"),
+              try await liftGit({ try await self.git.isValidBranchName(repo.baseBranch) }) else {
+            throw TaskEngineError.baseBranchMissing(repoPath: repo.path, baseBranch: repo.baseBranch)
+        }
         let baseTip: String
         do {
             baseTip = try await git.revParse(repo.baseBranch, in: repoURL)

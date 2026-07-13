@@ -117,11 +117,21 @@ final class GeometryResizeDriver {
                     let observed = window.contentLayoutRect.size
                     GeometryDebug.stage(
                         "resize-attempt candidate=\(index) attempt=\(attempt) target=\(Int(target.width))x\(Int(target.height)) observed=\(Int(observed.width))x\(Int(observed.height))")
-                    if abs(observed.width - initial.width) > 40
-                        || abs(observed.height - initial.height) > 40 {
-                        GeometryDebug.stage(
-                            "resize-applied observed=\(Int(observed.width))x\(Int(observed.height))")
-                        return
+                    guard abs(observed.width - initial.width) > 40
+                        || abs(observed.height - initial.height) > 40 else { continue }
+                    // Report the size a sample was actually LOGGED at, not the
+                    // window's current size: SwiftUI coalesces layout passes,
+                    // so a size can be true without a pass ever running at it,
+                    // and the parser only sees logged samples. Wait for one.
+                    for _ in 1...20 {
+                        if let logged = GeometryDebug.lastLoggedWindowSize,
+                           abs(logged.width - initial.width) > 40
+                            || abs(logged.height - initial.height) > 40 {
+                            GeometryDebug.stage(
+                                "resize-applied observed=\(Int(logged.width))x\(Int(logged.height))")
+                            return
+                        }
+                        try? await Task.sleep(for: .milliseconds(250))
                     }
                 }
             }

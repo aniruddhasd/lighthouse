@@ -85,6 +85,18 @@ final class AppModelTests {
         }
     }
 
+    @Test func optionLookalikeBaseBranchRejectedAtRegistration() async throws {
+        let repo = try fixtures.cleanRepo()
+        await #expect {
+            try await self.model.registerRepo(path: repo.path, baseBranch: "--output=/tmp/pwn")
+        } throws: { error in
+            error as? RepoRegistrationError == .invalidBaseBranchName("--output=/tmp/pwn")
+        }
+        #expect(model.repos.isEmpty)
+        // Not persisted either — nothing to load back.
+        #expect(try ConfigStore(directory: storeDirectory).load().repos.isEmpty)
+    }
+
     @Test func registrationPersistsAcrossReload() async throws {
         let repo = try fixtures.cleanRepo()
         let registered = try await model.registerRepo(

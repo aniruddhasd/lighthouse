@@ -26,13 +26,16 @@ public actor GitClient {
 
     // MARK: - Worktrees
 
-    /// `git worktree add -b <newBranch> <path> <baseRef>` — creates the
-    /// worktree at `path` on a new branch cut from `baseRef`.
+    /// `git worktree add -b <newBranch> <path> -- <baseRef>` — creates the
+    /// worktree at `path` on a new branch cut from `baseRef`. The `--`
+    /// separates `baseRef` so a ref beginning with `-` can never reach git's
+    /// option parser (`worktree add` does not accept `--end-of-options`;
+    /// verified git 2.50.1).
     public func addWorktree(
         at path: URL, newBranch: String, from baseRef: String, in repository: URL
     ) async throws {
         try await runExpectingSuccess(
-            ["worktree", "add", "-b", newBranch, path.path, baseRef], in: repository)
+            ["worktree", "add", "-b", newBranch, path.path, "--", baseRef], in: repository)
     }
 
     /// Parsed `git worktree list --porcelain -z`.
@@ -77,14 +80,14 @@ public actor GitClient {
     /// since the merge base).
     public func diffAgainstBase(_ base: String, in repository: URL) async throws -> String {
         let result = try await runExpectingSuccess(
-            ["diff", "\(base)...HEAD", "--"], in: repository)
+            ["diff", "--end-of-options", "\(base)...HEAD", "--"], in: repository)
         return result.stdoutText
     }
 
     /// File list variant: `git diff --name-status -z <base>...HEAD`.
     public func diffNameStatus(against base: String, in repository: URL) async throws -> [DiffEntry] {
         let result = try await runExpectingSuccess(
-            ["diff", "--name-status", "-z", "\(base)...HEAD", "--"], in: repository)
+            ["diff", "--name-status", "-z", "--end-of-options", "\(base)...HEAD", "--"], in: repository)
         return try Self.parseNameStatus(result.stdout)
     }
 
@@ -95,7 +98,7 @@ public actor GitClient {
     /// untracked files are separate (see untrackedFilePatch).
     public func liveDiff(againstMergeBaseOf base: String, in repository: URL) async throws -> String {
         let result = try await runExpectingSuccess(
-            ["diff", "--merge-base", base, "--"], in: repository)
+            ["diff", "--merge-base", "--end-of-options", base, "--"], in: repository)
         return result.stdoutText
     }
 
@@ -104,7 +107,7 @@ public actor GitClient {
         againstMergeBaseOf base: String, in repository: URL
     ) async throws -> [DiffEntry] {
         let result = try await runExpectingSuccess(
-            ["diff", "--name-status", "-z", "--merge-base", base, "--"], in: repository)
+            ["diff", "--name-status", "-z", "--merge-base", "--end-of-options", base, "--"], in: repository)
         return try Self.parseNameStatus(result.stdout)
     }
 
@@ -126,8 +129,9 @@ public actor GitClient {
     /// `git merge --no-edit <branch>`. A conflict is returned as
     /// `.conflicted` with the unmerged paths — it is a state, not an error.
     public func merge(_ branch: String, in repository: URL) async throws -> MergeOutcome {
-        let result = try await run(["merge", "--no-edit", branch], in: repository)
-        return try await mergeOutcome(from: result, arguments: ["merge", "--no-edit", branch], in: repository)
+        let arguments = ["merge", "--no-edit", "--end-of-options", branch]
+        let result = try await run(arguments, in: repository)
+        return try await mergeOutcome(from: result, arguments: arguments, in: repository)
     }
 
     /// `git merge --continue` after conflicts have been resolved and staged.
@@ -159,15 +163,19 @@ public actor GitClient {
 
     // MARK: - Branches
 
-    /// `git branch <name> <startPoint>`.
+    /// `git branch --end-of-options <name> <startPoint>`. `--end-of-options`
+    /// keeps a `name`/`startPoint` beginning with `-` out of git's option
+    /// parser (verified git 2.50.1).
     public func createBranch(_ name: String, at startPoint: String = "HEAD", in repository: URL) async throws {
-        try await runExpectingSuccess(["branch", name, startPoint], in: repository)
+        try await runExpectingSuccess(
+            ["branch", "--end-of-options", name, startPoint], in: repository)
     }
 
     /// `git branch -d <name>` (or `-D` when `force`). Deleting an unmerged
     /// branch without `force` fails with a typed error.
     public func deleteBranch(_ name: String, force: Bool = false, in repository: URL) async throws {
-        try await runExpectingSuccess(["branch", force ? "-D" : "-d", name], in: repository)
+        try await runExpectingSuccess(
+            ["branch", force ? "-D" : "-d", "--end-of-options", name], in: repository)
     }
 
     // MARK: - Branch and ancestry queries
@@ -175,7 +183,7 @@ public actor GitClient {
     /// True if a local branch of this name exists
     /// (`git rev-parse -q --verify refs/heads/<name>`; exits 1 quietly when absent).
     public func branchExists(_ name: String, in repository: URL) async throws -> Bool {
-        let arguments = ["rev-parse", "-q", "--verify", "refs/heads/\(name)"]
+        let arguments = ["rev-parse", "-q", "--verify", "--end-of-options", "refs/heads/\(name)"]
         let result = try await run(arguments, in: repository)
         switch result.exitCode {
         case 0: return true
@@ -188,7 +196,7 @@ public actor GitClient {
     /// (`git merge-base --is-ancestor`; per git-merge-base(1): exit 0 = yes,
     /// 1 = no, any other nonzero = error).
     public func isAncestor(_ ancestor: String, of descendant: String, in repository: URL) async throws -> Bool {
-        let arguments = ["merge-base", "--is-ancestor", ancestor, descendant]
+        let arguments = ["merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant]
         let result = try await run(arguments, in: repository)
         switch result.exitCode {
         case 0: return true
@@ -240,7 +248,7 @@ public actor GitClient {
     /// Full object name of any revision (`git rev-parse --verify <rev>^{commit}`).
     public func revParse(_ revision: String, in repository: URL) async throws -> String {
         let result = try await runExpectingSuccess(
-            ["rev-parse", "--verify", "\(revision)^{commit}"], in: repository)
+            ["rev-parse", "--verify", "--end-of-options", "\(revision)^{commit}"], in: repository)
         return result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

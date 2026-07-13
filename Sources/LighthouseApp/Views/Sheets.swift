@@ -210,6 +210,8 @@ struct RegisterRepoSheet: View {
             return "\(path) is inside a repo whose root is \(actualRoot) — register the root."
         case .alreadyRegistered(let path):
             return "\(path) is already registered."
+        case .invalidBaseBranchName(let baseBranch):
+            return "'\(baseBranch)' is not a valid git branch name."
         case .baseBranchMissing(let path, let baseBranch):
             return "Branch '\(baseBranch)' does not exist in \(path)."
         }

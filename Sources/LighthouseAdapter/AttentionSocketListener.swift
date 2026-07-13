@@ -35,10 +35,20 @@ public actor AttentionSocketListener {
     /// for a large last_assistant_message without accepting unbounded input.
     public static let maxHeaderBytes = 8 * 1024
     public static let maxBodyBytes = 64 * 1024
+    /// Whole-request wall-clock deadline. The per-recv SO_RCVTIMEO (5s) only
+    /// bounds a SINGLE stalled read — a same-UID client that drips one byte
+    /// every few seconds resets it forever and holds the serial accept loop
+    /// indefinitely (a slow-loris that stalls attention badges). 10s is far
+    /// above any legitimate localhost hook POST (real payloads deliver in
+    /// milliseconds) yet closes the drip; enforced across BOTH read loops so
+    /// total connection time is bounded regardless of read cadence. Kept as
+    /// a simple deadline check — no concurrent-connection redesign needed.
+    public static let requestDeadline: TimeInterval = 10
     static let socketFileName = "attention.sock"
 
     private let directory: URL
     private let translate: @Sendable (Data) -> AgentAttentionSignal?
+    private let deadlineInterval: TimeInterval
     private let core = ListenerCore()
 
     private var registrations: [String: UUID] = [:]
@@ -57,9 +67,15 @@ public actor AttentionSocketListener {
     ///     temp dir). Never a shared world-writable path.
     ///   - adapter: translates raw payloads; the listener itself knows no
     ///     agent-specific schema.
-    public init(directory: URL, adapter: some AgentAdapter) {
+    ///   - requestDeadline: whole-request wall-clock cap; the default is the
+    ///     production value, overridable so tests can drive it fast.
+    public init(
+        directory: URL, adapter: some AgentAdapter,
+        requestDeadline: TimeInterval = AttentionSocketListener.requestDeadline
+    ) {
         self.directory = directory
         self.translate = { adapter.attentionSignal(fromPayload: $0) }
+        self.deadlineInterval = requestDeadline
     }
 
     deinit {
@@ -141,8 +157,9 @@ public actor AttentionSocketListener {
         // Blocking accept loop on its own thread; connections are handled
         // serially (hook payloads are tiny and rare; a stalled client is
         // bounded by the 5s receive timeout).
+        let deadline = deadlineInterval
         let thread = Thread { [weak self, fd] in
-            Self.acceptLoop(listenFD: fd, owner: self)
+            Self.acceptLoop(listenFD: fd, owner: self, deadlineInterval: deadline)
         }
         thread.name = "lighthouse.attention-socket"
         thread.start()
@@ -184,7 +201,9 @@ public actor AttentionSocketListener {
 
     // MARK: - Accept loop + minimal HTTP framing (listener thread)
 
-    private static func acceptLoop(listenFD: Int32, owner: AttentionSocketListener?) {
+    private static func acceptLoop(
+        listenFD: Int32, owner: AttentionSocketListener?, deadlineInterval: TimeInterval
+    ) {
         while true {
             let connection = accept(listenFD, nil, nil)
             guard connection >= 0 else { return } // listener closed
@@ -193,11 +212,14 @@ public actor AttentionSocketListener {
             var noSigpipe: Int32 = 1
             setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe,
                        socklen_t(MemoryLayout<Int32>.size))
-            var timeout = timeval(tv_sec: 5, tv_usec: 0)
+            // Per-recv timeout, never longer than the whole-request deadline
+            // so a short (test) deadline is not masked by a blocked read.
+            let recvTimeout = max(1, min(5, Int(deadlineInterval)))
+            var timeout = timeval(tv_sec: recvTimeout, tv_usec: 0)
             setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                        socklen_t(MemoryLayout<timeval>.size))
 
-            switch readRequest(from: connection) {
+            switch readRequest(from: connection, deadlineInterval: deadlineInterval) {
             case .success(let body):
                 respond(connection, status: "200 OK")
                 if let owner {
@@ -221,14 +243,18 @@ public actor AttentionSocketListener {
     /// Reads exactly one HTTP request with hard caps. Anything that isn't a
     /// well-formed POST within the limits is rejected — the framing itself
     /// treats input as hostile.
-    private static func readRequest(from fd: Int32) -> FrameResult {
+    private static func readRequest(from fd: Int32, deadlineInterval: TimeInterval) -> FrameResult {
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         let separator = Data("\r\n\r\n".utf8)
+        let deadline = Date().addingTimeInterval(deadlineInterval)
 
         // Headers.
         var headerEnd: Range<Data.Index>? = buffer.range(of: separator)
         while headerEnd == nil {
+            if Date() > deadline {
+                return .failure("request exceeded \(Int(deadlineInterval))s deadline (slow client, headers)")
+            }
             if buffer.count > maxHeaderBytes {
                 return .failure("headers exceed \(maxHeaderBytes) bytes")
             }
@@ -267,6 +293,9 @@ public actor AttentionSocketListener {
             return .failure("body longer than Content-Length")
         }
         while body.count < length {
+            if Date() > deadline {
+                return .failure("request exceeded \(Int(deadlineInterval))s deadline (slow client, body)")
+            }
             let n = recv(fd, &chunk, min(chunk.count, length - body.count), 0)
             guard n > 0 else {
                 return .failure("connection closed mid-body (\(body.count)/\(length) bytes)")
