@@ -57,6 +57,9 @@ let package = Package(
             ]),
         .testTarget(
             name: "LighthouseAppTests",
-            dependencies: ["LighthouseApp", "LighthouseAdapter"]),
+            dependencies: [
+                "LighthouseApp", "LighthouseAdapter", "LighthouseGit",
+                "LighthouseTaskEngine", "LighthouseFixtures",
+            ]),
     ]
 )

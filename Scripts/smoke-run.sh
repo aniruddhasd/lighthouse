@@ -87,18 +87,24 @@ if grep -rq "Live diff-vs-base lands in a later step" "$package_root/Sources/Lig
     exit 1
 fi
 
-# Fixture repo so the probe task's review pane has real content: one tracked
-# modification and one untracked file vs base.
-geometry_repo="$(mktemp -d)/repo"
-mkdir -p "$geometry_repo"
-git -C "$geometry_repo" init -q -b main
-git -C "$geometry_repo" config user.name smoke
-git -C "$geometry_repo" config user.email smoke@lighthouse.invalid
-git -C "$geometry_repo" config commit.gpgsign false
-printf 'base\n' > "$geometry_repo/tracked.txt"
-git -C "$geometry_repo" add tracked.txt
-git -C "$geometry_repo" commit -qm base
-git -C "$geometry_repo" checkout -qb task
+# Fixture: a main repo plus a LINKED WORKTREE on a task branch — so the
+# worktree's gitdir lives OUTSIDE the watched worktree tree (the real
+# Lighthouse shape). The worktree has one tracked modification (1 changed
+# file vs base) and one untracked file. Mid-run we commit a new file (a
+# gitdir-only write) and assert the pane's file count updates — proving the
+# stale-diff fix (2026-07-13) in the real app.
+geometry_root="$(mktemp -d)"
+geometry_main="$geometry_root/main"
+geometry_repo="$geometry_root/wt"
+mkdir -p "$geometry_main"
+git -C "$geometry_main" init -q -b main
+git -C "$geometry_main" config user.name smoke
+git -C "$geometry_main" config user.email smoke@lighthouse.invalid
+git -C "$geometry_main" config commit.gpgsign false
+printf 'base\n' > "$geometry_main/tracked.txt"
+git -C "$geometry_main" add tracked.txt
+git -C "$geometry_main" commit -qm base
+git -C "$geometry_main" worktree add -q -b task "$geometry_repo" main
 printf 'changed\n' >> "$geometry_repo/tracked.txt"
 printf 'brand new\n' > "$geometry_repo/untracked.txt"
 
@@ -108,7 +114,7 @@ LIGHTHOUSE_DEBUG_GEOMETRY=1 LIGHTHOUSE_DEBUG_REVIEWPANE="$geometry_repo" \
     LIGHTHOUSE_CONFIG_DIR="$geometry_cfg" \
     "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$geometry_log" 2>&1 &
 geo_pid=$!
-trap 'kill -9 "$geo_pid" 2>/dev/null || true; rm -rf "$geometry_cfg"' EXIT
+trap 'kill -9 "$geo_pid" 2>/dev/null || true; rm -rf "$geometry_cfg" "$geometry_root"' EXIT
 
 # wait_for <deadline-seconds> <stage-name> <grep-pattern>
 wait_for() {
@@ -117,8 +123,8 @@ wait_for() {
     while ! grep -qE "$3" "$geometry_log"; do
         i=$((i + 1))
         if [ "$i" -gt "$deadline" ]; then
-            echo "GEOMETRY GATE: FAIL ($2 within $1s)" >&2
-            grep -E "GEOMETRY" "$geometry_log" | tail -5 >&2 || true
+            echo "GATE: FAIL ($2 within $1s)" >&2
+            grep -E "GEOMETRY|REVIEWPANE" "$geometry_log" | tail -8 >&2 || true
             exit 1
         fi
         if ! kill -0 "$geo_pid" 2>/dev/null; then
@@ -147,9 +153,18 @@ baseline_size="$(sed -n 's/.*GEOMETRY-STAGE baseline content=\([0-9]*x[0-9]*\).*
 resized_size="$(sed -n 's/.*GEOMETRY-STAGE resize-applied observed=\([0-9]*x[0-9]*\).*/\1/p' "$geometry_log" | head -1)"
 wait_for 10 "no-layout-sample-at-baseline-size-$baseline_size" "GEOMETRY window=$baseline_size "
 wait_for 10 "no-layout-sample-at-resized-size-$resized_size" "GEOMETRY window=$resized_size "
-# The review pane must have rendered REAL content in the running app.
-wait_for 15 "review-pane-never-populated" "REVIEWPANE-STAGE populated files="
+# The review pane must have rendered REAL content in the running app: the
+# one tracked modification (files=1).
+wait_for 15 "review-pane-never-populated" "REVIEWPANE-STAGE populated files=1"
 sleep 0.5
+
+# Stale-diff fix: commit a NEW file in the worktree — a gitdir-only write the
+# worktree tree never sees. The gitdir watch must fire a refresh that raises
+# the count to 2, with NO app restart and NO manual refresh.
+printf 'committed\n' > "$geometry_repo/committed.txt"
+git -C "$geometry_repo" add committed.txt
+git -C "$geometry_repo" commit -qm "commit only"
+wait_for 15 "commit-did-not-refresh-review-pane" "REVIEWPANE-STAGE populated files=2"
 
 kill -TERM "$geo_pid" 2>/dev/null || true
 tries=0
@@ -162,7 +177,7 @@ while kill -0 "$geo_pid" 2>/dev/null; do
     sleep 0.2
 done
 trap - EXIT
-rm -rf "$geometry_cfg"
+rm -rf "$geometry_cfg" "$geometry_root"
 
 python3 - "$geometry_log" "$baseline_size" "$resized_size" <<'PY'
 import re, sys

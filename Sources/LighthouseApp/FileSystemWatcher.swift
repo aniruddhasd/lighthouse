@@ -1,16 +1,28 @@
 import CoreServices
 import Foundation
 
-/// Thin FSEvents wrapper: one watched root, one callback. The review pane
+/// Thin FSEvents wrapper: watched roots + one callback. The review pane
 /// creates exactly one of these — for the SELECTED task's SELECTED repo
-/// worktree — and tears it down when the pane disappears or the selection
-/// changes; watching every worktree of every task would thrash.
+/// worktree PLUS that worktree's per-worktree gitdir — and tears it down when
+/// the pane disappears or the selection changes; watching every worktree of
+/// every task would thrash.
+///
+/// The gitdir is watched because a bare `git commit` (e.g. committing already-
+/// staged changes from a terminal tab) writes to `<main>/.git/worktrees/<name>/`
+/// (HEAD reflog, index, COMMIT_EDITMSG) and touches NO file under the worktree
+/// tree — so a worktree-only watcher never fires and the diff goes stale
+/// (verified 2026-07-13).
 final class FileSystemWatcher {
     private var stream: FSEventStreamRef?
 
+    convenience init?(path: String, latency: TimeInterval = 0.2,
+                      onChange: @escaping @Sendable () -> Void) {
+        self.init(paths: [path], latency: latency, onChange: onChange)
+    }
+
     /// - Parameter latency: FSEvents' own coalescing window; kept short
     ///   (0.2s) because DiffRefresher owns the real debounce.
-    init?(path: String, latency: TimeInterval = 0.2, onChange: @escaping @Sendable () -> Void) {
+    init?(paths: [String], latency: TimeInterval = 0.2, onChange: @escaping @Sendable () -> Void) {
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info else { return }
             Unmanaged<CallbackBox>.fromOpaque(info).takeUnretainedValue().onChange()
@@ -25,11 +37,11 @@ final class FileSystemWatcher {
             },
             copyDescription: nil)
 
-        guard let stream = FSEventStreamCreate(
+        guard !paths.isEmpty, let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
             callback,
             &context,
-            [path] as CFArray,
+            paths as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             latency,
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents))

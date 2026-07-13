@@ -288,6 +288,22 @@ public actor GitClient {
         return URL(fileURLWithPath: path, relativeTo: repository).standardizedFileURL
     }
 
+    /// Absolute path of the git directory for `repository`
+    /// (`git rev-parse --absolute-git-dir`). For a linked worktree this is the
+    /// per-worktree gitdir `<main>/.git/worktrees/<name>/` — where this
+    /// worktree's HEAD/index/reflog live, so it changes on this worktree's
+    /// stage/commit. The review watcher watches it so a bare `git commit`
+    /// (which writes nothing under the worktree tree) still triggers a refresh.
+    public func gitDirectory(in repository: URL) async throws -> URL {
+        let result = try await runExpectingSuccess(["rev-parse", "--absolute-git-dir"], in: repository)
+        let path = result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            throw GitClientError.unexpectedOutput(
+                description: "rev-parse --absolute-git-dir printed nothing", output: result.stdoutText)
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     /// Full object name of HEAD.
     public func headCommit(in repository: URL) async throws -> String {
         try await revParse("HEAD", in: repository)

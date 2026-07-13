@@ -19,6 +19,9 @@ final class ReviewPaneModel {
     }
     private(set) var tree: [FileTreeNode] = []
     private(set) var untrackedCount = 0
+    /// Number of changed (tracked) files in the latest diff — the value the
+    /// user sees as the file count; asserted by tests.
+    private(set) var changedFileCount = 0
     private(set) var renderError: String?
 
     let webView: WKWebView
@@ -26,10 +29,14 @@ final class ReviewPaneModel {
     private let navigationGate: LocalOnlyNavigationDelegate
     private var watcher: FileSystemWatcher?
     private var refresher: DiffRefresher?
+    /// The most recent refresh task — awaitable by tests so assertions don't
+    /// poll on wall-clock (which flakes under parallel-suite contention).
+    private(set) var lastRefreshTask: Task<Void, Never>?
 
     init(task: TaskRecord, repos: [RepoConfig], git: GitClient) {
         self.task = task
         self.repos = repos
+        self.git = git
         self.service = LiveDiffService(git: git)
 
         var directory: URL?
@@ -64,20 +71,52 @@ final class ReviewPaneModel {
         return repos.first { $0.id == workspace.repoId }?.baseBranch
     }
 
+    private let git: GitClient
+
     // MARK: - Lifecycle (pane visible ⇔ watcher running)
 
+    /// Idempotently sets up the watcher (worktree + gitdir) if needed, and
+    /// ALWAYS triggers an immediate unconditional refresh. Every entry point
+    /// — pane appear, task/repo switch, scenePhase foreground — goes through
+    /// here, so a diff missed while the watcher was stopped (backgrounded) or
+    /// a change FSEvents never saw self-heals on the next (re)start
+    /// (2026-07-13). Refresh does not depend on the watcher existing.
     func start() {
-        guard watcher == nil else { return }
         guard let workspace = selectedWorkspace else { return }
-        let refresher = DiffRefresher { [weak self] in
-            await self?.regenerate()
+        if refresher == nil {
+            let refresher = DiffRefresher { [weak self] in await self?.regenerate() }
+            self.refresher = refresher
         }
-        self.refresher = refresher
-        watcher = FileSystemWatcher(path: workspace.worktreePath) {
-            Task { await refresher.noteChange() }
+        let refresher = self.refresher!
+        if watcher == nil {
+            // Watch the worktree AND its per-worktree gitdir (for commits
+            // that touch no worktree file). The gitdir resolves async; the
+            // immediate refresh below does not wait for it.
+            let worktreePath = workspace.worktreePath
+            Task { [weak self] in
+                var paths = [worktreePath]
+                if let gitdir = try? await self?.git.gitDirectory(
+                    in: URL(fileURLWithPath: worktreePath, isDirectory: true)) {
+                    paths.append(gitdir.path)
+                }
+                guard let self, self.watcher == nil else { return }
+                self.watcher = FileSystemWatcher(paths: paths) {
+                    Task { await refresher.noteChange() }
+                }
+            }
         }
-        Task { await refresher.refreshNow() }
+        lastRefreshTask = Task { await refresher.refreshNow() }
     }
+
+    /// Manual refresh (header button / Cmd+R) — belt-and-braces for any
+    /// missed-event window we haven't imagined.
+    func refreshNow() {
+        guard let refresher else { start(); return }
+        lastRefreshTask = Task { await refresher.refreshNow() }
+    }
+
+    /// Test hook: await the most recent refresh to completion.
+    func awaitRefresh() async { await lastRefreshTask?.value }
 
     func stop() {
         watcher?.stop()
@@ -99,17 +138,21 @@ final class ReviewPaneModel {
     }
 
     private func regenerate() async {
-        guard let workspace = selectedWorkspace, let base = selectedBaseBranch,
-              let renderDirectory else { return }
+        guard let workspace = selectedWorkspace, let base = selectedBaseBranch else { return }
         do {
             let diff = try await service.liveDiff(
                 workspace: workspace.worktreeURL, baseBranch: base)
-            let html = DiffPageBuilder.page(diff: diff.patch)
+            // Tree + counts update FIRST and unconditionally — the file list
+            // is useful even if the WKWebView renderer assets are missing.
             tree = FileTreeBuilder.build(entries: diff.entries, untracked: diff.untracked)
             untrackedCount = diff.untracked.count
+            changedFileCount = diff.entries.count
             renderError = nil
-            try DiffWebViewFactory.load(
-                page: html, into: webView, renderDirectory: renderDirectory)
+            if let renderDirectory {
+                try DiffWebViewFactory.load(
+                    page: DiffPageBuilder.page(diff: diff.patch),
+                    into: webView, renderDirectory: renderDirectory)
+            }
             ReviewDebug.stage(
                 "populated files=\(diff.entries.count) untracked=\(diff.untracked.count)")
         } catch {
@@ -194,6 +237,17 @@ private struct ReviewPaneContent: View {
                 Text("diff vs base · live")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                Button { model.refreshNow() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Refresh diff (⌘R)")
+                // Cmd+R while the review pane is focused.
+                Button("", action: { model.refreshNow() })
+                    .keyboardShortcut("r", modifiers: .command)
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .accessibilityHidden(true)
             }
             .padding(6)
             Divider()
