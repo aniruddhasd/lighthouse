@@ -36,8 +36,16 @@ public final class AppModel {
     public private(set) var tasks: [TaskRecord] = []
     /// Live attention state per task (seeded from persisted TaskRecord.state).
     public private(set) var attention: [UUID: TaskAttentionState] = [:]
+    /// When each task entered its current attention state — drives the inbox
+    /// "oldest-blocked first" ordering. Session-only.
+    private var attentionSince: [UUID: Date] = [:]
     /// Task ids with a live pty right now — maintained by the session layer.
     public private(set) var liveSessions: Set<UUID> = []
+    /// First-run setup flags (config schema v3).
+    public private(set) var hasCompletedSetup = false
+    public private(set) var notificationsHintDismissed = false
+    /// Injectable clock so ordering tests are deterministic.
+    private let now: @Sendable () -> Date
     /// Debug-only tasks/repos (geometry + review probes): visible to the
     /// UI, never persisted.
     private var ephemeralTaskIds: Set<UUID> = []
@@ -59,7 +67,8 @@ public final class AppModel {
         socketPath: URL,
         adapter: any AgentAdapter,
         git: GitClient = GitClient(),
-        loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
         self.socketPath = socketPath
@@ -67,6 +76,7 @@ public final class AppModel {
         self.git = git
         self.engine = TaskEngine(git: git)
         self.loginShell = loginShell
+        self.now = now
     }
 
     /// Loads persisted state. Attention seeds from each task's stored state.
@@ -75,7 +85,20 @@ public final class AppModel {
         repos = config.repos
         tasks = config.tasks
         worktreesRootOverride = config.worktreesRootOverride
+        hasCompletedSetup = config.hasCompletedSetup
+        notificationsHintDismissed = config.notificationsHintDismissed
         attention = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, $0.state) })
+        attentionSince = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, now()) })
+    }
+
+    public func markSetupCompleted() {
+        hasCompletedSetup = true
+        try? persist()
+    }
+
+    public func dismissNotificationsHint() {
+        notificationsHintDismissed = true
+        try? persist()
     }
 
     public func setWorktreesRootOverride(_ path: String?) throws {
@@ -102,7 +125,9 @@ public final class AppModel {
         try store.save(LighthouseConfig(
             repos: repos.filter { !ephemeralRepoIds.contains($0.id) },
             tasks: tasks.filter { !ephemeralTaskIds.contains($0.id) },
-            worktreesRootOverride: worktreesRootOverride))
+            worktreesRootOverride: worktreesRootOverride,
+            hasCompletedSetup: hasCompletedSetup,
+            notificationsHintDismissed: notificationsHintDismissed))
     }
 
     // MARK: - Repo registry
@@ -149,6 +174,16 @@ public final class AppModel {
         repos.append(repo)
         try persist()
         return repo
+    }
+
+    /// Suggests a base branch for a not-yet-registered clone: its current
+    /// branch, else the first of the common defaults that exists.
+    public func suggestBaseBranch(at path: URL) async -> String {
+        if let current = (try? await git.currentBranch(in: path)) ?? nil { return current }
+        for candidate in ["main", "develop", "master", "trunk"] {
+            if (try? await git.branchExists(candidate, in: path)) == true { return candidate }
+        }
+        return "main"
     }
 
     public func updateRepo(_ updated: RepoConfig) throws {
@@ -244,32 +279,45 @@ public final class AppModel {
     /// Reducer for socket signals: folds the event through the state machine.
     /// Unknown tasks are ignored (the listener already dropped unknown
     /// sessions; this guards the id-level race after task removal).
-    public func apply(_ signal: TaskAttentionSignal) {
+    /// Applies a socket signal; returns the resulting transition (if the
+    /// state changed) so the runtime can decide on a notification.
+    @discardableResult
+    public func apply(_ signal: TaskAttentionSignal) -> AttentionTransition? {
         applyEvent(signal.event, to: signal.taskId)
     }
 
-    public func noteSessionStarted(taskId: UUID) {
-        guard tasks.contains(where: { $0.id == taskId }) else { return }
+    @discardableResult
+    public func noteSessionStarted(taskId: UUID) -> AttentionTransition? {
+        guard tasks.contains(where: { $0.id == taskId }) else { return nil }
         liveSessions.insert(taskId)
-        applyEvent(.agentWorking, to: taskId)
+        return applyEvent(.agentWorking, to: taskId)
     }
 
     /// Pty death (process exited, window closed the fd, crash) — distinct
     /// from the SessionEnd hook, which may or may not have arrived first;
     /// both fold to the same defined state.
-    public func noteSessionEnded(taskId: UUID) {
+    @discardableResult
+    public func noteSessionEnded(taskId: UUID) -> AttentionTransition? {
         liveSessions.remove(taskId)
-        applyEvent(.sessionDied, to: taskId)
+        return applyEvent(.sessionDied, to: taskId)
     }
 
-    private func applyEvent(_ event: AttentionEvent, to taskId: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+    @discardableResult
+    private func applyEvent(_ event: AttentionEvent, to taskId: UUID) -> AttentionTransition? {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return nil }
         let current = attention[taskId] ?? tasks[index].state
         let next = AttentionStateMachine.nextState(from: current, on: event)
-        guard next != current else { return }
+        guard next != current else { return nil }
         attention[taskId] = next
+        attentionSince[taskId] = now()
         tasks[index].state = next
         try? persist() // state persistence is best-effort; next save catches up
+        return AttentionTransition(taskId: taskId, event: event, oldState: current, newState: next)
+    }
+
+    /// Number of tasks currently needing input — the dock badge count.
+    public var needsInputCount: Int {
+        tasks.reduce(0) { $0 + (attentionState(of: $1.id) == .needsInput ? 1 : 0) }
     }
 
     public func attentionState(of taskId: UUID) -> TaskAttentionState {
@@ -317,9 +365,25 @@ public final class AppModel {
         tasks.filter { liveSessions.contains($0.id) && attentionState(of: $0.id) == .working }
     }
 
-    /// Cmd+K entries: fuzzy-filtered by query, needs-input tasks first
-    /// (inbox semantics), then match quality, then stable by name.
+    private func inboxItem(_ task: TaskRecord) -> InboxItem {
+        InboxItem(
+            id: task.id, name: task.name, state: attentionState(of: task.id),
+            since: attentionSince[task.id] ?? .distantPast)
+    }
+
+    /// The authoritative "what needs me" order (spec §6 step 7): needs-input
+    /// (oldest-blocked first), then working, dirty, done. Used by the Cmd+K
+    /// inbox with no query.
+    public func inboxOrder() -> [TaskRecord] {
+        let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        return InboxOrder.ordered(tasks.map(inboxItem)).compactMap { byId[$0.id] }
+    }
+
+    /// Cmd+K entries: with no query, the authoritative inbox order; with a
+    /// query, fuzzy-filtered but still needs-input-first (inbox semantics),
+    /// then by match quality, then name.
     public func switcherEntries(query: String) -> [TaskRecord] {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return inboxOrder() }
         let scored: [(TaskRecord, Int)] = tasks.compactMap { task in
             FuzzyMatcher.score(query: query, candidate: task.name).map { (task, $0) }
         }

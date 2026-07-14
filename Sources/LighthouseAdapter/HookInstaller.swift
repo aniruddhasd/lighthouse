@@ -122,7 +122,7 @@ public struct HookInstaller: Sendable {
     /// "Hook configuration shape"). The socket path is app-generated; no
     /// user input reaches these strings. `async` keeps a dead listener from
     /// ever blocking the agent (spec §8 fail-safe).
-    static func handler(socketPath: URL) -> [String: Any] {
+    public static func handler(socketPath: URL) -> [String: Any] {
         [
             "type": "command",
             "command": "/usr/bin/curl",

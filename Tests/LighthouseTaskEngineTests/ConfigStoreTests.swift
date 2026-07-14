@@ -42,7 +42,7 @@ final class ConfigStoreTests {
         #expect {
             _ = try self.store.load()
         } throws: { error in
-            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 2)
+            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 3)
         }
         // Never silently rewritten: byte-identical after the failed load.
         #expect(try Data(contentsOf: store.fileURL) == futureFile)
@@ -137,8 +137,35 @@ final class ConfigStoreTests {
         let migrated = try store.load()
         #expect(migrated.worktreesRootOverride == nil)
         #expect(migrated.repos.count == 1)
+        // v1→v3: a config that already has repos is treated as setup-done.
+        #expect(migrated.hasCompletedSetup)
+        #expect(!migrated.notificationsHintDismissed)
         #expect(migrated.tasks.first?.workspaces.first?.worktreePath
             == "/Users/dev/Lighthouse/old task/alpha")
+    }
+
+    @Test func v2FileMigratesAndSetsSetupDoneWhenReposExist() throws {
+        let repoId = UUID()
+        let v2 = """
+        {"schemaVersion": 2, "worktreesRootOverride": "/custom",
+         "repos": [{"id": "\(repoId.uuidString)", "path": "/tmp/r", "baseBranch": "main"}],
+         "tasks": []}
+        """
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(v2.utf8).write(to: store.fileURL)
+        let migrated = try store.load()
+        #expect(migrated.worktreesRootOverride == "/custom")
+        #expect(migrated.hasCompletedSetup) // repos present → don't re-ambush
+    }
+
+    @Test func setupFlagsRoundTripInV3() throws {
+        var config = sampleConfig()
+        config.hasCompletedSetup = true
+        config.notificationsHintDismissed = true
+        try store.save(config)
+        let loaded = try store.load()
+        #expect(loaded.hasCompletedSetup)
+        #expect(loaded.notificationsHintDismissed)
     }
 
     @Test func optionalFieldsAbsentRoundTrip() throws {
@@ -167,6 +194,6 @@ final class ConfigStoreTests {
     @Test func schemaVersionIsWrittenFromDayOne() throws {
         try store.save(.empty)
         let text = String(decoding: try Data(contentsOf: store.fileURL), as: UTF8.self)
-        #expect(text.contains(#""schemaVersion" : 2"#))
+        #expect(text.contains(#""schemaVersion" : 3"#))
     }
 }

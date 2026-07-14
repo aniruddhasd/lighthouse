@@ -157,12 +157,18 @@ struct RegisterRepoSheet: View {
                     panel.canChooseFiles = false
                     if panel.runModal() == .OK, let url = panel.url {
                         path = url.path
+                        // Auto-detect the base branch from the clone's HEAD.
+                        Task {
+                            baseBranch = await runtime.model.suggestBaseBranch(at: url)
+                        }
                     }
                 }
             }
-            TextField("Base branch", text: $baseBranch)
-            TextField("Setup script (optional, relative to repo)", text: $setupScript)
-            TextField("Env files to copy (optional, comma-separated)", text: $envCopyList)
+            TextField("Base branch (auto-detected)", text: $baseBranch)
+            DisclosureGroup("Advanced (optional)") {
+                TextField("Setup script (relative to repo)", text: $setupScript)
+                TextField("Env files to copy (comma-separated)", text: $envCopyList)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }

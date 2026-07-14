@@ -57,10 +57,44 @@ final class AppRuntime {
         } catch {
             lastError = "Could not load config: \(error)"
         }
+        notifications.onSelectTask = { [weak self] id in self?.selectedTaskId = id }
+        // First-run setup auto-opens when there are no repos and setup was
+        // never completed; always re-runnable from Help.
+        setupPresented = model.repos.isEmpty && !model.hasCompletedSetup
+        // NSApp does not exist yet during App.init — anything touching NSApp
+        // (dock badge) or UN* must run AFTER launch, on the main actor, once
+        // NSApplication.main() is up. (A dock-badge write in init crashed on
+        // a nil NSApp — 2026-07-14.)
+        Task { @MainActor in
+            notifications.configure()
+            updateDockBadge()
+            refreshNotificationStatus()
+        }
         Task { await runAttentionPipeline() }
         setUpGeometryProbeIfRequested()
         runDiffRenderCheckIfRequested()
         runMergeWalkCheckIfRequested()
+        runNotificationCheckIfRequested()
+    }
+
+    /// Whether the first-run setup sheet is showing.
+    var setupPresented = false
+    /// Whether notification authorization is known-denied (drives the
+    /// one-time, dismissible inbox hint).
+    private(set) var notificationsDenied = false
+
+    /// The dismissible "notifications are off" inbox hint: shown once, when
+    /// denied and there are tasks, until the user dismisses it.
+    var notificationsHintVisible: Bool {
+        notificationsDenied && !model.notificationsHintDismissed && !model.tasks.isEmpty
+    }
+
+    func dismissNotificationsHint() { model.dismissNotificationsHint() }
+
+    private func refreshNotificationStatus() {
+        Task { @MainActor in
+            notificationsDenied = await notifications.authorizationStatus() == .denied
+        }
     }
 
     private let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -81,6 +115,55 @@ final class AppRuntime {
     }
 
     func endMergeWalk() { mergeWalk = nil }
+
+    /// A SetupModel wired to this runtime's services. Fresh each time the
+    /// sheet opens so checks re-run cleanly.
+    func makeSetupModel() -> SetupModel {
+        SetupModel(
+            git: git, loginShell: loginShell, socketPath: listener.socketURL,
+            notifications: notifications,
+            makeListener: { dir in AttentionSocketListener(directory: dir, adapter: ClaudeCodeAdapter()) })
+    }
+
+    func finishSetup() {
+        model.markSetupCompleted()
+        setupPresented = false
+        refreshNotificationStatus()
+    }
+
+    /// Help → Run Setup Checks (re-runnable any time).
+    func openSetup() { setupPresented = true }
+
+    /// LIGHTHOUSE_DEBUG_NOTIFY=<output-file>: drives a real attention
+    /// transition on a probe task that is NOT currently viewed and writes the
+    /// decision + UN* enqueue result to the file (a file, not stdout, so
+    /// capture is reliable regardless of launch method). MUST be launched via
+    /// `open` — UNUserNotificationCenter.current() SIGTRAPs when the binary is
+    /// direct-exec'd (LaunchServices hasn't registered the app). It does NOT
+    /// call requestAuthorization (that shows a blocking modal); `center.add`
+    /// enqueues without authorization. Banner DISPLAY still needs the user's
+    /// grant — the gate asserts the decision + enqueue path only, honestly.
+    private func runNotificationCheckIfRequested() {
+        guard let outPath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_NOTIFY"],
+              !outPath.isEmpty else { return }
+        Task { @MainActor in
+            var lines: [String] = []
+            func log(_ m: String) {
+                lines.append("NOTIFY-STAGE \(m)")
+                try? lines.joined(separator: "\n").appending("\n")
+                    .write(toFile: outPath, atomically: true, encoding: .utf8)
+            }
+            let taskId = UUID()
+            let transition = AttentionTransition(
+                taskId: taskId, event: .agentNeedsInput, oldState: .working, newState: .needsInput)
+            log("decision=\(NotificationDecider.decide(transition, isCurrentlyViewed: false).map(\.rawValue) ?? "nil")")
+            log("suppressed-when-viewed=\(NotificationDecider.decide(transition, isCurrentlyViewed: true) == nil)")
+            // UN* init happens here; under `open` it is safe.
+            let enqueued = notifications.post(kind: .needsInput, taskId: taskId, taskName: "notify-probe")
+            log("enqueued=\(enqueued)")
+            log("done")
+        }
+    }
 
     /// LIGHTHOUSE_DEBUG_MERGEWALK=<clone-with-conflict>: drives a full
     /// merge-back cycle in the real app over a scripted conflicting repo —
@@ -198,8 +281,39 @@ final class AppRuntime {
         }
         let stream = await listener.signals()
         for await signal in stream {
-            model.apply(signal)
+            let transition = model.apply(signal)
+            handleTransition(transition)
         }
+    }
+
+    let notifications = NotificationService()
+
+    /// Whether the user is currently looking at a task: app active AND that
+    /// task selected. Notifications fire only when a signal would be MISSED.
+    private func isCurrentlyViewed(_ taskId: UUID) -> Bool {
+        NSApp.isActive && selectedTaskId == taskId
+    }
+
+    /// Decides (pure) then posts a notification for an attention transition,
+    /// and refreshes the dock badge. Called for every transition — socket
+    /// signals and session start/stop alike.
+    func handleTransition(_ transition: AttentionTransition?) {
+        if let transition,
+           let kind = NotificationDecider.decide(
+               transition, isCurrentlyViewed: isCurrentlyViewed(transition.taskId)),
+           let task = model.tasks.first(where: { $0.id == transition.taskId }) {
+            notifications.post(kind: kind, taskId: task.id, taskName: task.name)
+        }
+        updateDockBadge()
+    }
+
+    /// Dock badge = number of needs-input tasks; cleared when zero. Uses
+    /// NSApplication.shared (always valid) — the `NSApp` global is nil until
+    /// the app instance is first created, which crashed a dock-badge write in
+    /// App.init (2026-07-14); this and deferring the first call past init fix it.
+    func updateDockBadge() {
+        let count = model.needsInputCount
+        NSApplication.shared.dockTile.badgeLabel = count > 0 ? String(count) : nil
     }
 
     // MARK: - Terminal tabs (UI-only, not persisted; die with the app)
@@ -246,7 +360,7 @@ final class AppRuntime {
             if let controller = registry.agentController(taskId: task.id), controller.isRunning,
                let command = plan.typedCommand {
                 registry.runCommand(taskId: task.id, tabId: TabID.agent, command: command)
-                model.noteSessionStarted(taskId: task.id)
+                handleTransition(model.noteSessionStarted(taskId: task.id))
             } else {
                 startAgentSession(taskId: task.id, plan: plan) // calls noteSessionStarted
             }
@@ -265,7 +379,7 @@ final class AppRuntime {
         tabs[taskId, default: []].removeAll { $0.id == TabID.agent }
         tabs[taskId, default: []].insert(TerminalTab(id: TabID.agent, title: "Agent", isAgent: true), at: 0)
         focusedTab[taskId] = TabID.agent
-        model.noteSessionStarted(taskId: taskId)
+        handleTransition(model.noteSessionStarted(taskId: taskId))
     }
 
     /// Cmd+T: a plain persistent login shell in the task's primary worktree —
@@ -302,7 +416,7 @@ final class AppRuntime {
 
     private func handleTerminalExit(_ key: TabKey) {
         if key.tabId == TabID.agent {
-            model.noteSessionEnded(taskId: key.taskId)
+            handleTransition(model.noteSessionEnded(taskId: key.taskId))
         }
         tabs[key.taskId]?.removeAll { $0.id == key.tabId }
         if focusedTab[key.taskId] == key.tabId {
@@ -320,6 +434,7 @@ final class AppRuntime {
             focusedTab[task.id] = nil
             _ = try await model.removeTask(task, mode: mode)
             if selectedTaskId == task.id { selectedTaskId = nil }
+            updateDockBadge() // a needs-input task may have gone away
             return true
         } catch let error as TaskEngineError {
             lastError = FailureDescriber.describe(error)

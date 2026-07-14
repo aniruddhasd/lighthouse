@@ -20,6 +20,18 @@ struct SwitcherOverlay: View {
                     if let first = entries.first { select(first.id) }
                 }
                 .onExitCommand { dismiss() }
+            if runtime.notificationsHintVisible {
+                HStack(spacing: 6) {
+                    Image(systemName: "bell.slash")
+                    Text("Notifications are off — badges still work. Enable them in setup.")
+                        .font(.caption)
+                    Spacer()
+                    Button("Dismiss") { runtime.dismissNotificationsHint() }
+                        .buttonStyle(.plain).font(.caption)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(.quaternary)
+            }
             Divider()
             if entries.isEmpty {
                 Text("No matching tasks")

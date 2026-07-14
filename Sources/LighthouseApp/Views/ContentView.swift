@@ -31,6 +31,9 @@ struct ContentView: View {
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $showRegisterRepo) { RegisterRepoSheet() }
         .sheet(item: $taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
+        .sheet(isPresented: Binding(
+            get: { runtime.setupPresented },
+            set: { runtime.setupPresented = $0 })) { SetupView() }
         .overlay {
             if runtime.switcherPresented {
                 SwitcherOverlay()

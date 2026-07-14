@@ -66,9 +66,29 @@ open dist/Lighthouse.app
 
 The SPM package is the single source of truth — there is no .xcodeproj.
 `make-app.sh` wraps the release binary in a minimal bundle
-(`dev.lighthouse.app`, ad-hoc signed), which native notifications will need
-later. `LIGHTHOUSE_SMOKE=1 Scripts/smoke-run.sh` launches the built app,
-checks the attention socket (0600) and clean-quit behavior, and exits.
+(`dev.lighthouse.app`, ad-hoc signed). **Launch via `open dist/Lighthouse.app`
+(or Finder), not by running the binary directly** — native notifications
+(UNUserNotificationCenter) only work when the app is registered by
+LaunchServices; a direct `exec` of the binary traps in UN*.
+`LIGHTHOUSE_SMOKE=1 Scripts/smoke-run.sh` runs the full gate suite (launch,
+socket 0600, clean quit, terminal geometry, review pane, diff render, merge
+walk, and the notification decision + enqueue path).
+
+## First run and notifications
+
+On first launch (no repos yet) a setup sheet runs prerequisite checks —
+git ≥ 2.35, `claude` resolvable through your login shell, the app container
+writable, the socket path within the macOS limit — requests notification
+permission in context, and runs a hook self-test (a synthetic hook through
+the real curl → socket transport) so a dead attention pipeline is a visible
+failed check, not a mystery. Re-run any time from **Help → Run Setup Checks**.
+
+Notifications fire for needs-input / finished / ended sessions, but only when
+you'd otherwise miss them (app in the background, or a different task
+selected) — never for the task on your screen. The dock icon badges the
+number of tasks awaiting your input. Cmd+K opens the inbox, ordered by what
+needs you first (longest-blocked agent at the top). If notifications are off,
+badges and the inbox still work; a one-time dismissible hint says so.
 
 State locations: config + attention socket in
 `~/Library/Application Support/Lighthouse/`. Task worktrees are created next

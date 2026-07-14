@@ -43,6 +43,9 @@ struct LighthouseMain: App {
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(runtime.selectedTaskId == nil)
             }
+            CommandGroup(replacing: .help) {
+                Button("Run Setup Checks") { runtime.openSetup() }
+            }
         }
     }
 }

@@ -288,6 +288,19 @@ public actor GitClient {
         return URL(fileURLWithPath: path, relativeTo: repository).standardizedFileURL
     }
 
+    /// The clone's current branch short-name, or nil if detached/unborn.
+    /// Auto-suggests the base branch at repo registration.
+    public func currentBranch(in repository: URL) async throws -> String? {
+        let result = try await run(["symbolic-ref", "--quiet", "--short", "HEAD"], in: repository)
+        switch result.exitCode {
+        case 0:
+            let name = result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        case 1: return nil // detached HEAD
+        default: throw classify(result, arguments: ["symbolic-ref", "--short", "HEAD"], in: repository)
+        }
+    }
+
     /// Absolute path of the git directory for `repository`
     /// (`git rev-parse --absolute-git-dir`). For a linked worktree this is the
     /// per-worktree gitdir `<main>/.git/worktrees/<name>/` — where this
