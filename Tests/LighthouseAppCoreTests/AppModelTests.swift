@@ -266,6 +266,58 @@ final class AppModelTests {
         #expect(reloaded.attentionState(of: task.id) == .needsInput)
     }
 
+    // MARK: Load-seed reconciliation of a stale `.working`
+
+    /// Craft a persisted task with a chosen state + sessionRef, write it to the
+    /// store, and return a fresh model loaded from disk (mirrors a relaunch).
+    private func reloadFrom(state: TaskAttentionState, sessionRef: String?) throws -> (AppModel, UUID) {
+        let record = TaskRecord(
+            name: "resurrected", branch: "task/resurrected", adapterKind: "claude-code",
+            sessionRef: sessionRef, state: state,
+            workspaces: [Workspace(
+                repoId: UUID(),
+                worktreePath: fixtures.root.appendingPathComponent("wt").path,
+                mergeState: .unmerged)])
+        try ConfigStore(directory: storeDirectory).save(LighthouseConfig(tasks: [record]))
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        return (reloaded, record.id)
+    }
+
+    /// A task last persisted as `.working` (no pty can be live at load) must come
+    /// back `.dirty` so Resume and the interrupted-workspace warning both appear.
+    /// This FAILS on the unpatched load(), which seeds `.working` verbatim →
+    /// canResume == false → the dead-end "No session for this task." pane.
+    @Test func loadReconcilesPersistedWorkingToDirty() async throws {
+        let (reloaded, taskId) = try reloadFrom(state: .working, sessionRef: "sess-live")
+        #expect(reloaded.attentionState(of: taskId) == .dirty)
+        let task = try #require(reloaded.tasks.first { $0.id == taskId })
+        #expect(reloaded.canResume(task))
+    }
+
+    /// Every non-`.working` persisted state is truthful and seeds unchanged.
+    @Test func loadLeavesNonWorkingStatesUntouched() async throws {
+        for state in [TaskAttentionState.dirty, .done, .needsInput] {
+            let (reloaded, taskId) = try reloadFrom(state: state, sessionRef: "sess-\(state.rawValue)")
+            #expect(reloaded.attentionState(of: taskId) == state)
+        }
+    }
+
+    /// The reconciliation lives ONLY at the load seam: a genuine in-session
+    /// transition to `.working` via the state machine is never rewritten to
+    /// `.dirty`. Guards against the fix leaking into the live pipeline.
+    @Test func liveWorkingTransitionIsNotReconciled() async throws {
+        let task = try await makeTask()
+        model.noteSessionStarted(taskId: task.id) // live → .working
+        #expect(model.attentionState(of: task.id) == .working)
+        model.apply(TaskAttentionSignal(
+            taskId: task.id, sessionRef: task.sessionRef!, event: .agentWorking))
+        #expect(model.attentionState(of: task.id) == .working)
+    }
+
     // MARK: Derivations
 
     @Test func resumeAffordanceMatrix() async throws {

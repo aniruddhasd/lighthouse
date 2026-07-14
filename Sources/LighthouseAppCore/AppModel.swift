@@ -79,16 +79,41 @@ public final class AppModel {
         self.now = now
     }
 
-    /// Loads persisted state. Attention seeds from each task's stored state.
+    /// Loads persisted state. Attention seeds from each task's stored state,
+    /// reconciled through `reconciledLoadState` (see below).
     public func load() throws {
         let config = try store.load()
         repos = config.repos
-        tasks = config.tasks
+        // A task last persisted as `.working` can never be truthful at load:
+        // terminal controllers are in-memory only and die with the app, so no
+        // pty can be live the instant we start. Left as `.working`, canResume
+        // returns false (no Resume button) and the `.dirty` warning is skipped,
+        // leaving a dead-end "No session for this task." pane (2026-07-14, found
+        // in acceptance testing). Fold it to `.dirty` at the load seam — the
+        // same state the live `.sessionDied` transition yields — so Resume and
+        // the interrupted-workspace warning both appear. Live `.working`
+        // transitions run through AttentionStateMachine and are untouched.
+        tasks = config.tasks.map { record in
+            var record = record
+            record.state = Self.reconciledLoadState(record.state)
+            return record
+        }
         worktreesRootOverride = config.worktreesRootOverride
         hasCompletedSetup = config.hasCompletedSetup
         notificationsHintDismissed = config.notificationsHintDismissed
-        attention = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, $0.state) })
-        attentionSince = Dictionary(uniqueKeysWithValues: config.tasks.map { ($0.id, now()) })
+        attention = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.state) })
+        attentionSince = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
+    }
+
+    /// Pure load-seed reconciliation: a persisted `.working` folds to `.dirty`
+    /// (no pty is live at load, so the agent that was "working" is gone —
+    /// exactly the live `.sessionDied` outcome); every other state is truthful
+    /// and passes through. Load-time only — live transitions go through
+    /// `AttentionStateMachine`, never here.
+    nonisolated static func reconciledLoadState(
+        _ persisted: TaskAttentionState
+    ) -> TaskAttentionState {
+        persisted == .working ? .dirty : persisted
     }
 
     public func markSetupCompleted() {
