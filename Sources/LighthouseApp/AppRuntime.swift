@@ -73,6 +73,8 @@ final class AppRuntime {
         Task { await runAttentionPipeline() }
         setUpGeometryProbeIfRequested()
         runDiffRenderCheckIfRequested()
+        runFileRenderCheckIfRequested()
+        runNavigatorCheckIfRequested()
         runMergeWalkCheckIfRequested()
         runNotificationCheckIfRequested()
     }
@@ -230,6 +232,119 @@ final class AppRuntime {
         } catch {
             FileHandle.standardOutput.write(Data("DIFFRENDER-STAGE failed \(error)\n".utf8))
         }
+    }
+
+    /// LIGHTHOUSE_DEBUG_FILERENDER=1: renders the hostile FILE fixture through
+    /// the REAL content-viewer pipeline (FilePageBuilder → locked WKWebView) and
+    /// logs the page's own DOM assertions. Repo file content is untrusted input
+    /// rendered into HTML (spec §8); this is the escape proof for the file
+    /// viewer that no unit test can give. Mirrors the DIFFRENDER check for the
+    /// diff path — both must stay green.
+    private var fileRenderKeepAlive: [AnyObject] = []
+    private func runFileRenderCheckIfRequested() {
+        guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_FILERENDER"] == "1" else { return }
+        do {
+            let directory = try DiffWebViewFactory.makeRenderDirectory()
+            let gate = LocalOnlyNavigationDelegate(allowedRoot: directory) { message in
+                FileHandle.standardOutput.write(Data("FILERENDER result \(message)\n".utf8))
+            }
+            let webView = DiffWebViewFactory.makeWebView(
+                renderDirectory: directory, navigationGate: gate)
+            fileRenderKeepAlive = [webView, gate]
+            let page = FilePageBuilder.page(
+                content: FilePageBuilder.hostileContent, filename: "evil.txt", debugChecks: true)
+            try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
+            FileHandle.standardOutput.write(Data("FILERENDER-STAGE loaded\n".utf8))
+        } catch {
+            FileHandle.standardOutput.write(Data("FILERENDER-STAGE failed \(error)\n".utf8))
+        }
+    }
+
+    /// LIGHTHOUSE_DEBUG_NAVIGATOR=<repo path>: drives the real WorkbenchModel
+    /// over a fixture repo (created outside on branch "task", base "main") and
+    /// logs every navigator + center-stage assertion for Scripts/smoke-run.sh:
+    /// the three surfaces populate (changes/files/history counts), mode
+    /// switching works, the center stage defaults to the terminal, a selection
+    /// swaps it to the viewer, a toggle returns it to the terminal, and the
+    /// terminal controller is the SAME running instance across the swap (never
+    /// recreated). A live /bin/cat pty backs the terminal so that last check is
+    /// real, not asserted against nothing.
+    private var navigatorKeepAlive: WorkbenchModel?
+    private func runNavigatorCheckIfRequested() {
+        guard let repoPath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_NAVIGATOR"],
+              !repoPath.isEmpty else { return }
+        Task { @MainActor in
+            func log(_ m: String) {
+                FileHandle.standardOutput.write(Data("NAVIGATOR-STAGE \(m)\n".utf8))
+            }
+            func mode(_ m: CenterStageMode) -> String { m == .terminal ? "terminal" : "viewer" }
+            let repo = RepoConfig(path: repoPath, baseBranch: "main")
+            let task = TaskRecord(
+                name: "navigator-probe", branch: "task", adapterKind: "debug",
+                sessionRef: nil, state: .done,
+                workspaces: [Workspace(repoId: repo.id, worktreePath: repoPath, mergeState: .unmerged)])
+            // A live terminal so "still running after the swap" is a real check.
+            let plan = LaunchPlan(
+                executable: "/bin/cat", arguments: [], environment: [:],
+                workingDirectory: FileManager.default.temporaryDirectory,
+                sessionRef: "navigator-probe")
+            registry.open(taskId: task.id, tabId: TabID.agent, plan: plan) { _, _ in }
+            let workbench = WorkbenchModel(task: task, repos: [repo], git: git)
+            navigatorKeepAlive = workbench
+            workbench.start()
+
+            await workbench.review.awaitRefresh()
+            log("changes=\(workbench.review.changedFileCount)")
+            await workbench.loadFiles()
+            log("files=\(workbench.files.count)")
+            await workbench.loadHistory()
+            log("history=\(workbench.commits.count)")
+
+            // Mode switching.
+            log("mode=\(workbench.navigatorMode.rawValue)")
+            workbench.navigatorMode = .files
+            log("mode=\(workbench.navigatorMode.rawValue)")
+            workbench.navigatorMode = .history
+            log("mode=\(workbench.navigatorMode.rawValue)")
+
+            // Center-stage default + swap + terminal survival.
+            log("center-default=\(mode(workbench.centerMode))")
+            let before = registry.controller(taskId: task.id, tabId: TabID.agent)
+            let beforeId = before.map(ObjectIdentifier.init)
+            let beforeRunning = before?.isRunning ?? false
+            if let changed = Self.firstFilePath(in: workbench.review.tree) {
+                await workbench.selectChangedFile(changed)
+            }
+            log("center-after-select=\(mode(workbench.centerMode))")
+            log("viewer-has-content=\(workbench.viewer.hasContent)")
+            workbench.toggleCenter()
+            log("center-after-toggle=\(mode(workbench.centerMode))")
+            let after = registry.controller(taskId: task.id, tabId: TabID.agent)
+            let afterId = after.map(ObjectIdentifier.init)
+            let alive = beforeId != nil && beforeId == afterId
+                && beforeRunning && (after?.isRunning ?? false)
+            log("terminal-alive=\(alive)")
+
+            // File + commit selections render pages through the center viewer.
+            if let browseFile = Self.firstFilePath(in: workbench.files) {
+                await workbench.selectFile(browseFile)
+                log("file-page=\(workbench.viewer.hasContent)")
+            }
+            if let commit = workbench.commits.first {
+                await workbench.selectCommit(commit)
+                log("commit-page=\(workbench.viewer.hasContent)")
+            }
+            log("done")
+        }
+    }
+
+    /// First file (depth-first) in a navigator tree, or nil if none.
+    private static func firstFilePath(in nodes: [FileTreeNode]) -> String? {
+        for node in nodes {
+            if node.isFile { return node.id }
+            if let children = node.children, let found = firstFilePath(in: children) { return found }
+        }
+        return nil
     }
 
     /// LIGHTHOUSE_DEBUG_GEOMETRY=1: select an ephemeral probe task running a

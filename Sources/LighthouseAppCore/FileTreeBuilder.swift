@@ -54,6 +54,21 @@ public enum FileTreeBuilder {
         return root.nodes(prefix: "")
     }
 
+    /// Builds a plain repo FILE tree from a flat list of relative paths (e.g.
+    /// `GitClient.listFiles`). Unlike `build(entries:untracked:)` this is a
+    /// browser, not a review surface: files carry no status glyph (`status`
+    /// nil). Same folder grouping, sorting (dirs first, then files, each
+    /// alphabetical), and recursive `fileCount` as the changed-files tree.
+    public static func build(paths: [String]) -> [FileTreeNode] {
+        var root = DirectoryAccumulator()
+        for path in paths {
+            let components = path.split(separator: "/").map(String.init)
+            guard !components.isEmpty else { continue }
+            root.insert(components: components, fullPath: path, status: nil)
+        }
+        return root.nodes(prefix: "")
+    }
+
     static func marker(for change: DiffEntry.Change) -> String {
         switch change {
         case .added: return "A"
@@ -69,9 +84,9 @@ public enum FileTreeBuilder {
 
     private struct DirectoryAccumulator {
         var directories: [String: DirectoryAccumulator] = [:]
-        var files: [(name: String, fullPath: String, status: String)] = []
+        var files: [(name: String, fullPath: String, status: String?)] = []
 
-        mutating func insert(components: [String], fullPath: String, status: String) {
+        mutating func insert(components: [String], fullPath: String, status: String?) {
             guard let head = components.first else { return }
             if components.count == 1 {
                 files.append((head, fullPath, status))

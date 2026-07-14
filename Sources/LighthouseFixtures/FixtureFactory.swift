@@ -112,6 +112,12 @@ public struct FixtureFactory: Sendable {
         try cleanRepo(defaultBranch: "develop")
     }
 
+    /// A freshly initialized repository with an unborn HEAD (zero commits).
+    /// The empty-history edge case for `commitLog`.
+    public func emptyRepo(defaultBranch: String = "main") throws -> FixtureRepo {
+        try initRepo(named: "empty", branch: defaultBranch)
+    }
+
     /// Working tree with staged, unstaged, and untracked changes at once.
     public func dirtyRepo() throws -> DirtyRepoFixture {
         let repo = try initRepo(named: "dirty", branch: "main")

@@ -219,6 +219,33 @@ if not ok:
 print("GEOMETRY GATE: PASS")
 PY
 
+# Layout gate: the Phase-B detail area is [ center stage | navigator ]. The
+# terminal-fill check above proves the center stage fills; this proves BOTH
+# the center stage and the (now-narrow) navigator laid out filling the detail
+# area, using the SwiftUI size probes (debugSize) the running app emits.
+python3 - "$geometry_log" <<'PY'
+import re, sys
+rx = re.compile(r"GEOMETRY-SWIFTUI label=(\S+) size=(\d+)x(\d+)")
+samples = {}
+for line in open(sys.argv[1]):
+    if m := rx.search(line):
+        samples.setdefault(m.group(1), []).append((int(m.group(2)), int(m.group(3))))
+
+def fills(label, wmin, wmax, hmin):
+    seen = samples.get(label, [])
+    ok = any(wmin <= w <= wmax and h >= hmin for w, h in seen)
+    print(f"LAYOUT {label}: samples={seen[-3:]} -> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+# Center stage keeps its >=480 min; the navigator is narrow (240..460 frame).
+center_ok = fills("centerStage", 480, 100000, 300)
+nav_ok = fills("navigator", 200, 500, 300)
+if not (center_ok and nav_ok):
+    print("LAYOUT GATE: FAIL (center stage / navigator did not fill the detail area)")
+    sys.exit(1)
+print("LAYOUT GATE: PASS")
+PY
+
 python3 - "$geometry_log" <<'PY'
 import re, sys
 populated = [m for l in open(sys.argv[1])
@@ -304,6 +331,166 @@ if problems:
 print("DIFFRENDER GATE: PASS")
 PY
 rm -f "$render_log"
+
+# --- File render check: the untrusted FILE-content escape gate -------------
+# The Phase-B content viewer renders repo FILE content (not just diffs) into a
+# WKWebView. LIGHTHOUSE_DEBUG_FILERENDER=1 renders the hostile FILE fixture
+# (script close + injected image handler + unicode) through the REAL
+# FilePageBuilder → locked WKWebView pipeline; the page posts its own DOM
+# verdict, which we assert here (the escape proof no unit test can give).
+filerender_log="$(mktemp)"
+filerender_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_FILERENDER=1 LIGHTHOUSE_CONFIG_DIR="$filerender_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$filerender_log" 2>&1 &
+filerender_pid=$!
+trap 'kill -9 "$filerender_pid" 2>/dev/null || true; rm -rf "$filerender_cfg"' EXIT
+
+filerender_tries=0
+until grep -q "FILERENDER result" "$filerender_log"; do
+    filerender_tries=$((filerender_tries + 1))
+    if [ "$filerender_tries" -gt 100 ]; then
+        echo "FILERENDER GATE: FAIL (no render result within 20s)" >&2
+        grep "FILERENDER" "$filerender_log" | tail -5 >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$filerender_pid" 2>/dev/null; then
+        echo "FILERENDER GATE: FAIL (app exited before rendering)" >&2
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$filerender_pid" 2>/dev/null || true
+filerender_tries=0
+while kill -0 "$filerender_pid" 2>/dev/null; do
+    filerender_tries=$((filerender_tries + 1))
+    [ "$filerender_tries" -gt 15 ] && kill -9 "$filerender_pid" 2>/dev/null || true
+    [ "$filerender_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$filerender_cfg"
+
+python3 - "$filerender_log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1]) if l.startswith("FILERENDER result ")), None)
+assert line, "result line vanished"
+result = json.loads(line.removeprefix("FILERENDER result ").strip())
+print(f"FILERENDER dom: {result}")
+problems = []
+if result.get("error"):
+    problems.append(f"page error: {result['error']}")
+if result.get("scripts", -1) != 0:
+    problems.append(f"{result.get('scripts')} script tags inside rendered file")
+if result.get("imgs", -1) != 0:
+    problems.append(f"{result.get('imgs')} img tags survived")
+if result.get("handlers", -1) != 0:
+    problems.append(f"{result.get('handlers')} event handlers survived")
+if result.get("pwned") is not False:
+    problems.append("hostile script EXECUTED (window.__pwned set)")
+if result.get("hostileTextPresent") is not True:
+    problems.append("hostile content missing as text — file not actually rendered")
+if result.get("lines", 0) < 1:
+    problems.append(f"expected rendered lines, got {result.get('lines')}")
+if problems:
+    print("FILERENDER GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("FILERENDER GATE: PASS")
+PY
+rm -f "$filerender_log"
+
+# --- Navigator gate: the three surfaces + center-stage swap in the real app -
+# LIGHTHOUSE_DEBUG_NAVIGATOR=<worktree> drives the real WorkbenchModel over a
+# fixture repo: the Changes/Files/History surfaces populate, mode switching
+# works, the center stage defaults to the terminal, a navigator selection swaps
+# it to the viewer, a toggle returns it to the terminal, and the terminal
+# controller is the SAME running instance across the swap (never recreated).
+navigator_root="$(mktemp -d)"
+navigator_main="$navigator_root/main"
+navigator_wt="$navigator_root/wt"
+mkdir -p "$navigator_main"
+git -C "$navigator_main" init -q -b main
+git -C "$navigator_main" config user.name smoke
+git -C "$navigator_main" config user.email smoke@lighthouse.invalid
+git -C "$navigator_main" config commit.gpgsign false
+printf 'base\n' > "$navigator_main/tracked.txt"
+git -C "$navigator_main" add tracked.txt
+git -C "$navigator_main" commit -qm base
+printf 'more\n' > "$navigator_main/second.txt"
+git -C "$navigator_main" add second.txt
+git -C "$navigator_main" commit -qm second
+git -C "$navigator_main" worktree add -q -b task "$navigator_wt" main
+printf 'changed\n' >> "$navigator_wt/tracked.txt"
+printf 'brand new\n' > "$navigator_wt/untracked.txt"
+
+navigator_log="$(mktemp)"
+navigator_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_NAVIGATOR="$navigator_wt" LIGHTHOUSE_CONFIG_DIR="$navigator_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$navigator_log" 2>&1 &
+nav_pid=$!
+trap 'kill -9 "$nav_pid" 2>/dev/null || true; rm -rf "$navigator_cfg" "$navigator_root"' EXIT
+
+nav_tries=0
+until grep -q "NAVIGATOR-STAGE done" "$navigator_log"; do
+    nav_tries=$((nav_tries + 1))
+    if [ "$nav_tries" -gt 150 ]; then
+        echo "NAVIGATOR GATE: FAIL (no terminal stage within 30s)" >&2
+        grep "NAVIGATOR-STAGE" "$navigator_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$nav_pid" 2>/dev/null; then
+        echo "NAVIGATOR GATE: FAIL (app exited during drive)" >&2
+        grep "NAVIGATOR-STAGE" "$navigator_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$nav_pid" 2>/dev/null || true
+nav_tries=0
+while kill -0 "$nav_pid" 2>/dev/null; do
+    nav_tries=$((nav_tries + 1))
+    [ "$nav_tries" -gt 15 ] && kill -9 "$nav_pid" 2>/dev/null || true
+    [ "$nav_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$navigator_cfg" "$navigator_root"
+
+python3 - "$navigator_log" <<'PY'
+import sys
+stages = {}
+modes = []
+for l in open(sys.argv[1]):
+    if not l.startswith("NAVIGATOR-STAGE "):
+        continue
+    body = l.removeprefix("NAVIGATOR-STAGE ").strip()
+    if body.startswith("mode="):
+        modes.append(body.removeprefix("mode="))
+    elif "=" in body:
+        k, v = body.split("=", 1)
+        stages[k] = v
+print(f"NAVIGATOR stages: {stages} modes={modes}")
+
+problems = []
+def as_int(k):
+    try: return int(stages.get(k, "x"))
+    except ValueError: return -1
+if as_int("changes") < 1: problems.append(f"changes={stages.get('changes')}")
+if as_int("files") < 1: problems.append(f"files={stages.get('files')}")
+if as_int("history") < 1: problems.append(f"history={stages.get('history')}")
+if modes != ["changes", "files", "history"]: problems.append(f"mode switching {modes}")
+if stages.get("center-default") != "terminal": problems.append("center did not default to terminal")
+if stages.get("center-after-select") != "viewer": problems.append("selection did not swap to viewer")
+if stages.get("center-after-toggle") != "terminal": problems.append("toggle did not return to terminal")
+if stages.get("terminal-alive") != "true": problems.append("terminal was recreated across the swap")
+if stages.get("viewer-has-content") != "true": problems.append("viewer rendered nothing on select")
+if stages.get("file-page") != "true": problems.append("file selection rendered nothing")
+if stages.get("commit-page") != "true": problems.append("commit selection rendered nothing")
+if problems:
+    print("NAVIGATOR GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("NAVIGATOR GATE: PASS")
+PY
+rm -f "$navigator_log"
 
 # --- Merge walk gate: the merge-back cycle end-to-end in the real app ------
 # LIGHTHOUSE_DEBUG_MERGEWALK=<clone> drives a task's merge-to-base over a

@@ -354,6 +354,150 @@ public actor GitClient {
         return URL(fileURLWithPath: top, isDirectory: true)
     }
 
+    // MARK: - History and file browsing (Phase A navigator)
+
+    /// Recent commits, newest first: `git log --max-count=<limit>
+    /// --format=<delimiter-safe> --no-color`. `limit` is an Int (not a
+    /// string), so no ref or option can flow in — there is nothing to guard.
+    /// An empty (unborn) repository is a normal state, not an error: it yields
+    /// `[]`. The format and the parser share `CommitLogParser.format`, so the
+    /// writer and reader cannot drift.
+    public func commitLog(worktree: URL, limit: Int) async throws -> [CommitSummary] {
+        let count = max(0, limit)
+        let arguments = ["log", "--max-count=\(count)", "--format=\(CommitLogParser.format)", "--no-color"]
+        let result = try await run(arguments, in: worktree)
+        if result.exitCode == 0 {
+            return try CommitLogParser.parse(result.stdout)
+        }
+        // `git log` on a repo with no commits exits 128 ("does not have any
+        // commits yet"). Distinguish that unborn state — the one non-error
+        // failure — from a real fault via the canonical HEAD check, rather
+        // than matching stderr text.
+        if try await isUnborn(worktree) { return [] }
+        throw classify(result, arguments: arguments, in: worktree)
+    }
+
+    /// Patch for a single commit, suitable for diff2html: `git show
+    /// --format= --patch --end-of-options <hash> --`. `--format=` drops the
+    /// commit header so the output is a clean unified diff; a root commit (no
+    /// parent) renders as an all-added patch (verified git 2.50.1). `hash` is
+    /// the one place a rev reaches `git show`, so it is validated to 4–40 hex
+    /// chars BEFORE any subprocess runs (an invalid value throws and never
+    /// launches git); `--end-of-options` is the belt-and-suspenders guard.
+    public func commitDiff(worktree: URL, hash: String) async throws -> String {
+        guard Self.isValidCommitHash(hash) else {
+            throw GitClientError.invalidRevision(hash)
+        }
+        let arguments = ["show", "--format=", "--patch", "--end-of-options", hash, "--"]
+        let result = try await runExpectingSuccess(arguments, in: worktree)
+        return result.stdoutText
+    }
+
+    /// True iff `hash` is 4–40 hexadecimal characters (`^[0-9a-fA-F]{4,40}$`).
+    /// Anything with a leading dash, slash, semicolon, or `=` fails here, so
+    /// `--output=…`, `-x`, and `; rm` can never reach `git show`.
+    static func isValidCommitHash(_ hash: String) -> Bool {
+        let count = hash.count
+        return count >= 4 && count <= 40 && hash.allSatisfy { $0.isHexDigit }
+    }
+
+    /// gitignore-aware file list, relative paths, NUL-parsed:
+    /// `git ls-files -z --cached --others --exclude-standard`. `--cached` is
+    /// tracked files, `--others` is untracked ones, and `--exclude-standard`
+    /// applies `.gitignore`/`.git/info/exclude`/global excludes — so an
+    /// ignored `node_modules/` never appears while an untracked, non-ignored
+    /// file does. No ref or path argument, so nothing to guard.
+    public func listFiles(worktree: URL) async throws -> [String] {
+        let arguments = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+        let result = try await runExpectingSuccess(arguments, in: worktree)
+        return result.stdout
+            .split(separator: UInt8(0), omittingEmptySubsequences: true)
+            .map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Reads a repo file for the content viewer. This is a FILESYSTEM read,
+    /// not a git call, so it carries its own hard boundary: the worktree root
+    /// and the resolved target are both canonicalized with realpath(3), then
+    /// the target must be contained in the root by normalized path COMPONENTS
+    /// (the same check as `LocalOnlyNavigationDelegate.isContained`, duplicated
+    /// here because LighthouseGit cannot depend on the app target). That one
+    /// check rejects `..`, absolute paths, and symlinks whose target escapes
+    /// the tree. Size is capped at 2 MiB (`.tooLarge`); a NUL byte in the
+    /// first 8 KiB marks binary (`.binary`); text is decoded UTF-8 lossily.
+    public func fileContents(worktree: URL, relativePath: String) async throws -> FileContents {
+        guard let canonicalRoot = Self.realPath(worktree.path) else {
+            throw GitClientError.fileUnreadable(
+                relativePath: relativePath, reason: "worktree root not resolvable")
+        }
+        let joined = URL(
+            fileURLWithPath: relativePath,
+            relativeTo: URL(fileURLWithPath: canonicalRoot, isDirectory: true))
+        guard let canonicalTarget = Self.realPath(joined.path) else {
+            throw GitClientError.fileUnreadable(relativePath: relativePath, reason: "no such file")
+        }
+        guard Self.isContained(canonicalTarget, within: canonicalRoot) else {
+            throw GitClientError.pathOutsideWorktree(relativePath: relativePath)
+        }
+
+        let fileManager = FileManager.default
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try fileManager.attributesOfItem(atPath: canonicalTarget)
+        } catch {
+            throw GitClientError.fileUnreadable(
+                relativePath: relativePath, reason: String(describing: error))
+        }
+        if (attributes[.type] as? FileAttributeType) == .typeDirectory {
+            throw GitClientError.fileUnreadable(relativePath: relativePath, reason: "is a directory")
+        }
+
+        let sizeCap = 2 * 1024 * 1024
+        let size = (attributes[.size] as? Int) ?? 0
+        if size > sizeCap { return .tooLarge(bytes: size) }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: canonicalTarget))
+        } catch {
+            throw GitClientError.fileUnreadable(
+                relativePath: relativePath, reason: String(describing: error))
+        }
+        // git's own binary heuristic: a NUL in the first 8 KiB.
+        if data.prefix(8192).contains(0) { return .binary }
+        return .text(String(decoding: data, as: UTF8.self))
+    }
+
+    /// realpath(3) wrapper: fully resolves symlinks and `..`; nil if the path
+    /// does not exist. Mirrors FixtureFactory's use of realpath — chosen over
+    /// URL.resolvingSymlinksInPath(), which strips the /private prefix on macOS.
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// True iff `path` is `root` or a descendant, by normalized path
+    /// components — never a raw string prefix, which would accept a sibling
+    /// whose name extends root's (the bug fixed in the nav gate 2026-07-13).
+    private static func isContained(_ path: String, within root: String) -> Bool {
+        let rootComponents = URL(fileURLWithPath: root).standardizedFileURL.pathComponents
+        let pathComponents = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        guard pathComponents.count >= rootComponents.count else { return false }
+        return Array(pathComponents.prefix(rootComponents.count)) == rootComponents
+    }
+
+    /// True when the repository has no commits yet (unborn HEAD):
+    /// `git rev-parse -q --verify HEAD` exits 1 quietly. Used to treat an
+    /// empty repo's `git log` failure as `[]` rather than an error.
+    private func isUnborn(_ repository: URL) async throws -> Bool {
+        let result = try await run(["rev-parse", "-q", "--verify", "HEAD"], in: repository)
+        switch result.exitCode {
+        case 0: return false
+        case 1 where result.stderrText.isEmpty: return true
+        default: return false // some other failure — let the caller's error surface
+        }
+    }
+
     // MARK: - Execution and error classification
 
     @discardableResult

@@ -61,153 +61,120 @@ struct ContentView: View {
     }
 }
 
-/// Terminal on the left; the live review pane on the right.
+/// Detail layout: CENTER STAGE (terminal ⇄ content viewer) on the left, the
+/// hideable NAVIGATOR on the right; the conflict pane takes over the whole
+/// detail area during a paused merge walk (spec §2.5). A single per-task
+/// `WorkbenchModel` owns the live-diff watcher, the center viewer, and the
+/// two view-modes; its lifecycle IS the watcher lifecycle (see the contract
+/// on ReviewPaneModel) — created on appear, stopped on background, restarted
+/// on foreground, torn down on task switch (identity is `.id(task.id)`).
 struct TaskDetailView: View {
     @Environment(AppRuntime.self) private var runtime
+    @Environment(\.scenePhase) private var scenePhase
     let task: TaskRecord
+    @State private var workbench: WorkbenchModel?
 
     var body: some View {
-        HSplitView {
-            terminalPane
-                .frame(minWidth: 420)
-                .debugSize("terminalPane")
-            rightPane
-                // Expand, never ideal-size: this child's ideal height is what
-                // collapsed the whole split before (see comment below).
-                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
-                .debugSize("reviewPane")
+        // ZStack, NOT Group: Group is transparent, so modifiers attach to each
+        // branch — a branch switch (progress → workbench, or merge-walk on/off)
+        // would re-fire onAppear and recreate the model (the loop the REVIEWPANE
+        // gate caught, 2026-07-13). A real container fires appear once; the
+        // nil-guard is belt-and-braces.
+        ZStack {
+            if let walk = runtime.mergeWalk, walk.task.id == task.id {
+                ConflictPaneView(controller: walk)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let workbench {
+                workbenchLayout(workbench)
+            } else {
+                ProgressView()
+            }
         }
-        // Root cause of the sizing bug (pinned by the geometry probes,
-        // 2026-07-12): HSplitView sizes itself to its children's IDEAL
-        // heights — the review placeholder's ~181pt — and the detail column
-        // then centers the whole 181pt strip. Forcing the split (and both
-        // children) to expand makes it adopt the full detail area, and the
-        // representable's sizeThatFits carries that down to the terminal.
+        // The detail column collapses to its children's IDEAL height unless the
+        // split and both children are forced to expand (the 2026-07-12 sizing
+        // scar); the representable's sizeThatFits then carries the full area
+        // down to the terminal.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .debugSize("hsplit")
+        .debugSize("detail")
         .navigationTitle(task.name)
         .navigationSubtitle(task.branch)
-        .toolbar {
+        .toolbar { toolbarContent }
+        .onAppear {
+            guard workbench == nil else { return }
+            ReviewDebug.stage("appear task=\(task.name)")
+            let model = WorkbenchModel(
+                task: task, repos: runtime.model.repos, git: runtime.git)
+            workbench = model
+            model.start()
+        }
+        .onDisappear {
+            workbench?.stop()
+            workbench = nil
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { workbench?.start() } else { workbench?.stop() }
+        }
+    }
+
+    @ViewBuilder
+    private func workbenchLayout(_ workbench: WorkbenchModel) -> some View {
+        @Bindable var workbench = workbench
+        HSplitView {
+            CenterStageView(workbench: workbench, task: task)
+                // Never ideal-size: expand so the split adopts the full detail
+                // area (sizing scar). Min > 420 keeps the geometry contract.
+                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+                .debugSize("centerStage")
+            if workbench.navigatorVisible {
+                NavigatorView(workbench: workbench)
+                    .frame(minWidth: 240, idealWidth: 300, maxWidth: 460, maxHeight: .infinity)
+                    .debugSize("navigator")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .debugSize("hsplit")
+        .background {
+            // Keystrokes, each mirrored by a visible toolbar control:
+            //   ⌘J        swap the center stage (terminal ⇄ viewer)
+            //   ⌥⌘S       hide/show the navigator (⌃⌘S is the left sidebar)
+            Button("", action: { workbench.toggleCenter() })
+                .keyboardShortcut("j", modifiers: .command)
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            Button("", action: { workbench.navigatorVisible.toggle() })
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if let workbench {
             ToolbarItem {
-                Button {
-                    Task {
-                        await runtime.startMergeWalk(
-                            for: task, orderedRepoIds: task.workspaces.map(\.repoId))
-                    }
-                } label: {
-                    Label("Merge to base", systemImage: "arrow.triangle.merge")
+                Button { workbench.toggleCenter() } label: {
+                    Label(
+                        workbench.centerMode == .terminal ? "Show Viewer" : "Show Terminal",
+                        systemImage: workbench.centerMode == .terminal ? "doc.text" : "terminal")
                 }
-                .disabled(runtime.mergeWalk != nil)
+                .help("Swap the center between the terminal and the content viewer (⌘J)")
             }
-        }
-    }
-
-    /// The conflict pane takes over the right side during a paused merge walk
-    /// for this task; otherwise the live review pane (spec §2.5).
-    @ViewBuilder
-    private var rightPane: some View {
-        if let walk = runtime.mergeWalk, walk.task.id == task.id {
-            ConflictPaneView(controller: walk)
-        } else {
-            ReviewPaneView(task: task)
-        }
-    }
-
-    @ViewBuilder
-    private var terminalPane: some View {
-        let tabs = runtime.tabs[task.id] ?? []
-        VStack(spacing: 0) {
-            if !tabs.isEmpty {
-                TerminalTabBar(task: task)
-                Divider()
-            }
-            terminalBody(tabs: tabs)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    @ViewBuilder
-    private func terminalBody(tabs: [TerminalTab]) -> some View {
-        let focused = runtime.focusedTab[task.id]
-        if let focused,
-           let controller = runtime.registry.controller(taskId: task.id, tabId: focused),
-           controller.isRunning {
-            // Keep every tab's NSView mounted (retained instances), showing
-            // only the focused one — a hidden tab keeps running unfocused.
-            ZStack {
-                ForEach(tabs) { tab in
-                    if let c = runtime.registry.controller(taskId: task.id, tabId: tab.id) {
-                        TerminalHostView(terminalView: c.terminalView)
-                            .opacity(tab.id == focused ? 1 : 0)
-                            .allowsHitTesting(tab.id == focused)
-                    }
+            ToolbarItem {
+                Button { workbench.navigatorVisible.toggle() } label: {
+                    Label("Toggle Navigator", systemImage: "sidebar.trailing")
                 }
+                .help("Show or hide the navigator (⌥⌘S)")
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            noSessionView
         }
-    }
-
-    @ViewBuilder
-    private var noSessionView: some View {
-        VStack(spacing: 12) {
-            if runtime.model.attentionState(of: task.id) == .dirty {
-                Label("Session ended — workspace may hold unfinished work",
-                      systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.yellow)
-            }
-            if runtime.model.canResume(task) {
-                Button { runtime.resumeSession(for: task) } label: {
-                    Label("Resume session", systemImage: "play.circle")
+        ToolbarItem {
+            Button {
+                Task {
+                    await runtime.startMergeWalk(
+                        for: task, orderedRepoIds: task.workspaces.map(\.repoId))
                 }
-                .controlSize(.large)
-                Text("Continues the stored conversation (claude --resume) in a shell tab. If its history is gone, the terminal shows the error and your shell stays.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("No session for this task.").foregroundStyle(.secondary)
+            } label: {
+                Label("Merge to base", systemImage: "arrow.triangle.merge")
             }
+            .disabled(runtime.mergeWalk != nil)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// Simple tab bar above the terminal pane. Cmd+T opens a shell tab (Ctrl+T is
-/// a control byte TUIs intercept — hence Cmd+T); Cmd+W closes the focused
-/// shell tab. The agent tab is badged and not closable from here.
-struct TerminalTabBar: View {
-    @Environment(AppRuntime.self) private var runtime
-    let task: TaskRecord
-
-    var body: some View {
-        let tabs = runtime.tabs[task.id] ?? []
-        HStack(spacing: 2) {
-            ForEach(tabs) { tab in
-                let focused = runtime.focusedTab[task.id] == tab.id
-                HStack(spacing: 4) {
-                    if tab.isAgent {
-                        AttentionBadge(state: runtime.model.attentionState(of: task.id))
-                    }
-                    Text(tab.title).font(.caption)
-                    if !tab.isAgent {
-                        Button {
-                            runtime.closeTab(taskId: task.id, tabId: tab.id)
-                        } label: { Image(systemName: "xmark").font(.system(size: 8)) }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(focused ? Color.accentColor.opacity(0.25) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 5))
-                .contentShape(Rectangle())
-                .onTapGesture { runtime.focusedTab[task.id] = tab.id }
-            }
-            Button { runtime.openShellTab(for: task) } label: { Image(systemName: "plus") }
-                .buttonStyle(.plain)
-                .help("New shell tab (⌘T)")
-            Spacer()
-        }
-        .padding(.horizontal, 6).padding(.vertical, 3)
     }
 }
 
