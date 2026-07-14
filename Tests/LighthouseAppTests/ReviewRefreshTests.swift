@@ -94,6 +94,39 @@ final class ReviewRefreshTests {
         #expect(await refreshedFileCount(model) == 3, "restart did not re-read the diff")
     }
 
+    // MARK: Collapse state survives a diff refresh
+
+    @Test func userCollapseSurvivesRefreshInTheModel() async throws {
+        // Put a change under a subdirectory so the tree has a foldable dir.
+        let main = try fixtures.cleanRepo(defaultBranch: "develop", commitCount: 1)
+        try fixtures.git(["commit", "--allow-empty", "-m", "seed"], in: main.path)
+        let worktree = main.path.deletingLastPathComponent()
+            .appendingPathComponent("wt-\(UUID().uuidString.prefix(6))")
+        try fixtures.git(["worktree", "add", "-b", "task", worktree.path, "develop"], in: main.path)
+        let subdir = worktree.appendingPathComponent("__tests__")
+        try FileManager.default.createDirectory(at: subdir, withIntermediateDirectories: true)
+        try Data("t\n".utf8).write(to: subdir.appendingPathComponent("a.test.tsx"))
+        try Data("r\n".utf8).write(to: worktree.appendingPathComponent("root.txt"))
+        let repo = RepoConfig(path: main.path.path, baseBranch: "develop")
+        let model = makeModel(repo: repo, worktree: worktree)
+        defer { model.stop() }
+
+        model.start()
+        _ = await refreshedFileCount(model)
+        // The user collapses __tests__/.
+        model.expansion.setExpanded(false, for: "__tests__/")
+        #expect(!model.expansion.isExpanded("__tests__/"))
+
+        // Another change lands and the diff regenerates.
+        try Data("more\n".utf8).write(to: subdir.appendingPathComponent("b.test.tsx"))
+        model.refreshNow()
+        _ = await refreshedFileCount(model)
+
+        // The collapse survived the rebuild (same dir still present).
+        #expect(!model.expansion.isExpanded("__tests__/"),
+                "refresh re-expanded a directory the user had collapsed")
+    }
+
     // MARK: Manual refresh
 
     @Test func manualRefreshRereadsTheDiff() async throws {

@@ -22,6 +22,9 @@ final class ReviewPaneModel {
     /// Number of changed (tracked) files in the latest diff — the value the
     /// user sees as the file count; asserted by tests.
     private(set) var changedFileCount = 0
+    /// Session-only per-(task,repo) directory collapse state; directories are
+    /// expanded by default.
+    var expansion = TreeExpansionState()
     private(set) var renderError: String?
 
     let webView: WKWebView
@@ -144,7 +147,11 @@ final class ReviewPaneModel {
                 workspace: workspace.worktreeURL, baseBranch: base)
             // Tree + counts update FIRST and unconditionally — the file list
             // is useful even if the WKWebView renderer assets are missing.
-            tree = FileTreeBuilder.build(entries: diff.entries, untracked: diff.untracked)
+            let newTree = FileTreeBuilder.build(entries: diff.entries, untracked: diff.untracked)
+            tree = newTree
+            // Preserve the user's collapses across the rebuild; drop entries
+            // for directories that no longer exist in the diff.
+            expansion.prune(toDirectoryIDs: newTree.flatMap { $0.directoryIDs() })
             untrackedCount = diff.untracked.count
             changedFileCount = diff.entries.count
             renderError = nil
@@ -252,8 +259,10 @@ private struct ReviewPaneContent: View {
             .padding(6)
             Divider()
             HSplitView {
+                // Wider minimum so directory names like "__tests__" aren't
+                // middle-truncated into "__t...s__" (2026-07-14).
                 fileTree
-                    .frame(minWidth: 150, idealWidth: 200, maxWidth: 360, maxHeight: .infinity)
+                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 420, maxHeight: .infinity)
                 DiffWebViewHost(webView: model.webView)
                     .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -276,33 +285,65 @@ private struct ReviewPaneContent: View {
                 systemImage: "checkmark.circle",
                 description: Text("Nothing differs from base yet."))
         } else {
+            // Explicit DisclosureGroups (not OutlineGroup) so expansion is
+            // driven by the session state: expanded by default, and a
+            // collapsed dir shows its file count so a fold never hides files.
             List {
-                OutlineGroup(model.tree, children: \.children) { node in
-                    HStack(spacing: 6) {
-                        if node.isFile {
-                            Text(node.status ?? "·")
-                                .font(.system(.caption2, design: .monospaced).bold())
-                                .foregroundStyle(statusColor(node.status))
-                                .frame(width: 14)
-                        } else {
-                            Image(systemName: "folder")
-                                .font(.caption)
-                        }
-                        Text(node.name)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if node.isFile { model.scrollTo(file: node.id) }
-                    }
+                ForEach(model.tree) { node in
+                    TreeRowView(node: node, model: model)
                 }
             }
             .listStyle(.sidebar)
         }
     }
+}
 
-    private func statusColor(_ status: String?) -> Color {
+/// Recursive row: a directory as a DisclosureGroup (expanded by default, its
+/// file count shown when collapsed), a file as a tappable leaf. A dedicated
+/// struct because a self-recursive `some View` function can't infer its type.
+private struct TreeRowView: View {
+    let node: FileTreeNode
+    @Bindable var model: ReviewPaneModel
+
+    var body: some View {
+        if let children = node.children {
+            DisclosureGroup(isExpanded: expansionBinding) {
+                ForEach(children) { child in
+                    TreeRowView(node: child, model: model)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder").font(.caption)
+                    Text(node.name).lineLimit(1).truncationMode(.tail)
+                    if !model.expansion.isExpanded(node.id) {
+                        Text("(\(node.fileCount))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .help(node.id)
+            }
+        } else {
+            HStack(spacing: 6) {
+                Text(node.status ?? "·")
+                    .font(.system(.caption2, design: .monospaced).bold())
+                    .foregroundStyle(Self.statusColor(node.status))
+                    .frame(width: 14)
+                Text(node.name).lineLimit(1).truncationMode(.middle)
+            }
+            .help(node.id)
+            .contentShape(Rectangle())
+            .onTapGesture { model.scrollTo(file: node.id) }
+        }
+    }
+
+    private var expansionBinding: Binding<Bool> {
+        Binding(
+            get: { model.expansion.isExpanded(node.id) },
+            set: { model.expansion.setExpanded($0, for: node.id) })
+    }
+
+    static func statusColor(_ status: String?) -> Color {
         switch status {
         case "A", "?": return .green
         case "D": return .red

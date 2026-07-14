@@ -118,6 +118,74 @@ struct FileTreeBuilderTests {
         #expect(tree[0].name == "new")
         #expect(tree[0].children?[0].status == "R")
     }
+
+    @Test func recursiveFileCountForNestedDirs() {
+        // src/{a.swift, deep/{x.ts, y.ts}}, __tests__/t.test.tsx
+        let entries = [
+            DiffEntry(change: .modified, path: "src/a.swift"),
+            DiffEntry(change: .added, path: "src/deep/x.ts"),
+            DiffEntry(change: .added, path: "src/deep/y.ts"),
+            DiffEntry(change: .added, path: "__tests__/t.test.tsx"),
+        ]
+        let tree = FileTreeBuilder.build(entries: entries, untracked: [])
+        let byName = Dictionary(uniqueKeysWithValues: tree.map { ($0.name, $0) })
+        #expect(byName["__tests__"]?.fileCount == 1) // the collapsed-dir badge case
+        #expect(byName["src"]?.fileCount == 3)        // a.swift + deep/{x,y}
+        let deep = byName["src"]?.children?.first { $0.name == "deep" }
+        #expect(deep?.fileCount == 2)
+        // Files count as 1.
+        #expect(byName["src"]?.children?.first { $0.name == "a.swift" }?.fileCount == 1)
+    }
+
+    @Test func directoryIDsListsEveryNestedDir() {
+        let entries = [DiffEntry(change: .added, path: "src/deep/x.ts")]
+        let tree = FileTreeBuilder.build(entries: entries, untracked: [])
+        let ids = Set(tree.flatMap { $0.directoryIDs() })
+        #expect(ids == ["src/", "src/deep/"])
+    }
+}
+
+@Suite("TreeExpansionState")
+struct TreeExpansionStateTests {
+
+    @Test func directoriesAreExpandedByDefault() {
+        let state = TreeExpansionState()
+        #expect(state.isExpanded("src/"))
+        #expect(state.isExpanded("anything/"))
+        #expect(state.collapsedIDs.isEmpty)
+    }
+
+    @Test func collapseAndToggleTrackOnlyExplicitFolds() {
+        var state = TreeExpansionState()
+        state.setExpanded(false, for: "__tests__/")
+        #expect(!state.isExpanded("__tests__/"))
+        #expect(state.isExpanded("src/"))
+        state.toggle("__tests__/")
+        #expect(state.isExpanded("__tests__/"))
+        state.toggle("src/")
+        #expect(!state.isExpanded("src/"))
+    }
+
+    @Test func collapseStateSurvivesRebuildWithSamePaths() {
+        // The user collapses a dir; the diff regenerates with the same dirs;
+        // prune must NOT re-expand it.
+        var state = TreeExpansionState()
+        state.setExpanded(false, for: "__tests__/")
+        state.prune(toDirectoryIDs: ["src/", "__tests__/", "src/deep/"])
+        #expect(!state.isExpanded("__tests__/"), "user's collapse was lost on rebuild")
+        #expect(state.isExpanded("src/"))
+    }
+
+    @Test func collapseStateDropsForDisappearedPaths() {
+        var state = TreeExpansionState()
+        state.setExpanded(false, for: "old-dir/")
+        state.setExpanded(false, for: "__tests__/")
+        // old-dir/ no longer in the diff.
+        state.prune(toDirectoryIDs: ["__tests__/", "src/"])
+        #expect(state.collapsedIDs == ["__tests__/"])
+        // A brand-new dir at the same name later starts expanded (no stale state).
+        #expect(state.isExpanded("old-dir/"))
+    }
 }
 
 @Suite("DiffRefresher")

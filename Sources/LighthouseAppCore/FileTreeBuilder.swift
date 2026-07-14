@@ -7,12 +7,31 @@ public struct FileTreeNode: Identifiable, Sendable, Equatable {
     /// Short change marker shown next to a file: A/M/D/T/R/C/U, "?" for
     /// untracked, "·" for anything unrecognized.
     public let status: String?
-    /// Full repo-relative path (unique → the identity).
+    /// Full repo-relative path (unique → the identity). Directory ids end
+    /// in "/" so they never collide with a file of the same path.
     public let id: String
     public let name: String
     public var children: [FileTreeNode]?
+    /// Number of changed FILES at or beneath this node (recursive). For a
+    /// file it is 1; for a directory it is the count shown in the collapsed
+    /// badge so a fold can never hide files invisibly.
+    public let fileCount: Int
+
+    public init(status: String?, id: String, name: String, children: [FileTreeNode]?, fileCount: Int) {
+        self.status = status
+        self.id = id
+        self.name = name
+        self.children = children
+        self.fileCount = fileCount
+    }
 
     public var isFile: Bool { children == nil }
+
+    /// Every directory id in this subtree (for pruning session expansion state).
+    public func directoryIDs() -> [String] {
+        guard let children else { return [] }
+        return [id] + children.flatMap { $0.directoryIDs() }
+    }
 }
 
 /// Builds the review pane's read-only tree from the live diff's file list.
@@ -63,15 +82,19 @@ public enum FileTreeBuilder {
         }
 
         func nodes(prefix: String) -> [FileTreeNode] {
-            let directoryNodes = directories.keys.sorted().map { name in
-                FileTreeNode(
+            let directoryNodes = directories.keys.sorted().map { name -> FileTreeNode in
+                let children = directories[name]!.nodes(prefix: prefix + name + "/")
+                return FileTreeNode(
                     status: nil,
                     id: prefix + name + "/",
                     name: name,
-                    children: directories[name]!.nodes(prefix: prefix + name + "/"))
+                    children: children,
+                    fileCount: children.reduce(0) { $0 + $1.fileCount })
             }
             let fileNodes = files.sorted { $0.name < $1.name }.map { file in
-                FileTreeNode(status: file.status, id: file.fullPath, name: file.name, children: nil)
+                FileTreeNode(
+                    status: file.status, id: file.fullPath, name: file.name,
+                    children: nil, fileCount: 1)
             }
             return directoryNodes + fileNodes
         }
