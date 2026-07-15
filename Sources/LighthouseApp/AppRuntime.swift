@@ -29,6 +29,11 @@ final class AppRuntime {
 
     var selectedTaskId: UUID?
     var switcherPresented = false
+    /// Two-mode navigation (spec §3.4): Harbor overview ⇄ Focus. Seeded from
+    /// the persisted `startView` in init; a persisted `.focus` with nothing
+    /// selected falls back to Harbor. Mutating it re-renders the shell (normal
+    /// @Observable propagation).
+    var nav = NavigationState()
     /// Active merge-back walk for the selected task, when one is running.
     var mergeWalk: MergeWalkController?
     /// Surfaced verbatim in the UI — always the full typed description.
@@ -69,6 +74,11 @@ final class AppRuntime {
         themeController = ThemeController(
             initial: LighthouseTheme.from(rawValue: model.theme),
             onChange: { newTheme in loadedModel.setTheme(newTheme.rawValue) })
+        // Land on the persisted start view (default Harbor). A persisted
+        // `.focus` with no selection (always true at cold start — selection is
+        // session-only) falls back to Harbor rather than a blank detail pane.
+        let startView: NavView = model.startView == "focus" ? .focus : .harbor
+        nav = NavigationState(view: startView == .focus && selectedTaskId == nil ? .harbor : startView)
         notifications.onSelectTask = { [weak self] id in self?.selectedTaskId = id }
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
@@ -90,6 +100,124 @@ final class AppRuntime {
         runMergeWalkCheckIfRequested()
         runNotificationCheckIfRequested()
         runThemeCheckIfRequested()
+        runHarborCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_HARBOR=1: proves the Phase-2 two-mode shell in the REAL
+    /// app. The pure sort/filter/nav-transition logic is unit-tested headlessly
+    /// (LighthouseAppCore); this gate proves the wiring the unit tests cannot —
+    /// the live Harbor grid renders the seeded cards, `HarborOrder` + the filter
+    /// chips are correct over real seeded state, card→Focus and ⌘K→Focus flip
+    /// the runtime, and — the highest-value invariant — the registry-owned
+    /// terminal survives an actual Harbor↔Focus view flip (the pty is never
+    /// tied to the Focus view's appearance; the scar).
+    ///
+    /// Seeds ephemeral tasks synchronously (so the window's first Harbor render
+    /// shows them), then drives + asserts in a Task. `HarborView` emits its own
+    /// `rendered-cards=` line from the live render; this driver emits the rest.
+    private func runHarborCheckIfRequested() {
+        guard HarborDebug.enabled else { return }
+        // Suppress the first-run setup sheet: with an isolated empty config it
+        // auto-opens, and toggling Harbor⇄Focus adds/removes the split view's
+        // NSToolbar under that sheet, which crashes SwiftUI's toolbar KVO
+        // (NSSheetEffectDimmingView). Not a real-app path (empty config = no
+        // tasks to open), but the gate drives the flip, so keep the sheet down.
+        setupPresented = false
+        // An ephemeral repo so the Repos section renders (and New task enables).
+        let repo = RepoConfig(
+            path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
+        model.insertEphemeralRepo(repo)
+        // Seed one task per state — two needsInput so the group order and the
+        // needs-count are both non-trivial. Order chosen so a WRONG sort (plain
+        // name, or InboxOrder's needs→working→dirty→done) yields a different
+        // sequence than the expected needs→working→idle(done)→stale(dirty).
+        let seedStates: [(String, TaskAttentionState)] = [
+            ("harbor-needs-a", .needsInput),
+            ("harbor-needs-b", .needsInput),
+            ("harbor-working", .working),
+            ("harbor-idle", .done),
+            ("harbor-stale", .dirty),
+        ]
+        var seeded: [TaskRecord] = []
+        for (name, state) in seedStates {
+            let task = TaskRecord(
+                name: name, branch: "task/\(name)", adapterKind: "debug",
+                sessionRef: nil, state: state, workspaces: [])
+            model.insertEphemeralTask(task)
+            seeded.append(task)
+        }
+        // The first task doubles as the terminal-survival probe: a live /bin/cat
+        // pty + tabs so entering Focus renders a real, running terminal.
+        let probe = seeded[0]
+        let plan = LaunchPlan(
+            executable: "/bin/cat", arguments: [], environment: [:],
+            workingDirectory: FileManager.default.temporaryDirectory,
+            sessionRef: "harbor-probe")
+        registry.open(taskId: probe.id, tabId: TabID.agent, plan: plan) { _, _ in }
+        tabs[probe.id] = [TerminalTab(id: TabID.agent, title: "Agent", isAgent: true)]
+        focusedTab[probe.id] = TabID.agent
+
+        let seededIds = Set(seeded.map(\.id))
+        Task { @MainActor in
+            func log(_ m: String) {
+                FileHandle.standardOutput.write(Data("HARBOR-STAGE \(m)\n".utf8))
+            }
+
+            // Sort: the Harbor order restricted to the seeded tasks must be
+            // needs → working → idle(done) → stale(dirty).
+            let order = model.harborOrder()
+                .filter { seededIds.contains($0.id) }
+                .map { model.attentionState(of: $0.id).rawValue }
+            log("sort=\(order.joined(separator: ","))")
+
+            // Filter chips: each yields the right subset of the seeded tasks.
+            @MainActor func count(_ filter: HarborFilter) -> Int {
+                model.harborOrder().filter {
+                    seededIds.contains($0.id)
+                        && filter.matches(model.attentionState(of: $0.id))
+                }.count
+            }
+            log("filter-all=\(count(.all)) filter-needs=\(count(.needs)) "
+                + "filter-working=\(count(.working)) filter-idle=\(count(.idle)) "
+                + "filter-stale=\(count(.stale))")
+
+            // card → Focus: driving `open(id)` (what a card tap calls) sets
+            // view=.focus AND the selection.
+            open(seeded[2].id) // the working task
+            log("card-open-view=\(nav.view.rawValue) "
+                + "card-open-selected=\(selectedTaskId == seeded[2].id)")
+            backToHarbor()
+            log("back-view=\(nav.view.rawValue)")
+
+            // ⌘K → Focus: the SwitcherOverlay's select calls this same `open`.
+            open(seeded[3].id) // the idle task
+            log("switcher-open-view=\(nav.view.rawValue)")
+            backToHarbor()
+
+            // Terminal-alive across a LIVE Harbor↔Focus flip. Drive the real
+            // view tree: open the probe (Focus mounts + renders its terminal),
+            // let SwiftUI settle, flip to Harbor (Focus TEARS DOWN — the pty
+            // must not die with it), open again, settle. The registry must hand
+            // back the SAME controller instance, still running.
+            open(probe.id)
+            try? await Task.sleep(for: .milliseconds(700))
+            let before = registry.agentController(taskId: probe.id)
+            let beforeId = before.map(ObjectIdentifier.init)
+            let beforeRunning = before?.isRunning ?? false
+            backToHarbor()
+            try? await Task.sleep(for: .milliseconds(500))
+            open(probe.id)
+            try? await Task.sleep(for: .milliseconds(700))
+            let after = registry.agentController(taskId: probe.id)
+            let afterId = after.map(ObjectIdentifier.init)
+            let alive = beforeId != nil && beforeId == afterId
+                && beforeRunning && (after?.isRunning ?? false)
+            log("terminal-alive=\(alive)")
+
+            // Return to Harbor so the terminal probe doesn't hold the view.
+            backToHarbor()
+            log("done")
+        }
     }
 
     /// LIGHTHOUSE_DEBUG_THEME=1: proves the theme foundation in the REAL app —
@@ -237,6 +365,21 @@ final class AppRuntime {
     }
 
     func endMergeWalk() { mergeWalk = nil }
+
+    // MARK: - Two-mode navigation (spec §3.4)
+
+    /// Open a task in Focus — the card / ⌘K-result / beacon-dot action. Applies
+    /// the selection, closes ⌘K, and flips the view to Focus (matching the
+    /// prototype's `open(id)`). The terminal is untouched: the SessionRegistry
+    /// owns it, so entering Focus only reparents the retained NSView.
+    func open(_ id: UUID) {
+        selectedTaskId = id
+        switcherPresented = false
+        nav.open()
+    }
+
+    /// Back to the Harbor overview (the Focus toolbar ◱ button / `backToHarbor`).
+    func backToHarbor() { nav.backToHarbor() }
 
     /// A SetupModel wired to this runtime's services. Fresh each time the
     /// sheet opens so checks re-run cleanly.
@@ -496,6 +639,9 @@ final class AppRuntime {
         tabs[probe.id] = [TerminalTab(id: TabID.agent, title: "Agent", isAgent: true)]
         focusedTab[probe.id] = TabID.agent
         selectedTaskId = probe.id
+        // The two-mode shell defaults to Harbor; force Focus so the terminal
+        // pane renders for the geometry/layout assertions.
+        nav.open()
         // The scripted resize is event-driven from the first real layout
         // pass (GeometryResizeDriver) — a wall-clock timer here raced window
         // creation in other launch contexts and silently no-opped.

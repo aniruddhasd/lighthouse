@@ -14,23 +14,19 @@ struct ContentView: View {
         // Reading `.resolved` here registers observation on the ThemeController,
         // so a flip re-runs this body and re-injects the new tokens app-wide.
         let theme = runtime.themeController.resolved
-        NavigationSplitView {
-            SidebarView(
-                showCreateTask: $showCreateTask,
-                showRegisterRepo: $showRegisterRepo,
-                taskPendingRemoval: $taskPendingRemoval)
-        } detail: {
-            if let taskId = runtime.selectedTaskId,
-               let task = runtime.model.tasks.first(where: { $0.id == taskId }) {
-                TaskDetailView(task: task)
-                    .id(task.id)
-            } else {
-                ContentUnavailableView(
-                    "No task selected",
-                    systemImage: "rectangle.on.rectangle",
-                    description: Text("Create a task or pick one from the sidebar (⌘K)."))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.bg)
+        // Two-mode shell (spec §3.4): Harbor overview ⇄ Focus (the current
+        // NavigationSplitView, lightly adapted; Phase 3 reshapes it). A ZStack
+        // + switch, never a Group — a Group would attach these modifiers to
+        // each branch and re-fire onAppear (the REVIEWPANE model-recreation
+        // scar). The terminal survives the flip because the SessionRegistry
+        // owns it outside the view tree; the HARBOR gate proves this.
+        ZStack {
+            switch runtime.nav.view {
+            case .harbor:
+                HarborView(showCreateTask: $showCreateTask)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .focus:
+                focusShell(theme: theme)
             }
         }
         // The custom titlebar installs itself on the host window from here; a
@@ -75,6 +71,33 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                     .padding(4)
                     .background(.quaternary)
+            }
+        }
+    }
+
+    /// Focus = the existing NavigationSplitView (sidebar + detail), unchanged
+    /// internally this phase. Phase 3 replaces the sidebar with the beacon rail
+    /// and reshapes the detail; for now the Harbor button on the detail toolbar
+    /// is the only new affordance.
+    @ViewBuilder
+    private func focusShell(theme: Theme) -> some View {
+        NavigationSplitView {
+            SidebarView(
+                showCreateTask: $showCreateTask,
+                showRegisterRepo: $showRegisterRepo,
+                taskPendingRemoval: $taskPendingRemoval)
+        } detail: {
+            if let taskId = runtime.selectedTaskId,
+               let task = runtime.model.tasks.first(where: { $0.id == taskId }) {
+                TaskDetailView(task: task)
+                    .id(task.id)
+            } else {
+                ContentUnavailableView(
+                    "No task selected",
+                    systemImage: "rectangle.on.rectangle",
+                    description: Text("Create a task or pick one from the sidebar (⌘K)."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.bg)
             }
         }
     }
@@ -172,6 +195,12 @@ struct TaskDetailView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button { runtime.backToHarbor() } label: {
+                Label("Harbor", systemImage: "square.grid.2x2")
+            }
+            .help("Back to Harbor")
+        }
         if let workbench {
             ToolbarItem {
                 Button { workbench.toggleCenter() } label: {

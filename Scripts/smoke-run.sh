@@ -699,3 +699,96 @@ if problems:
 print("THEME GATE: PASS")
 PY
 rm -f "$theme_log"
+
+# --- Harbor gate: the Phase-2 two-mode shell in the real app ----------------
+# HarborOrder / the filter predicate / the nav transitions are pure and
+# unit-tested (LighthouseAppCore); the SwiftUI shell is not headlessly
+# testable (the scar). LIGHTHOUSE_DEBUG_HARBOR=1 seeds five ephemeral tasks
+# (2 needs-input, 1 each working/idle/stale) + a live /bin/cat agent pty, then
+# proves in the running app: the Harbor grid renders the expected card count;
+# HarborOrder sorts needs->working->idle->stale; each filter chip yields the
+# right subset; a card tap and a ⌘K select both flip the runtime to Focus; and
+# — highest value — the registry-owned terminal survives a real Harbor<->Focus
+# view flip (the pty is never tied to the Focus view's appearance; the scar).
+# Launched directly (a window is created — the grid renders), like THEME.
+harbor_log="$(mktemp)"
+harbor_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_HARBOR=1 LIGHTHOUSE_CONFIG_DIR="$harbor_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$harbor_log" 2>&1 &
+harbor_pid=$!
+trap 'kill -9 "$harbor_pid" 2>/dev/null || true; rm -rf "$harbor_cfg"' EXIT
+
+harbor_tries=0
+until grep -q "HARBOR-STAGE done" "$harbor_log"; do
+    harbor_tries=$((harbor_tries + 1))
+    if [ "$harbor_tries" -gt 150 ]; then
+        echo "HARBOR GATE: FAIL (no done stage within 30s)" >&2
+        grep "HARBOR-STAGE" "$harbor_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$harbor_pid" 2>/dev/null; then
+        echo "HARBOR GATE: FAIL (app exited during harbor check)" >&2
+        grep "HARBOR-STAGE" "$harbor_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$harbor_pid" 2>/dev/null || true
+harbor_tries=0
+while kill -0 "$harbor_pid" 2>/dev/null; do
+    harbor_tries=$((harbor_tries + 1))
+    [ "$harbor_tries" -gt 15 ] && kill -9 "$harbor_pid" 2>/dev/null || true
+    [ "$harbor_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$harbor_cfg"
+
+python3 - "$harbor_log" <<'PY'
+import sys
+stages = {}
+for l in open(sys.argv[1]):
+    if not l.startswith("HARBOR-STAGE "):
+        continue
+    body = l.removeprefix("HARBOR-STAGE ").strip()
+    if body == "done":
+        stages["done"] = "true"
+        continue
+    for tok in body.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            stages[k] = v
+print(f"HARBOR stages: {stages}")
+
+problems = []
+def want(key, val):
+    if stages.get(key) != val:
+        problems.append(f"{key}={stages.get(key)} (expected {val})")
+
+# The live grid rendered the five seeded cards.
+want("rendered-cards", "5")
+# HarborOrder: needs -> working -> idle(done) -> stale(dirty). A wrong sort
+# (plain name, or InboxOrder's needs->working->dirty->done) fails here.
+want("sort", "needs-input,needs-input,working,done,dirty")
+# Each filter chip selects exactly its mapped state's subset.
+want("filter-all", "5")
+want("filter-needs", "2")
+want("filter-working", "1")
+want("filter-idle", "1")
+want("filter-stale", "1")
+# card -> Focus and ⌘K -> Focus both flip the runtime, with selection applied.
+want("card-open-view", "focus")
+want("card-open-selected", "true")
+want("back-view", "harbor")
+want("switcher-open-view", "focus")
+# The registry-owned terminal is the SAME running instance after a real
+# Harbor<->Focus<->Harbor<->Focus flip — never recreated by the view lifecycle.
+want("terminal-alive", "true")
+if "done" not in stages:
+    problems.append("no done stage")
+if problems:
+    print("HARBOR GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("HARBOR GATE: PASS")
+PY
+rm -f "$harbor_log"

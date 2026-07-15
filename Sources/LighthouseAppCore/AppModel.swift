@@ -369,6 +369,14 @@ public final class AppModel {
         attention[taskId] ?? .done
     }
 
+    /// When a task entered its current attention state (its last transition),
+    /// or nil if unknown. Honest data for the Harbor card's relative-time slot
+    /// — `attentionSince` was private; the Harbor UI needs a read accessor and
+    /// this exposes exactly the recorded value (never a fabricated time).
+    public func attentionSince(of taskId: UUID) -> Date? {
+        attentionSince[taskId]
+    }
+
     /// Records that every workspace of a task merged into base — the task is
     /// done (spec §2.5). Marks each workspace merged and persists.
     public func markMerged(taskId: UUID) {
@@ -422,6 +430,14 @@ public final class AppModel {
     public func inboxOrder() -> [TaskRecord] {
         let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
         return InboxOrder.ordered(tasks.map(inboxItem)).compactMap { byId[$0.id] }
+    }
+
+    /// The Harbor grid order (spec §5.1): needs → working → idle → stale.
+    /// DISTINCT from `inboxOrder()` (⌘K keeps its needs→working→dirty→done).
+    /// The active filter chip is applied by the view over this ordered list.
+    public func harborOrder() -> [TaskRecord] {
+        let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        return HarborOrder.ordered(tasks.map(inboxItem)).compactMap { byId[$0.id] }
     }
 
     /// Cmd+K entries: with no query, the authoritative inbox order; with a
