@@ -62,6 +62,13 @@ final class SessionRegistry {
         controller(taskId: taskId, tabId: TabID.agent)
     }
 
+    /// How many of a task's terminals (agent + shells) are currently RUNNING —
+    /// the honest "N agents" the Focus footer shows (spec §5.2). A real count of
+    /// live ptys, never a fabricated number.
+    func runningCount(taskId: UUID) -> Int {
+        controllers.values.filter { $0.key.taskId == taskId && $0.isRunning }.count
+    }
+
     /// Closes one tab's terminal.
     func closeTab(taskId: UUID, tabId: UUID) {
         let key = TabKey(taskId: taskId, tabId: tabId)

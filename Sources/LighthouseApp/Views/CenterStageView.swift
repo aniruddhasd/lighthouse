@@ -3,81 +3,48 @@ import SwiftTerm
 import LighthouseAppCore
 import LighthouseTaskEngine
 
-/// The center of the detail area: the terminal by default, swapping to the
-/// content viewer when a navigator item is selected, and back on ⌘J / the
-/// "Show Terminal" control.
+/// The Focus center BODY (spec §5.2 item 3): exactly one of Terminal / Summary /
+/// File-viewer, per the §3.4 precedence. All THREE panes stay MOUNTED in a
+/// ZStack and are opacity/hit-test toggled — never torn down — so the terminal's
+/// registry-owned NSView survives every mode swap AND the viewer overlay AND the
+/// navigator toggle (the retained-terminal scar; the FOCUS gate asserts it).
 ///
-/// The swap is opacity, never teardown: BOTH stages stay mounted in a ZStack so
-/// the terminal's registry-owned NSView is never detached or recreated across a
-/// swap (the same retained-view pattern the terminal tabs already use, and that
-/// the GEOMETRY gate proves). The terminal stage keeps the exact structure the
-/// sizing scar was fixed against (tab bar + divider + fill-everything body), so
-/// the geometry contract still holds; the viewer stage carries its own header,
-/// which never affects the measured terminal.
-struct CenterStageView: View {
+/// ZStack, NOT Group: a Group is transparent, so a branch switch would re-fire
+/// onAppear and recreate the models (the REVIEWPANE loop scar). The terminal
+/// pane keeps the fill-everything host structure the sizing scar was fixed
+/// against, so the geometry contract still holds; the summary/viewer panes carry
+/// their own chrome, which never affects the measured terminal.
+struct FocusBodyView: View {
     @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
     var body: some View {
+        let body = workbench.effectiveBody
         ZStack {
-            terminalStage
-                .opacity(workbench.centerMode == .terminal ? 1 : 0)
-                .allowsHitTesting(workbench.centerMode == .terminal)
-            viewerStage
-                .opacity(workbench.centerMode == .viewer ? 1 : 0)
-                .allowsHitTesting(workbench.centerMode == .viewer)
+            terminalPane
+                .opacity(body == .terminal ? 1 : 0)
+                .allowsHitTesting(body == .terminal)
+            summaryPane
+                .opacity(body == .summary ? 1 : 0)
+                .allowsHitTesting(body == .summary)
+            viewerPane
+                .opacity(body == .viewer ? 1 : 0)
+                .allowsHitTesting(body == .viewer)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.2), value: workbench.centerMode)
+        .background(theme.bg)
+        .animation(.easeInOut(duration: 0.18), value: body)
     }
 
-    // MARK: Viewer stage
+    // MARK: Terminal pane (the fill-everything host — the sizing-scar structure)
 
     @ViewBuilder
-    private var viewerStage: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button {
-                    workbench.showTerminal()
-                } label: {
-                    Label("Show Terminal", systemImage: "terminal")
-                }
-                .help("Back to the running terminal (⌘J)")
-                Spacer()
-                if let error = workbench.viewer.renderError {
-                    Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
-                }
-            }
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            Divider()
-            ZStack {
-                DiffWebViewHost(webView: workbench.viewer.webView)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if !workbench.viewer.hasContent {
-                    ContentUnavailableView(
-                        "Nothing selected",
-                        systemImage: "doc.text.magnifyingglass",
-                        description: Text("Pick a change, file, or commit in the navigator."))
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: Terminal stage (structure unchanged from the pre-Phase-B layout)
-
-    @ViewBuilder
-    private var terminalStage: some View {
+    private var terminalPane: some View {
         let tabs = runtime.tabs[task.id] ?? []
-        VStack(spacing: 0) {
-            if !tabs.isEmpty {
-                TerminalTabBar(task: task)
-                Divider()
-            }
-            terminalBody(tabs: tabs)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        terminalBody(tabs: tabs)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -123,6 +90,81 @@ struct CenterStageView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Summary pane (Phase-4 feature — HONEST placeholder here, no data)
+
+    @ViewBuilder
+    private var summaryPane: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 28))
+                .foregroundStyle(theme.faint)
+            Text("The task summary will appear here.")
+                .font(LHFont.summaryHead)
+                .foregroundStyle(theme.dim)
+            Text("A digest of what the agent did lands in a later phase.")
+                .font(LHFont.body)
+                .foregroundStyle(theme.faint)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+    }
+
+    // MARK: Viewer pane (restyled header — handoff §2: path · read-only · ⌘J)
+
+    @ViewBuilder
+    private var viewerPane: some View {
+        VStack(spacing: 0) {
+            viewerHeader
+            ZStack {
+                DiffWebViewHost(webView: workbench.viewer.webView)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !workbench.viewer.hasContent {
+                    ContentUnavailableView(
+                        "Nothing selected",
+                        systemImage: "doc.text.magnifyingglass",
+                        description: Text("Pick a change, file, or commit in the navigator."))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var viewerHeader: some View {
+        // Dark header over the dark viewer body (handoff: viewer stays dark in
+        // both themes). +add/−del diffstat is a Phase-4 field → omitted (no
+        // fabricated numbers). The A/M/D badge is only known for the Changes
+        // tab, not for Files/History, so it is omitted rather than faked.
+        HStack(spacing: 10) {
+            if let title = workbench.viewer.hasContent ? workbench.viewerTitle : nil {
+                Text(title)
+                    .font(LHFont.mono(12))
+                    .foregroundStyle(Color(hex: 0xc8cfdd))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Text("read-only")
+                .font(LHFont.mono(11))
+                .foregroundStyle(Color(hex: 0x6f7890))
+            Spacer(minLength: 12)
+            if let error = workbench.viewer.renderError {
+                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            }
+            Button { workbench.showTerminal() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "terminal")
+                    Text("Terminal").font(LHFont.button)
+                    Keycap(text: "⌘J")
+                }
+                .foregroundStyle(Color(hex: 0xc8cfdd))
+            }
+            .buttonStyle(.plain)
+            .help("Back to the running terminal (⌘J)")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .background(Color.black.opacity(0.28))
     }
 }
 

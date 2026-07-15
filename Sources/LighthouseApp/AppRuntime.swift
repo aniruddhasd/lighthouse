@@ -101,6 +101,123 @@ final class AppRuntime {
         runNotificationCheckIfRequested()
         runThemeCheckIfRequested()
         runHarborCheckIfRequested()
+        runFocusCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_FOCUS=1: proves the Phase-3 Focus reshape in the REAL
+    /// app. The §3.4 body-state rules are unit-tested headlessly (FocusBodyState)
+    /// and the beacon-rail/header/footer/overlay geometry is not headlessly
+    /// testable (the scar); this gate proves the wiring the unit tests cannot —
+    /// the rail renders a dot per task and a dot drives `open(id)`; the task
+    /// header + footer render; the navigator is a REAL slide-in overlay driven by
+    /// `navigatorVisible` (mounts/unmounts, not a split column); the viewer
+    /// overlay WINS over terminal/summary and a mode switch clears it (asserted
+    /// on the LIVE mounted workbench); and — the two highest-value invariants —
+    /// the registry-owned terminal survives a full mode swap AND a nav toggle
+    /// (never tied to the view lifecycle), and it FILLS the center column's body
+    /// (not centered/collapsed — the sizing scar).
+    ///
+    /// Seeds ephemeral tasks + a live /bin/cat agent pty synchronously, then
+    /// drives + asserts in a Task. The reshaped views emit their own render
+    /// facts (rail dots, header/footer present, terminal frames); this driver
+    /// emits the interaction facts.
+    private func runFocusCheckIfRequested() {
+        guard FocusDebug.enabled else { return }
+        setupPresented = false
+        // An ephemeral repo so New task enables and repo names render.
+        let repo = RepoConfig(
+            path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
+        model.insertEphemeralRepo(repo)
+        // Three tasks (varied states) so the rail shows a non-trivial dot count.
+        let seedStates: [(String, TaskAttentionState)] = [
+            ("focus-probe", .done),
+            ("focus-working", .working),
+            ("focus-needs", .needsInput),
+        ]
+        var seeded: [TaskRecord] = []
+        for (name, state) in seedStates {
+            let task = TaskRecord(
+                name: name, branch: "task/\(name)", adapterKind: "debug",
+                sessionRef: nil, state: state, workspaces: [])
+            model.insertEphemeralTask(task)
+            seeded.append(task)
+        }
+        // The probe carries a live /bin/cat pty + tabs so entering Focus renders
+        // a real, running terminal (the terminal-alive + terminal-fills probes).
+        let probe = seeded[0]
+        let plan = LaunchPlan(
+            executable: "/bin/cat", arguments: [], environment: [:],
+            workingDirectory: FileManager.default.temporaryDirectory,
+            sessionRef: "focus-probe")
+        registry.open(taskId: probe.id, tabId: TabID.agent, plan: plan) { _, _ in }
+        tabs[probe.id] = [TerminalTab(id: TabID.agent, title: "Agent", isAgent: true)]
+        focusedTab[probe.id] = TabID.agent
+
+        Task { @MainActor in
+            func log(_ m: String) {
+                FileHandle.standardOutput.write(Data("FOCUS-STAGE \(m)\n".utf8))
+            }
+
+            // Enter Focus on the probe — the reshaped view mounts + renders a
+            // real terminal; the rail/header/footer emit their own facts.
+            open(probe.id)
+            try? await Task.sleep(for: .milliseconds(900))
+
+            guard let wb = FocusDebug.currentWorkbench else {
+                log("no-workbench"); log("done"); return
+            }
+
+            // §3.4 viewer precedence, on the LIVE mounted model. A selection (via
+            // activateViewer) WINS over the active mode without changing it; the
+            // segmented control (setBodyMode) CLEARS the viewer.
+            wb.setBodyMode(.terminal)
+            wb.bodyState.activateViewer()
+            log("viewer-wins-over-terminal="
+                + "\(wb.effectiveBody == .viewer && wb.bodyState.mode == .terminal)")
+            wb.setBodyMode(.summary)
+            log("setmode-clears-viewer="
+                + "\(wb.effectiveBody == .summary && !wb.bodyState.viewerActive)")
+            wb.bodyState.activateViewer()
+            log("viewer-wins-over-summary="
+                + "\(wb.effectiveBody == .viewer && wb.bodyState.mode == .summary)")
+            wb.showTerminal() // ⌘J: close the viewer → back to the active mode
+            log("closeviewer-returns-to-mode=\(wb.effectiveBody == .summary)")
+            wb.setBodyMode(.terminal)
+
+            // ★ Terminal-alive across a full mode swap (terminal→summary→viewer
+            // →terminal) AND a nav toggle — the SAME running registry controller.
+            let before = registry.agentController(taskId: probe.id)
+            let beforeId = before.map(ObjectIdentifier.init)
+            let beforeRunning = before?.isRunning ?? false
+            wb.setBodyMode(.summary); try? await Task.sleep(for: .milliseconds(150))
+            wb.bodyState.activateViewer(); try? await Task.sleep(for: .milliseconds(150))
+            wb.showTerminal(); wb.setBodyMode(.terminal)
+            try? await Task.sleep(for: .milliseconds(150))
+            wb.navigatorVisible = true; try? await Task.sleep(for: .milliseconds(300))
+            wb.navigatorVisible = false; try? await Task.sleep(for: .milliseconds(300))
+            let after = registry.agentController(taskId: probe.id)
+            let afterId = after.map(ObjectIdentifier.init)
+            let alive = beforeId != nil && beforeId == afterId
+                && beforeRunning && (after?.isRunning ?? false)
+            log("terminal-alive=\(alive)")
+
+            // The navigator is a REAL mounted overlay driven by navigatorVisible
+            // (not an always-present, always-hidden view, and not a split column).
+            wb.navigatorVisible = true; try? await Task.sleep(for: .milliseconds(450))
+            let mountedWhenOpen = FocusDebug.navigatorMounted
+            wb.navigatorVisible = false; try? await Task.sleep(for: .milliseconds(450))
+            let unmountedWhenClosed = !FocusDebug.navigatorMounted
+            log("nav-open-mounted=\(mountedWhenOpen) nav-closed-unmounted=\(unmountedWhenClosed)")
+
+            // A rail dot drives open(id): selecting the 'working' task.
+            open(seeded[1].id)
+            log("rail-dot-view=\(nav.view.rawValue) "
+                + "rail-dot-selected=\(selectedTaskId == seeded[1].id)")
+
+            // Back to Harbor so the probe terminal doesn't hold the view at exit.
+            backToHarbor()
+            log("done")
+        }
     }
 
     /// LIGHTHOUSE_DEBUG_HARBOR=1: proves the Phase-2 two-mode shell in the REAL
@@ -540,7 +657,7 @@ final class AppRuntime {
             func log(_ m: String) {
                 FileHandle.standardOutput.write(Data("NAVIGATOR-STAGE \(m)\n".utf8))
             }
-            func mode(_ m: CenterStageMode) -> String { m == .terminal ? "terminal" : "viewer" }
+            func mode(_ b: FocusBody) -> String { b.rawValue }
             let repo = RepoConfig(path: repoPath, baseBranch: "main")
             let task = TaskRecord(
                 name: "navigator-probe", branch: "task", adapterKind: "debug",
@@ -570,18 +687,18 @@ final class AppRuntime {
             workbench.navigatorMode = .history
             log("mode=\(workbench.navigatorMode.rawValue)")
 
-            // Center-stage default + swap + terminal survival.
-            log("center-default=\(mode(workbench.centerMode))")
+            // Center-body default + swap + terminal survival.
+            log("center-default=\(mode(workbench.effectiveBody))")
             let before = registry.controller(taskId: task.id, tabId: TabID.agent)
             let beforeId = before.map(ObjectIdentifier.init)
             let beforeRunning = before?.isRunning ?? false
             if let changed = Self.firstFilePath(in: workbench.review.tree) {
                 await workbench.selectChangedFile(changed)
             }
-            log("center-after-select=\(mode(workbench.centerMode))")
+            log("center-after-select=\(mode(workbench.effectiveBody))")
             log("viewer-has-content=\(workbench.viewer.hasContent)")
-            workbench.toggleCenter()
-            log("center-after-toggle=\(mode(workbench.centerMode))")
+            workbench.showTerminal() // ⌘J: close the viewer, back to the mode
+            log("center-after-toggle=\(mode(workbench.effectiveBody))")
             let after = registry.controller(taskId: task.id, tabId: TabID.agent)
             let afterId = after.map(ObjectIdentifier.init)
             let alive = beforeId != nil && beforeId == afterId

@@ -199,7 +199,13 @@ def check(label, size):
     problems = []
     if abs(tw - cw) > 2 or abs(th - ch) > 2:
         problems.append(f"terminal {tw}x{th} != container {cw}x{ch}")
-    if th < wh - 60:
+    # Phase 3 reshaped the center column: the terminal body now sits BELOW the
+    # 52px task header + shell-tabs bar and ABOVE the 30px footer (≈111px of
+    # chrome), where the old layout had only the ~28px tab bar. The fill
+    # threshold is relaxed to that new true geometry (was wh-60) — a 181pt
+    # collapse (the sizing scar) is still far below wh-170 at every window size,
+    # so the assertion still bites.
+    if th < wh - 170:
         problems.append(f"height {th} does not fill window content {wh}")
     if tw < 420:
         problems.append(f"width {tw} below pane minimum")
@@ -219,10 +225,13 @@ if not ok:
 print("GEOMETRY GATE: PASS")
 PY
 
-# Layout gate: the Phase-B detail area is [ center stage | navigator ]. The
-# terminal-fill check above proves the center stage fills; this proves BOTH
-# the center stage and the (now-narrow) navigator laid out filling the detail
-# area, using the SwiftUI size probes (debugSize) the running app emits.
+# Layout gate: Phase 3 retired the NavigationSplitView. The Focus area is now
+# [ beacon rail (60px) | center column (flex) ]; the navigator is a 340px
+# slide-in OVERLAY (closed by default), NOT a split column. This proves the
+# fixed-width rail laid out at 60px and the center column + its body filled the
+# remaining width/height, using the SwiftUI size probes (debugSize) the running
+# app emits. (The retired centerStage/navigator/hsplit split-pane probes are
+# gone; their geometry no longer exists.)
 python3 - "$geometry_log" <<'PY'
 import re, sys
 rx = re.compile(r"GEOMETRY-SWIFTUI label=(\S+) size=(\d+)x(\d+)")
@@ -237,11 +246,14 @@ def fills(label, wmin, wmax, hmin):
     print(f"LAYOUT {label}: samples={seen[-3:]} -> {'PASS' if ok else 'FAIL'}")
     return ok
 
-# Center stage keeps its >=480 min; the navigator is narrow (240..460 frame).
-center_ok = fills("centerStage", 480, 100000, 300)
-nav_ok = fills("navigator", 200, 500, 300)
-if not (center_ok and nav_ok):
-    print("LAYOUT GATE: FAIL (center stage / navigator did not fill the detail area)")
+# The beacon rail is a FIXED 60px column; the center column + body fill the
+# rest (>=420 wide). A regression that collapses either (or turns the rail into
+# a flexible sidebar) fails here.
+rail_ok = fills("beaconRail", 55, 65, 300)
+column_ok = fills("centerColumn", 420, 100000, 300)
+body_ok = fills("focusBody", 420, 100000, 200)
+if not (rail_ok and column_ok and body_ok):
+    print("LAYOUT GATE: FAIL (beacon rail / center column / body did not lay out)")
     sys.exit(1)
 print("LAYOUT GATE: PASS")
 PY
@@ -792,3 +804,129 @@ if problems:
 print("HARBOR GATE: PASS")
 PY
 rm -f "$harbor_log"
+
+# --- Focus gate: the Phase-3 Focus reshape in the real app ------------------
+# The §3.4 body-state rules are pure and unit-tested (FocusBodyState); the
+# reshaped SwiftUI shell (beacon rail, task header, footer, navigator overlay,
+# three-pane body) is not headlessly testable (the scar). LIGHTHOUSE_DEBUG_FOCUS=1
+# seeds three ephemeral tasks + a live /bin/cat agent pty, enters Focus, and
+# proves in the running app: the rail rendered a dot per task and a dot drives
+# open(id); the task header + footer rendered; the navigator overlay MOUNTS and
+# UNMOUNTS on toggle (a real overlay, not a split column); the viewer overlay
+# WINS over terminal/summary and a mode switch clears it; and — highest value —
+# the registry-owned terminal is the SAME running instance after a full mode
+# swap (terminal→summary→viewer→terminal) AND a nav toggle, and it FILLS the
+# center column's body (not centered/collapsed at 181pt — the sizing scar).
+# Launched directly (a window is created — the shell renders), like HARBOR.
+focus_log="$(mktemp)"
+focus_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_FOCUS=1 LIGHTHOUSE_CONFIG_DIR="$focus_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$focus_log" 2>&1 &
+focus_pid=$!
+trap 'kill -9 "$focus_pid" 2>/dev/null || true; rm -rf "$focus_cfg"' EXIT
+
+focus_tries=0
+until grep -q "FOCUS-STAGE done" "$focus_log"; do
+    focus_tries=$((focus_tries + 1))
+    if [ "$focus_tries" -gt 150 ]; then
+        echo "FOCUS GATE: FAIL (no done stage within 30s)" >&2
+        grep "FOCUS-STAGE" "$focus_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$focus_pid" 2>/dev/null; then
+        echo "FOCUS GATE: FAIL (app exited during focus check)" >&2
+        grep "FOCUS-STAGE" "$focus_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$focus_pid" 2>/dev/null || true
+focus_tries=0
+while kill -0 "$focus_pid" 2>/dev/null; do
+    focus_tries=$((focus_tries + 1))
+    [ "$focus_tries" -gt 15 ] && kill -9 "$focus_pid" 2>/dev/null || true
+    [ "$focus_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$focus_cfg"
+
+echo "--- FOCUS gate stdout ---"
+grep "FOCUS-STAGE" "$focus_log" || true
+echo "-------------------------"
+
+python3 - "$focus_log" <<'PY'
+import re, sys
+log = sys.argv[1]
+stages = {}
+geo = []  # (container_w, container_h, terminal_w, terminal_h)
+geo_rx = re.compile(
+    r"FOCUS-STAGE terminal window=\d+x\d+ container=(\d+)x(\d+) terminal=(\d+)x(\d+)")
+for l in open(log):
+    if not l.startswith("FOCUS-STAGE "):
+        continue
+    if m := geo_rx.search(l):
+        geo.append(tuple(map(int, m.groups())))
+        continue
+    body = l.removeprefix("FOCUS-STAGE ").strip()
+    if body == "done":
+        stages["done"] = "true"
+        continue
+    for tok in body.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            stages[k] = v
+print(f"FOCUS stages: {stages}")
+
+problems = []
+def want(key, val):
+    if stages.get(key) != val:
+        problems.append(f"{key}={stages.get(key)} (expected {val})")
+
+# Rail rendered a dot per seeded task; a dot drives open(id).
+want("rendered-dots", "3")
+want("rail-dot-view", "focus")
+want("rail-dot-selected", "true")
+# Task header + footer present.
+want("header-present", "true")
+want("footer-present", "true")
+# §3.4 viewer precedence, asserted on the live mounted model.
+want("viewer-wins-over-terminal", "true")
+want("setmode-clears-viewer", "true")
+want("viewer-wins-over-summary", "true")
+want("closeviewer-returns-to-mode", "true")
+# Navigator is a REAL overlay that mounts/unmounts on toggle.
+want("nav-open-mounted", "true")
+want("nav-closed-unmounted", "true")
+# ★ Terminal survives the full mode swap + nav toggle (same running instance).
+want("terminal-alive", "true")
+if "done" not in stages:
+    problems.append("no done stage")
+
+# ★ Terminal FILLS the center column body: the real NSView frame equals its
+# container and is not collapsed (width >= 420, height >= 250 — a 181pt
+# collapse fails). The FOCUS gate does not resize, so the window may be small
+# (the default here is ~418pt content tall → ~306pt body); the thresholds still
+# bite the sizing scar (181 < both) while tolerating a small restored window.
+# Assert the largest observed sample (the settled layout).
+if not geo:
+    problems.append("no terminal geometry samples (terminal never laid out)")
+else:
+    cw, ch, tw, th = max(geo, key=lambda g: g[2] * g[3])
+    fill_problems = []
+    if abs(tw - cw) > 2 or abs(th - ch) > 2:
+        fill_problems.append(f"terminal {tw}x{th} != container {cw}x{ch}")
+    if tw < 420:
+        fill_problems.append(f"terminal width {tw} collapsed (< 420)")
+    if th < 250:
+        fill_problems.append(f"terminal height {th} collapsed (< 250)")
+    verdict = "PASS" if not fill_problems else "FAIL (" + "; ".join(fill_problems) + ")"
+    print(f"FOCUS terminal-fills: container {cw}x{ch} terminal {tw}x{th} -> {verdict}")
+    problems += fill_problems
+
+if problems:
+    print("FOCUS GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("FOCUS GATE: PASS")
+PY
+rm -f "$focus_log"

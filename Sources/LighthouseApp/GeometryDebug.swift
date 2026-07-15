@@ -146,15 +146,27 @@ final class GeometryResizeDriver {
 final class TerminalContainerView: NSView {
     override func layout() {
         super.layout()
-        guard GeometryDebug.enabled, let terminal = subviews.first else { return }
-        GeometryDebug.log(
-            window: window?.contentLayoutRect.size ?? .zero,
-            container: frame,
-            terminal: terminal.frame)
-        if let window, window.frame.width > 0 {
-            MainActor.assumeIsolated {
-                GeometryResizeDriver.shared.noteLayout(of: window)
+        guard let terminal = subviews.first else { return }
+        if GeometryDebug.enabled {
+            GeometryDebug.log(
+                window: window?.contentLayoutRect.size ?? .zero,
+                container: frame,
+                terminal: terminal.frame)
+            if let window, window.frame.width > 0 {
+                MainActor.assumeIsolated {
+                    GeometryResizeDriver.shared.noteLayout(of: window)
+                }
             }
+        }
+        // The FOCUS gate reuses this real NSView measurement to prove the
+        // terminal fills the center column's body (not centered/collapsed at
+        // 181pt — the sizing scar) in the reshaped layout.
+        if FocusDebug.enabled {
+            let win = window?.contentLayoutRect.size ?? .zero
+            FocusDebug.emit(String(
+                format: "terminal window=%.0fx%.0f container=%.0fx%.0f terminal=%.0fx%.0f",
+                win.width, win.height, frame.width, frame.height,
+                terminal.frame.width, terminal.frame.height))
         }
     }
 }

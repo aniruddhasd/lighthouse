@@ -37,15 +37,35 @@ final class WorkbenchModelTests {
         return (WorkbenchModel(task: task, repos: [repo], git: git), worktree)
     }
 
-    // MARK: Center-stage default + toggle
+    // MARK: Center body (spec §3.4) — default, viewer precedence, mode switch
 
-    @Test func centerStageDefaultsToTerminalAndToggles() throws {
+    @Test func centerBodyDefaultsToTerminal() throws {
         let (workbench, _) = try makeWorkbench()
-        #expect(workbench.centerMode == .terminal)
-        workbench.toggleCenter()
-        #expect(workbench.centerMode == .viewer)
-        workbench.showTerminal()
-        #expect(workbench.centerMode == .terminal)
+        #expect(workbench.effectiveBody == .terminal)
+        #expect(workbench.bodyState.mode == .terminal)
+        #expect(workbench.bodyState.viewerActive == false)
+    }
+
+    // A selection activates the viewer OVER the mode; ⌘J (showTerminal) closes
+    // it and returns to whichever mode was active — it does NOT force terminal.
+    @Test func viewerClosesBackToActiveMode() throws {
+        let (workbench, _) = try makeWorkbench()
+        workbench.setBodyMode(.summary)
+        workbench.bodyState.activateViewer()
+        #expect(workbench.effectiveBody == .viewer)
+        #expect(workbench.bodyState.mode == .summary, "activating the viewer must not change the mode")
+        workbench.showTerminal() // ⌘J = close the viewer
+        #expect(workbench.effectiveBody == .summary, "closing the viewer returns to the active mode")
+    }
+
+    // The segmented control (setBodyMode) CLEARS an active viewer.
+    @Test func setBodyModeClearsActiveViewer() throws {
+        let (workbench, _) = try makeWorkbench()
+        workbench.bodyState.activateViewer()
+        #expect(workbench.effectiveBody == .viewer)
+        workbench.setBodyMode(.summary)
+        #expect(workbench.effectiveBody == .summary)
+        #expect(workbench.bodyState.viewerActive == false)
     }
 
     // MARK: Changes → live diff + swap
@@ -65,7 +85,7 @@ final class WorkbenchModelTests {
         workbench.start()
         await workbench.review.awaitRefresh()
         await workbench.selectChangedFile("notes.txt")
-        #expect(workbench.centerMode == .viewer)
+        #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
     }
 
@@ -80,7 +100,7 @@ final class WorkbenchModelTests {
     @Test func selectingTextFileRendersFilePageAndSwaps() async throws {
         let (workbench, _) = try makeWorkbench()
         await workbench.selectFile("notes.txt")
-        #expect(workbench.centerMode == .viewer)
+        #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
     }
 
@@ -90,7 +110,7 @@ final class WorkbenchModelTests {
         try Data([0x00, 0x01, 0x02, 0xFF, 0x00]).write(
             to: worktree.appendingPathComponent("blob.bin"))
         await workbench.selectFile("blob.bin")
-        #expect(workbench.centerMode == .viewer)
+        #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
     }
 
@@ -99,7 +119,7 @@ final class WorkbenchModelTests {
     @Test func selectingPathOutsideWorktreeRendersMessageNotCrash() async throws {
         let (workbench, _) = try makeWorkbench()
         await workbench.selectFile("../escape.txt")
-        #expect(workbench.centerMode == .viewer)
+        #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
     }
 
@@ -116,7 +136,7 @@ final class WorkbenchModelTests {
         await workbench.loadHistory()
         let commit = try #require(workbench.commits.first)
         await workbench.selectCommit(commit)
-        #expect(workbench.centerMode == .viewer)
+        #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
     }
 }

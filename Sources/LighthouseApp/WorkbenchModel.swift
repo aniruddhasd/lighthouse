@@ -91,12 +91,23 @@ final class WorkbenchModel {
     let review: ReviewPaneModel
     let viewer = ContentViewerModel()
 
-    /// Center stage: terminal by default; a navigator selection swaps to the
-    /// viewer, an explicit control/keystroke swaps back.
-    var centerMode: CenterStageMode = .terminal
+    /// The Focus center body (spec §3.4): the persistent Terminal/Summary mode
+    /// plus the transient file-viewer overlay that wins when active. All the
+    /// transition rules live in the pure `FocusBodyState`; this model just holds
+    /// it and exposes intent-named mutators the views/keystrokes call.
+    var bodyState = FocusBodyState()
     var navigatorMode: NavigatorMode = .changes
-    /// Per-task navigator visibility (UI-only; not persisted).
-    var navigatorVisible = true
+    /// Per-task navigator visibility (UI-only; not persisted). The navigator is
+    /// now an on-demand overlay (spec §5.2), so it starts CLOSED — the terminal
+    /// is the full-bleed hero until the user opens it (◨ / ⌘\).
+    var navigatorVisible = false
+
+    /// The pane the body actually shows — the ZStack renders exactly this.
+    var effectiveBody: FocusBody { bodyState.effective }
+
+    /// The path/label of the current viewer selection, for the viewer header
+    /// (spec §5.2). Real (the selected path / short hash), never fabricated.
+    private(set) var viewerTitle: String?
 
     // Files surface (browser tree, lazy).
     private(set) var files: [FileTreeNode] = []
@@ -125,11 +136,16 @@ final class WorkbenchModel {
     func start() { review.start() }
     func stop() { review.stop() }
 
-    // MARK: Center-stage swap
+    // MARK: Center body (spec §3.4 — rules live in FocusBodyState)
 
-    func showViewer() { centerMode = .viewer }
-    func showTerminal() { centerMode = .terminal }
-    func toggleCenter() { centerMode = centerMode.toggled }
+    /// The Terminal/Summary segmented control. Switching mode clears any active
+    /// viewer (a mode switch exits the viewer).
+    func setBodyMode(_ mode: BodyMode) { bodyState.setMode(mode) }
+
+    /// ⌘J / the viewer's Terminal button: close the viewer, return to whichever
+    /// mode was active (Focus-only; the keystroke is gated to Focus).
+    func showTerminal() { bodyState.closeViewer() }
+    func closeViewer() { bodyState.closeViewer() }
 
     // MARK: Repo (workspace) selection — shared across all three surfaces
 
@@ -196,7 +212,8 @@ final class WorkbenchModel {
         await review.awaitRefresh()
         guard let patch = review.latestPatch else { return }
         viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
-        centerMode = .viewer
+        viewerTitle = path
+        bodyState.activateViewer()
     }
 
     /// Files: render the picked file (binary/too-large → safe placeholders).
@@ -211,7 +228,8 @@ final class WorkbenchModel {
             viewer.apply(.file(html: FilePageBuilder.page(
                 content: "Could not open \(path): \(error)", filename: path)))
         }
-        centerMode = .viewer
+        viewerTitle = path
+        bodyState.activateViewer()
     }
 
     /// History: render the picked commit's diff.
@@ -225,6 +243,7 @@ final class WorkbenchModel {
                 content: "Could not load commit \(commit.shortHash): \(error)",
                 filename: commit.shortHash)))
         }
-        centerMode = .viewer
+        viewerTitle = commit.shortHash
+        bodyState.activateViewer()
     }
 }

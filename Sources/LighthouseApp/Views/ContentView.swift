@@ -26,7 +26,12 @@ struct ContentView: View {
                 HarborView(showCreateTask: $showCreateTask)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .focus:
-                focusShell(theme: theme)
+                // Phase 3: the beacon-rail + center-column command deck. The old
+                // NavigationSplitView shell (SidebarView + detail toolbar) is
+                // retired — which also removes the toolbar-KVO-under-sheet
+                // fragility flagged in Phase 2.
+                FocusView(showCreateTask: $showCreateTask)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         // The custom titlebar installs itself on the host window from here; a
@@ -75,160 +80,6 @@ struct ContentView: View {
         }
     }
 
-    /// Focus = the existing NavigationSplitView (sidebar + detail), unchanged
-    /// internally this phase. Phase 3 replaces the sidebar with the beacon rail
-    /// and reshapes the detail; for now the Harbor button on the detail toolbar
-    /// is the only new affordance.
-    @ViewBuilder
-    private func focusShell(theme: Theme) -> some View {
-        NavigationSplitView {
-            SidebarView(
-                showCreateTask: $showCreateTask,
-                showRegisterRepo: $showRegisterRepo,
-                taskPendingRemoval: $taskPendingRemoval)
-        } detail: {
-            if let taskId = runtime.selectedTaskId,
-               let task = runtime.model.tasks.first(where: { $0.id == taskId }) {
-                TaskDetailView(task: task)
-                    .id(task.id)
-            } else {
-                ContentUnavailableView(
-                    "No task selected",
-                    systemImage: "rectangle.on.rectangle",
-                    description: Text("Create a task or pick one from the sidebar (⌘K)."))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.bg)
-            }
-        }
-    }
-}
-
-/// Detail layout: CENTER STAGE (terminal ⇄ content viewer) on the left, the
-/// hideable NAVIGATOR on the right; the conflict pane takes over the whole
-/// detail area during a paused merge walk (spec §2.5). A single per-task
-/// `WorkbenchModel` owns the live-diff watcher, the center viewer, and the
-/// two view-modes; its lifecycle IS the watcher lifecycle (see the contract
-/// on ReviewPaneModel) — created on appear, stopped on background, restarted
-/// on foreground, torn down on task switch (identity is `.id(task.id)`).
-struct TaskDetailView: View {
-    @Environment(AppRuntime.self) private var runtime
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.theme) private var theme
-    let task: TaskRecord
-    @State private var workbench: WorkbenchModel?
-
-    var body: some View {
-        // ZStack, NOT Group: Group is transparent, so modifiers attach to each
-        // branch — a branch switch (progress → workbench, or merge-walk on/off)
-        // would re-fire onAppear and recreate the model (the loop the REVIEWPANE
-        // gate caught, 2026-07-13). A real container fires appear once; the
-        // nil-guard is belt-and-braces.
-        ZStack {
-            if let walk = runtime.mergeWalk, walk.task.id == task.id {
-                ConflictPaneView(controller: walk)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let workbench {
-                workbenchLayout(workbench)
-            } else {
-                ProgressView()
-            }
-        }
-        // The detail column collapses to its children's IDEAL height unless the
-        // split and both children are forced to expand (the 2026-07-12 sizing
-        // scar); the representable's sizeThatFits then carries the full area
-        // down to the terminal.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Chrome behind the detail area flips with the theme; the terminal and
-        // the WKWebView viewer paint their own dark surfaces over this and are
-        // deliberately NOT themed (handoff: they stay dark in both themes).
-        .background(theme.bg)
-        .debugSize("detail")
-        .navigationTitle(task.name)
-        .navigationSubtitle(task.branch)
-        .toolbar { toolbarContent }
-        .onAppear {
-            guard workbench == nil else { return }
-            ReviewDebug.stage("appear task=\(task.name)")
-            let model = WorkbenchModel(
-                task: task, repos: runtime.model.repos, git: runtime.git)
-            workbench = model
-            model.start()
-        }
-        .onDisappear {
-            workbench?.stop()
-            workbench = nil
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { workbench?.start() } else { workbench?.stop() }
-        }
-    }
-
-    @ViewBuilder
-    private func workbenchLayout(_ workbench: WorkbenchModel) -> some View {
-        @Bindable var workbench = workbench
-        HSplitView {
-            CenterStageView(workbench: workbench, task: task)
-                // Never ideal-size: expand so the split adopts the full detail
-                // area (sizing scar). Min > 420 keeps the geometry contract.
-                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
-                .debugSize("centerStage")
-            if workbench.navigatorVisible {
-                NavigatorView(workbench: workbench)
-                    .frame(minWidth: 240, idealWidth: 300, maxWidth: 460, maxHeight: .infinity)
-                    .debugSize("navigator")
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .debugSize("hsplit")
-        .background {
-            // Keystrokes, each mirrored by a visible toolbar control:
-            //   ⌘J        swap the center stage (terminal ⇄ viewer)
-            //   ⌥⌘S       hide/show the navigator (⌃⌘S is the left sidebar)
-            Button("", action: { workbench.toggleCenter() })
-                .keyboardShortcut("j", modifiers: .command)
-                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
-            Button("", action: { workbench.navigatorVisible.toggle() })
-                .keyboardShortcut("s", modifiers: [.command, .option])
-                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Button { runtime.backToHarbor() } label: {
-                Label("Harbor", systemImage: "square.grid.2x2")
-            }
-            .help("Back to Harbor")
-        }
-        if let workbench {
-            ToolbarItem {
-                Button { workbench.toggleCenter() } label: {
-                    Label(
-                        workbench.centerMode == .terminal ? "Show Viewer" : "Show Terminal",
-                        systemImage: workbench.centerMode == .terminal ? "doc.text" : "terminal")
-                }
-                .help("Swap the center between the terminal and the content viewer (⌘J)")
-            }
-            ToolbarItem {
-                Button { workbench.navigatorVisible.toggle() } label: {
-                    Label("Toggle Navigator", systemImage: "sidebar.trailing")
-                }
-                .help("Show or hide the navigator (⌥⌘S)")
-            }
-        }
-        ToolbarItem {
-            Button {
-                Task {
-                    await runtime.startMergeWalk(
-                        for: task, orderedRepoIds: task.workspaces.map(\.repoId))
-                }
-            } label: {
-                Label("Merge to base", systemImage: "arrow.triangle.merge")
-            }
-            .disabled(runtime.mergeWalk != nil)
-        }
-    }
 }
 
 /// Hosts the registry-owned terminal NSView. The terminal is created once
