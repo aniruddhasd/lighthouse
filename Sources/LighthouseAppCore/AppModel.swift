@@ -44,6 +44,12 @@ public final class AppModel {
     /// First-run setup flags (config schema v3).
     public private(set) var hasCompletedSetup = false
     public private(set) var notificationsHintDismissed = false
+    /// Persisted UI preferences (config schema v4). `theme` is wired to the UI
+    /// this phase; `startView` and `showBeam` are stored-but-unused until later
+    /// redesign phases. Raw strings so this UI-free layer needs no SwiftUI.
+    public private(set) var theme: String = "beacon"
+    public private(set) var startView: String = "harbor"
+    public private(set) var showBeam: Bool = true
     /// Injectable clock so ordering tests are deterministic.
     private let now: @Sendable () -> Date
     /// Debug-only tasks/repos (geometry + review probes): visible to the
@@ -101,6 +107,9 @@ public final class AppModel {
         worktreesRootOverride = config.worktreesRootOverride
         hasCompletedSetup = config.hasCompletedSetup
         notificationsHintDismissed = config.notificationsHintDismissed
+        theme = config.theme
+        startView = config.startView
+        showBeam = config.showBeam
         attention = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.state) })
         attentionSince = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
     }
@@ -123,6 +132,14 @@ public final class AppModel {
 
     public func dismissNotificationsHint() {
         notificationsHintDismissed = true
+        try? persist()
+    }
+
+    /// Persists the chosen UI theme (raw "beacon"/"native"). Best-effort like
+    /// the other preference writes — the next save catches up on failure.
+    public func setTheme(_ value: String) {
+        guard theme != value else { return }
+        theme = value
         try? persist()
     }
 
@@ -152,7 +169,10 @@ public final class AppModel {
             tasks: tasks.filter { !ephemeralTaskIds.contains($0.id) },
             worktreesRootOverride: worktreesRootOverride,
             hasCompletedSetup: hasCompletedSetup,
-            notificationsHintDismissed: notificationsHintDismissed))
+            notificationsHintDismissed: notificationsHintDismissed,
+            theme: theme,
+            startView: startView,
+            showBeam: showBeam))
     }
 
     // MARK: - Repo registry

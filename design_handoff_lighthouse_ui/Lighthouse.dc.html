@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#0a0d14;height:100%;overflow:hidden}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:var(--sb,#2a3346);border-radius:6px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-track{background:transparent}
+  a{color:var(--primary,#f0b45e);text-decoration:none}
+  a:hover{filter:brightness(1.12)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+  @keyframes beam{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+  @keyframes blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+  @keyframes slidein{from{transform:translateX(24px);opacity:0}to{transform:translateX(0);opacity:1}}
+  @keyframes fadeup{from{transform:translateY(10px);opacity:0}to{transform:translateY(0);opacity:1}}
+  @keyframes pop{from{transform:scale(.97);opacity:0}to{transform:scale(1);opacity:1}}
+</style>
+</helmet>
+
+<div style="{{ themeVars }}height:100vh;width:100vw;overflow:hidden;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,sans-serif;position:relative;transition:background .25s,color .25s">
+
+  <!-- ambient beacon glow -->
+  <sc-if value="{{ showBeam }}" hint-placeholder-val="{{ true }}">
+    <div style="position:absolute;top:-360px;left:-260px;width:900px;height:900px;pointer-events:none;z-index:0;opacity:.55;background:conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--primary) 22%, transparent) 18deg, transparent 42deg, transparent 360deg);animation:beam 26s linear infinite;filter:blur(2px)"></div>
+    <div style="position:absolute;top:-140px;left:-80px;width:420px;height:420px;pointer-events:none;z-index:0;background:radial-gradient(circle, color-mix(in srgb, var(--primary) 16%, transparent), transparent 66%)"></div>
+  </sc-if>
+
+  <!-- TITLEBAR -->
+  <div style="height:38px;flex:none;display:flex;align-items:center;padding:0 14px;background:var(--chrome);border-bottom:1px solid var(--borderSoft);position:relative;z-index:5">
+    <div style="display:flex;gap:8px;align-items:center">
+      <span style="width:12px;height:12px;border-radius:50%;background:#f0605c"></span>
+      <span style="width:12px;height:12px;border-radius:50%;background:#f5bd4f"></span>
+      <span style="width:12px;height:12px;border-radius:50%;background:#61c556"></span>
+    </div>
+    <div style="position:absolute;left:0;right:0;display:flex;justify-content:center;align-items:center;gap:8px;pointer-events:none">
+      <span style="width:13px;height:13px;border-radius:50%;background:radial-gradient(circle at 50% 35%, #f0b45e, #b97a26);box-shadow:0 0 10px rgba(240,180,94,.6)"></span>
+      <span style="font-size:12.5px;font-weight:600;letter-spacing:.02em;color:var(--dim)">Lighthouse</span>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:12px">
+      <div style="display:flex;align-items:center;background:var(--panel2);border:1px solid var(--border2);border-radius:8px;padding:2px">
+        <button onClick="{{ setBeacon }}" style="{{ themeBeaconStyle }}">◑ Beacon</button>
+        <button onClick="{{ setNative }}" style="{{ themeNativeStyle }}">○ Native</button>
+      </div>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint2)">you@example.com</span>
+    </div>
+  </div>
+
+  <!-- ========================= HARBOR VIEW ========================= -->
+  <sc-if value="{{ isHarbor }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;min-height:0;display:flex;flex-direction:column;position:relative;z-index:1">
+
+    <div style="flex:none;display:flex;align-items:center;gap:16px;padding:18px 30px 6px 30px">
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <div style="font-size:23px;font-weight:700;letter-spacing:-.01em">Harbor</div>
+        <div style="font-size:12.5px;color:var(--dim)">{{ counts.total }} tasks across {{ counts.repos }} repos · {{ counts.needs }} need you</div>
+      </div>
+      <button onClick="{{ openCmdk }}" style="margin-left:auto;display:flex;align-items:center;gap:10px;height:38px;padding:0 14px;min-width:280px;background:var(--panel2);border:1px solid var(--border2);border-radius:10px;color:var(--faint);font-size:13px;font-family:'Space Grotesk',sans-serif;cursor:pointer" style-hover="border-color:var(--border);color:var(--dim)">
+        <span style="font-size:14px;opacity:.7">⌕</span>
+        <span>Search tasks &amp; repos…</span>
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--panel3);border:1px solid var(--border);border-radius:5px;padding:2px 6px;color:var(--dim)">⌘K</span>
+      </button>
+      <button onClick="{{ newTask }}" style="{{ primaryBtn }}">
+        <span style="font-size:16px;font-weight:400;margin-top:-1px">+</span> New task
+      </button>
+    </div>
+
+    <div style="flex:none;display:flex;gap:9px;padding:14px 30px 16px 30px;flex-wrap:wrap">
+      <sc-for list="{{ filters }}" as="f" hint-placeholder-count="5">
+        <button onClick="{{ f.onClick }}" style="{{ f.style }}">
+          <span style="{{ f.dot }}"></span>{{ f.label }}<span style="opacity:.6;font-weight:600">{{ f.count }}</span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="flex:1;min-height:0;overflow-y:auto;padding:0 30px 34px 30px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:16px">
+        <sc-for list="{{ harborTasks }}" as="t" hint-placeholder-count="6">
+          <div onClick="{{ t.onOpen }}" style="position:relative;background:var(--panel);border:1px solid var(--border);border-left:3px solid {{ t.accent }};border-radius:14px;padding:16px 17px 14px 17px;cursor:pointer;box-shadow:{{ t.shadow }};animation:fadeup .4s ease both;transition:transform .12s,border-color .12s" style-hover="transform:translateY(-2px);border-color:var(--border)">
+            <div style="display:flex;align-items:flex-start;gap:10px">
+              <span style="{{ t.dot }}"></span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:15px;font-weight:600;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.title }}</div>
+                <div style="display:flex;align-items:center;gap:7px;margin-top:5px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">
+                  <span style="color:var(--dim)">{{ t.repo }}</span>
+                  <span style="opacity:.4">·</span>
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.branchShort }}</span>
+                </div>
+              </div>
+              <span style="{{ t.pill }}">{{ t.statusLabel }}</span>
+            </div>
+            <div style="margin-top:12px;font-size:12.5px;line-height:1.45;color:var(--text);opacity:.82;min-height:36px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">{{ t.action }}</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-top:13px;padding-top:12px;border-top:1px solid var(--borderSoft);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">
+              <span style="display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#3f6cd6;box-shadow:0 0 6px #3f6cd699"></span>{{ t.model }}</span>
+              <span style="color:#4fb07a">+{{ t.add }}</span><span style="color:#d46b64;margin-left:-6px">−{{ t.del }}</span>
+              <span>{{ t.files }} files</span>
+              <span style="margin-left:auto">{{ t.time }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="margin-top:30px;font-size:13px;font-weight:600;color:var(--dim);letter-spacing:.04em;text-transform:uppercase">Repos</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;margin-top:12px">
+        <sc-for list="{{ repos }}" as="r" hint-placeholder-count="2">
+          <div style="display:flex;align-items:center;gap:14px;background:var(--panel2);border:1px solid var(--borderSoft);border-radius:12px;padding:14px 16px">
+            <div style="width:38px;height:38px;flex:none;border-radius:9px;background:var(--panel3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--primary)">{{ r.initial }}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">{{ r.name }}</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">{{ r.path }}</div>
+            </div>
+            <div style="text-align:right;flex:none">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim)"> {{ r.branch }}</div>
+              <div style="font-size:11.5px;color:var(--faint);margin-top:2px">{{ r.count }} tasks</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ========================= FOCUS VIEW ========================= -->
+  <sc-if value="{{ isFocus }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;min-height:0;display:flex;position:relative;z-index:1">
+
+    <div style="width:60px;flex:none;background:var(--chrome);border-right:1px solid var(--borderSoft);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:6px">
+      <button onClick="{{ backToHarbor }}" title="Harbor" style="width:40px;height:40px;border-radius:11px;background:var(--panel3);border:1px solid var(--border2);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px" style-hover="color:var(--primary)">◱</button>
+      <div style="width:24px;height:1px;background:var(--border);margin:6px 0"></div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:4px;overflow-y:auto;width:100%;align-items:center">
+        <sc-for list="{{ railTasks }}" as="t" hint-placeholder-count="6">
+          <button onClick="{{ t.onOpen }}" title="{{ t.title }}" style="{{ t.railStyle }}">
+            <span style="{{ t.dot }}"></span>
+          </button>
+        </sc-for>
+      </div>
+      <button onClick="{{ newTask }}" title="New task" style="width:40px;height:40px;border-radius:11px;background:transparent;border:1px dashed var(--border);color:var(--faint);cursor:pointer;font-size:18px;font-weight:300" style-hover="border-color:var(--primary);color:var(--primary)">+</button>
+    </div>
+
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+
+      <div style="flex:none;display:flex;align-items:center;gap:12px;padding:0 18px;height:52px;background:var(--chrome);border-bottom:1px solid var(--borderSoft)">
+        <span style="{{ selected.dot }}"></span>
+        <div style="min-width:0">
+          <div style="font-size:14.5px;font-weight:600;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ selected.title }}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint);margin-top:2px">{{ selected.repo }} · {{ selected.branchShort }}</div>
+        </div>
+        <div style="margin-left:auto;display:flex;background:var(--panel2);border:1px solid var(--border2);border-radius:9px;padding:3px">
+          <button onClick="{{ setTerminal }}" style="{{ segTermStyle }}">Terminal</button>
+          <button onClick="{{ setSummary }}" style="{{ segSumStyle }}">Summary</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim)">
+          <span style="width:74px;height:6px;background:var(--panel3);border-radius:4px;overflow:hidden;display:inline-block"><span style="display:block;height:100%;width:{{ selected.ctxW }};background:linear-gradient(90deg,#5ec8e0,#4a9fd6);border-radius:4px"></span></span>
+          <span>{{ selected.ctx }}%</span>
+        </div>
+        <button onClick="{{ toggleNav }}" title="Navigator (⌘\\)" style="{{ navBtnStyle }}">◨</button>
+        <button onClick="{{ merge }}" style="{{ mergeStyle }}">Merge to base</button>
+      </div>
+
+      <div style="flex:none;display:flex;align-items:center;gap:2px;height:34px;padding:0 12px;background:var(--chrome);border-bottom:1px solid var(--borderSoft)">
+        <div style="display:flex;align-items:center;gap:7px;height:26px;padding:0 12px;background:var(--termbg);border:1px solid var(--borderSoft);border-bottom:none;border-radius:7px 7px 0 0;font-size:12px;color:#dfe4ee;margin-top:8px">
+          <span style="font-size:11px;color:var(--primary)">✦</span> Agent
+        </div>
+        <div style="display:flex;align-items:center;height:26px;padding:0 11px;font-size:12px;color:var(--faint);margin-top:8px;cursor:pointer" style-hover="color:var(--text)">zsh</div>
+        <button title="New shell tab (⌘T)" style="width:22px;height:22px;margin-top:8px;background:transparent;border:none;color:var(--faint);cursor:pointer;font-size:15px;border-radius:5px" style-hover="color:var(--primary)">+</button>
+      </div>
+
+      <div style="flex:1;min-height:0;position:relative;background:var(--bg)">
+
+        <!-- FILE VIEWER -->
+        <sc-if value="{{ hasViewer }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;background:var(--termbg);animation:pop .18s ease both">
+            <div style="flex:none;display:flex;align-items:center;gap:10px;padding:0 16px;height:40px;background:rgba(0,0,0,.28);border-bottom:1px solid rgba(255,255,255,.07)">
+              <span style="{{ viewer.badge }}">{{ viewer.status }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#dfe4ee">{{ viewer.path }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6fd39a;margin-left:8px">+{{ viewer.add }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#e0736d">−{{ viewer.del }}</span>
+              <span style="margin-left:auto;font-size:11px;color:#8792a6">read-only</span>
+              <button onClick="{{ closeViewer }}" style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:7px;color:#dfe4ee;font-size:11px;cursor:pointer;font-family:'JetBrains Mono',monospace" style-hover="background:rgba(255,255,255,.12)">⌘J Terminal</button>
+            </div>
+            <div style="flex:1;min-height:0;overflow:auto;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.65;padding:12px 0;color:#c8cfdd">
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">18</span><span style="color:#c792ea">export</span><span style="color:#c3cad8">&nbsp;const&nbsp;</span><span style="color:#82aaff">CATEGORY_STYLES</span><span style="color:#c3cad8">&nbsp;= {</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">19</span><span style="color:#c3cad8">&nbsp;&nbsp;metabolic: { dot: </span><span style="color:#ecc48d">'#f0b45e'</span><span style="color:#c3cad8"> },</span></div>
+              <div style="display:flex;background:rgba(111,211,154,.10)"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#6fd39a">20</span><span style="color:#6fd39a">+&nbsp;</span><span style="color:#c3cad8">warning: { dot: </span><span style="color:#ecc48d">'#5ec8e0'</span><span style="color:#c3cad8"> },</span></div>
+              <div style="display:flex;background:rgba(111,211,154,.10)"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#6fd39a">21</span><span style="color:#6fd39a">+&nbsp;</span><span style="color:#c3cad8">danger: { dot: </span><span style="color:#ecc48d">'#6fd39a'</span><span style="color:#c3cad8"> },</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">22</span><span style="color:#c3cad8">&nbsp;&nbsp;default: { dot: </span><span style="color:#ecc48d">'#8a93a6'</span><span style="color:#c3cad8"> },</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">23</span><span style="color:#c3cad8">};</span></div>
+              <div style="height:14px"></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">42</span><span style="color:#c3cad8">&nbsp;&nbsp;return (</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">43</span><span style="color:#c3cad8">&nbsp;&nbsp;&nbsp;&nbsp;&lt;</span><span style="color:#f07178">div</span><span style="color:#c792ea">&nbsp;className</span><span style="color:#c3cad8">=</span><span style="color:#ecc48d">"conversion-map"</span><span style="color:#c3cad8">&gt;</span></div>
+              <div style="display:flex;background:rgba(224,115,109,.10)"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#e0736d">44</span><span style="color:#e0736d">−&nbsp;</span><span style="color:#5b6478">{/* periodic-table grid */}</span></div>
+              <div style="display:flex;background:rgba(111,211,154,.10)"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#6fd39a">44</span><span style="color:#6fd39a">+&nbsp;</span><span style="color:#5b6478">{/* category grid — colour marks the category */}</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">45</span><span style="color:#c3cad8">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{CONVENTIONAL_CONVERSIONS.</span><span style="color:#82aaff">flatMap</span><span style="color:#c3cad8">((group) =&gt; {</span></div>
+              <div style="display:flex"><span style="width:48px;flex:none;text-align:right;padding-right:16px;color:#3f4a5e">46</span><span style="color:#c3cad8">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;const style = CATEGORY_STYLES[group.category] ?? CATEGORY_STYLES.default;</span></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- SUMMARY -->
+        <sc-if value="{{ isSummary }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;overflow-y:auto;padding:26px 30px;animation:pop .18s ease both">
+            <div style="max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:16px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="{{ selected.dot }}"></span>
+                <span style="font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:{{ selected.accent }}">{{ selected.statusLabel }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint);margin-left:auto">baked for {{ selected.baked }}</span>
+              </div>
+              <div style="font-size:20px;font-weight:600;line-height:1.35">{{ selected.summaryHead }}</div>
+              <div style="display:flex;gap:12px">
+                <div style="flex:1;background:var(--panel2);border:1px solid var(--borderSoft);border-radius:12px;padding:14px 16px">
+                  <div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em">Changes</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:18px;margin-top:6px"><span style="color:#4fb07a">+{{ selected.add }}</span> <span style="color:#d46b64">−{{ selected.del }}</span></div>
+                  <div style="font-size:12px;color:var(--dim);margin-top:2px">{{ selected.files }} files touched</div>
+                </div>
+                <div style="flex:1;background:var(--panel2);border:1px solid var(--borderSoft);border-radius:12px;padding:14px 16px">
+                  <div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em">Context</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:18px;margin-top:6px;color:#4a9fd6">{{ selected.ctx }}%</div>
+                  <div style="font-size:12px;color:var(--dim);margin-top:2px">{{ selected.model }} · 1M window</div>
+                </div>
+              </div>
+              <div style="background:var(--panel2);border:1px solid var(--borderSoft);border-radius:12px;padding:16px 18px">
+                <div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">What the agent did</div>
+                <sc-for list="{{ selected.steps }}" as="s" hint-placeholder-count="4">
+                  <div style="display:flex;gap:11px;padding:6px 0;font-size:13.5px;line-height:1.45;color:var(--text);opacity:.88">
+                    <span style="color:#4fb07a;flex:none;margin-top:1px">✓</span><span>{{ s }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="background:color-mix(in srgb, var(--primary) 9%, var(--bg));border:1px solid color-mix(in srgb, var(--primary) 32%, transparent);border-radius:12px;padding:16px 18px">
+                <div style="font-size:11px;color:var(--primary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Next step</div>
+                <div style="font-size:14px;line-height:1.5;color:var(--text)">{{ selected.next }}</div>
+                <div style="display:flex;gap:9px;margin-top:14px">
+                  <button onClick="{{ setTerminal }}" style="{{ primaryBtnSm }}">Open terminal</button>
+                  <button onClick="{{ toggleNav }}" style="padding:8px 15px;background:var(--panel3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif">Review diff</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- TERMINAL -->
+        <sc-if value="{{ isTerminal }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute;inset:0;overflow-y:auto;padding:16px 20px 10px 20px;background:var(--termbg);font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;color:#c8cfdd">
+            <div style="color:#5b6478">✦ Session started · web-app · task/show-conventional-conversion-map</div>
+            <div style="height:10px"></div>
+            <div><span style="color:#6fd39a">●</span> <span style="color:#c8cfdd">Rewriting the conversion map so tiles are ordered by category and colour-coded.</span></div>
+            <div style="height:8px"></div>
+            <div style="color:#82aaff">Update(src/features/settings/PreferencesTab.tsx)</div>
+            <div style="color:#5b6478">&nbsp;⎿&nbsp; Added 2 lines, removed 1 line</div>
+            <div style="background:rgba(224,115,109,.12);color:#e0736d;padding:0 4px">196&nbsp;−&nbsp;&nbsp;&nbsp;&nbsp;{/* Full conversion map — a periodic-table-style grid. */}</div>
+            <div style="background:rgba(111,211,154,.12);color:#6fd39a;padding:0 4px">196&nbsp;+&nbsp;&nbsp;&nbsp;&nbsp;{/* Conversion map — tiles ordered by category, colour marks it. */}</div>
+            <div style="color:#5b6478">197&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&lt;<span style="color:#f07178">div</span></div>
+            <div style="color:#5b6478">198&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;className=<span style="color:#ecc48d">"min-w-0 flex-1 border-t pt-5"</span></div>
+            <div style="height:10px"></div>
+            <div style="color:#82aaff">Update(src/features/settings/conventionalConversions.ts)</div>
+            <div style="color:#5b6478">&nbsp;⎿&nbsp; Added 3 lines</div>
+            <div style="background:rgba(111,211,154,.12);color:#6fd39a;padding:0 4px">20&nbsp;+&nbsp;&nbsp;warning: { dot: <span style="color:#ecc48d">'#5ec8e0'</span> },</div>
+            <div style="background:rgba(111,211,154,.12);color:#6fd39a;padding:0 4px">21&nbsp;+&nbsp;&nbsp;danger:&nbsp;&nbsp; { dot: <span style="color:#ecc48d">'#6fd39a'</span> },</div>
+            <div style="height:10px"></div>
+            <div><span style="color:#6fd39a">●</span> <span style="color:#c8cfdd">Let me verify, then commit, push, and re-trigger review.</span></div>
+            <div style="color:#5b6478">&nbsp;⎿&nbsp; Ran 2 shell commands</div>
+            <div style="height:8px"></div>
+            <div><span style="color:#f0b45e">✳</span> <span style="color:#8a93a6">Baked for 3m 32s</span></div>
+            <div style="height:10px"></div>
+            <div style="color:#5b6478">✦ recap: Adding a conventional→SI metric conversion map to Settings → Preferences (PR #394, draft). Review fixes are pushed and re-review is triggered; next is to check the pass and continue the fix-push loop until clean.</div>
+            <div style="height:16px"></div>
+            <div style="display:flex;align-items:center;gap:8px"><span style="color:#6fd39a">❯</span><span style="color:#c8cfdd">accept the metric rounding change and rerun the parser tests</span><span style="display:inline-block;width:8px;height:16px;background:#f0b45e;animation:blink 1.1s step-end infinite"></span></div>
+          </div>
+        </sc-if>
+
+      </div>
+
+      <div style="flex:none;display:flex;align-items:center;gap:14px;height:30px;padding:0 18px;background:var(--chrome);border-top:1px solid var(--borderSoft);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">
+        <span style="display:flex;align-items:center;gap:6px;color:var(--dim)"><span style="width:6px;height:6px;border-radius:50%;background:var(--primary)"></span>{{ selected.account }}</span>
+        <span>⌥ {{ selected.repo }}</span>
+        <span>{{ selected.model }} (1M context)</span>
+        <span>ctx: {{ selected.ctx }}% used</span>
+        <span style="margin-left:auto;color:#4fb07a">▶▶ accept edits on</span>
+        <span>← {{ counts.total }} agents</span>
+      </div>
+
+    </div>
+
+    <!-- NAVIGATOR OVERLAY -->
+    <sc-if value="{{ navOpen }}" hint-placeholder-val="{{ true }}">
+    <div style="width:340px;flex:none;background:var(--chrome);border-left:1px solid var(--borderSoft);display:flex;flex-direction:column;animation:slidein .2s ease both">
+      <div style="flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;height:52px;border-bottom:1px solid var(--borderSoft)">
+        <span style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em">Repo</span>
+        <div style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--panel2);border:1px solid var(--border2);border-radius:8px;font-size:12.5px;color:var(--text);cursor:pointer">{{ selected.repo }} <span style="color:var(--faint);font-size:10px">▾</span></div>
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a9fd6">diff vs base</span>
+        <button onClick="{{ toggleNav }}" style="width:26px;height:26px;background:transparent;border:none;color:var(--faint);cursor:pointer;font-size:16px;border-radius:6px" style-hover="color:var(--text)">×</button>
+      </div>
+      <div style="flex:none;display:flex;gap:3px;padding:10px 12px 8px 12px">
+        <button onClick="{{ tabChanges }}" style="{{ tabChangesStyle }}">Changes</button>
+        <button onClick="{{ tabFiles }}" style="{{ tabFilesStyle }}">Files</button>
+        <button onClick="{{ tabHistory }}" style="{{ tabHistoryStyle }}">History</button>
+      </div>
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:4px 8px 14px 8px">
+        <sc-if value="{{ isChanges }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">
+            <span style="color:var(--dim)">▾</span> src/features/settings
+          </div>
+          <sc-for list="{{ selectedFiles }}" as="f" hint-placeholder-count="3">
+            <button onClick="{{ f.onSelect }}" style="{{ f.rowStyle }}">
+              <span style="{{ f.glyph }}">{{ f.status }}</span>
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{ f.name }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4fb07a">+{{ f.add }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#d46b64">−{{ f.del }}</span>
+            </button>
+          </sc-for>
+          <div style="margin-top:14px;padding:12px;border-top:1px solid var(--borderSoft);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">{{ selected.files }} files · <span style="color:#4fb07a">+{{ selected.add }}</span> <span style="color:#d46b64">−{{ selected.del }}</span></div>
+        </sc-if>
+        <sc-if value="{{ isFiles }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:20px 10px;font-size:12.5px;color:var(--dim);line-height:1.6">Browse the full repo tree here. Click any file to open it in the read-only viewer without leaving your terminal session.</div>
+        </sc-if>
+        <sc-if value="{{ isHistory }}" hint-placeholder-val="{{ false }}">
+          <sc-for list="{{ history }}" as="c" hint-placeholder-count="4">
+            <div style="display:flex;gap:10px;padding:9px 8px;border-bottom:1px solid var(--borderSoft)">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--primary);flex:none">{{ c.sha }}</span>
+              <div style="min-width:0"><div style="font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ c.msg }}</div><div style="font-size:11px;color:var(--faint);margin-top:2px">{{ c.who }} · {{ c.when }}</div></div>
+            </div>
+          </sc-for>
+        </sc-if>
+      </div>
+    </div>
+    </sc-if>
+
+  </div>
+  </sc-if>
+
+  <!-- ========================= ⌘K PALETTE ========================= -->
+  <sc-if value="{{ cmdkOpen }}" hint-placeholder-val="{{ false }}">
+  <div onClick="{{ closeCmdk }}" style="position:fixed;inset:0;z-index:50;background:rgba(6,8,13,.5);backdrop-filter:blur(3px);display:flex;justify-content:center;padding-top:11vh">
+    <div onClick="{{ stop }}" style="width:620px;max-width:92vw;height:max-content;max-height:70vh;background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:0 30px 80px rgba(0,0,0,.5);overflow:hidden;display:flex;flex-direction:column;animation:pop .16s ease both">
+      <div style="display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--borderSoft)">
+        <span style="font-size:16px;color:var(--primary)">⌕</span>
+        <input autofocus placeholder="Jump to a task, repo, or command…" style="flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:15px;font-family:'Space Grotesk',sans-serif" />
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:2px 6px">esc</span>
+      </div>
+      <div style="overflow-y:auto;padding:8px">
+        <div style="padding:8px 12px 6px 12px;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)">Needs you first</div>
+        <sc-for list="{{ cmdkList }}" as="t" hint-placeholder-count="6">
+          <button onClick="{{ t.onOpen }}" style="display:flex;align-items:center;gap:12px;width:100%;padding:10px 12px;background:transparent;border:none;border-radius:10px;cursor:pointer;text-align:left;color:var(--text)" style-hover="background:var(--elev)">
+            <span style="{{ t.dot }}"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.title }}</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint);margin-top:1px">{{ t.repo }}</div>
+            </div>
+            <span style="{{ t.pill }}">{{ t.statusLabel }}</span>
+          </button>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:800},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;beacon&quot;,&quot;native&quot;],&quot;default&quot;:&quot;beacon&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;startView&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;harbor&quot;,&quot;focus&quot;],&quot;default&quot;:&quot;harbor&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Behavior&quot;},&quot;showBeam&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  state = { view:'harbor', selectedId:'t1', navOpen:true, navTab:'changes', termMode:'terminal', cmdkOpen:false, viewerId:null, filter:'all', theme:'beacon' };
+
+  TASKS = [
+    { id:'t1', title:'show conventional conversion map', repo:'web-app', branch:'task/show-conventional-conversion-map', status:'working', model:'Opus 4.8', ctx:24, add:212, del:47, files:3, time:'now', account:'you@example.com', baked:'3m 32s',
+      action:'Editing PreferencesTab.tsx — reworking the conversion map into a colour-coded category grid.',
+      summaryHead:'Adding a conventional→SI metric conversion map to Settings → Preferences.',
+      steps:['Replaced the periodic-table grid with a category-ordered tile layout','Added warning / danger category colours to conventionalConversions.ts','Wired the flip animation to replay on system change','Ran the settings test suite — all green'],
+      next:'Gemini re-review is running on PR #394. Check its next pass, then continue the fix-push loop until clean.' },
+    { id:'t2', title:'add more file types', repo:'data-pipeline', branch:'task/add-more-file-types', status:'needs', model:'Opus 4.8', ctx:41, add:88, del:12, files:5, time:'3m ago', account:'you@example.com', baked:'6m 04s',
+      action:'Waiting on you — should .csv and .tsv share the same parser entrypoint, or split them?',
+      summaryHead:'Extending the parser registry to recognise .csv, .tsv and .psv inputs.',
+      steps:['Mapped the three new extensions to MIME sniffers','Added fixtures for each format','Stubbed the shared entrypoint'],
+      next:'Decision needed: one shared entrypoint or three adapters? Reply in the terminal to continue.' },
+    { id:'t3', title:'upgrade metric unit conversions', repo:'web-app', branch:'task/metric-units', status:'needs', model:'Sonnet 4.8', ctx:18, add:34, del:9, files:2, time:'12m ago', account:'you@example.com', baked:'4m 41s',
+      action:'Waiting on you — approve the new rounding rule for mmol/L → mg/dL (2 sig figs)?',
+      summaryHead:'Tightening rounding rules across the metric unit table.',
+      steps:['Normalised all conversion factors to 6 dp','Added a rounding-policy config','Flagged 2 conversions that change output'],
+      next:'Approve or adjust the rounding policy, then it will regenerate the snapshot tests.' },
+    { id:'t4', title:'parse CSV segments', repo:'data-pipeline', branch:'task/parse-csv-segments', status:'working', model:'Opus 4.8', ctx:58, add:301, del:64, files:7, time:'now', account:'you@example.com', baked:'11m 18s',
+      action:'Running the segment-parser test suite — 142 cases, currently at 118.',
+      summaryHead:'Implementing MSH / PID / OBX segment parsing with strict validation.',
+      steps:['Built the segment tokenizer','Added field-level validators','Wrote 142 conformance cases'],
+      next:'Let the suite finish, then it will report failures and self-correct.' },
+    { id:'t5', title:'fix flaky auth tests', repo:'web-app', branch:'task/fix-flaky-auth', status:'idle', model:'Sonnet 4.8', ctx:31, add:56, del:120, files:4, time:'27m ago', account:'you@example.com', baked:'8m 52s',
+      action:'All tests green and pushed. Ready to merge to develop.',
+      summaryHead:'Removed timing races from the auth integration tests.',
+      steps:['Replaced fixed sleeps with awaited conditions','Isolated the token-refresh mock','Ran the suite 20× — stable'],
+      next:'Merge to base when you are ready — no conflicts detected.' },
+    { id:'t6', title:'refactor segment cache', repo:'data-pipeline', branch:'task/refactor-segment-cache', status:'stale', model:'Opus 4.8', ctx:0, add:19, del:5, files:2, time:'1h ago', account:'you@example.com', baked:'—',
+      action:'Session ended with 2 uncommitted files. Pick up where it left off?',
+      summaryHead:'Half-finished LRU cache for parsed segments.',
+      steps:['Sketched the cache interface','Left 2 files uncommitted'],
+      next:'Resume the session to review the uncommitted changes and decide whether to keep them.' },
+  ];
+
+  REPOS = [
+    { name:'data-pipeline', initial:'H', branch:'develop', path:'/Users/you/code/data-pipeline', count:3 },
+    { name:'web-app', initial:'R', branch:'develop', path:'/Users/you/code/web-app', count:3 },
+  ];
+
+  FILES = {
+    t1:[
+      { name:'conventionalConversions.ts', path:'src/features/settings/conventionalConversions.ts', status:'A', add:34, del:0 },
+      { name:'PreferencesTab.tsx', path:'src/features/settings/PreferencesTab.tsx', status:'M', add:171, del:44 },
+      { name:'PreferencesTab.test.tsx', path:'src/features/settings/__tests__/PreferencesTab.test.tsx', status:'M', add:7, del:3 },
+    ],
+  };
+
+  HISTORY = [
+    { sha:'a3f9c1', msg:'map: order tiles by category, colour-code', who:'you', when:'2m ago' },
+    { sha:'7b2e40', msg:'settings: add warning/danger categories', who:'you', when:'9m ago' },
+    { sha:'e10d55', msg:'wip: conversion map layout', who:'you', when:'24m ago' },
+    { sha:'c98a02', msg:'chore: bump metric fixtures', who:'you', when:'1h ago' },
+  ];
+
+  THEMES = {
+    beacon: {
+      vars: { '--bg':'#0a0d14','--chrome':'#0b0f18','--panel':'#131926','--panel2':'#101623','--panel3':'#141b28','--elev':'#18202f','--border':'#2a3346','--border2':'#242c3c','--borderSoft':'#1c2331','--text':'#e7ebf3','--dim':'#8a93a6','--faint':'#6f7890','--faint2':'#525b6f','--termbg':'#080b11','--primary':'#f0b45e','--primaryText':'#241a08','--sb':'#2a3346' },
+      status: { working:'#5ec8e0', needs:'#f0b45e', idle:'#6fd39a', stale:'#cbbb5f' },
+      idleBtn: 'linear-gradient(180deg,#6fd39a,#57b37f)', idleBtnText:'#0a1a12',
+      primaryBtn: 'linear-gradient(180deg,#f0b45e,#e0a144)', primaryText:'#241a08', primaryShadow:'0 2px 10px rgba(240,180,94,.28)',
+    },
+    native: {
+      vars: { '--bg':'#f3f3f5','--chrome':'#e9e9ec','--panel':'#ffffff','--panel2':'#ffffff','--panel3':'#ededf1','--elev':'#eef0f4','--border':'#d6d6dc','--border2':'#dcdce2','--borderSoft':'#e0e0e6','--text':'#1d1d1f','--dim':'#6b6b70','--faint':'#8a8a90','--faint2':'#a0a0a8','--termbg':'#1e1e22','--primary':'#0a84ff','--primaryText':'#ffffff','--sb':'#c8c8d0' },
+      status: { working:'#0a84c2', needs:'#c8871a', idle:'#1f9d55', stale:'#98811a' },
+      idleBtn: '#1f9d55', idleBtnText:'#ffffff',
+      primaryBtn: '#0a84ff', primaryText:'#ffffff', primaryShadow:'0 1px 3px rgba(10,132,255,.35)',
+    },
+  };
+
+  componentDidMount(){
+    if(this.props.startView) this.setState({ view:this.props.startView });
+    if(this.props.theme) this.setState({ theme:this.props.theme });
+    this._key = (e)=>{
+      const mod = e.metaKey || e.ctrlKey;
+      const k = (e.key||'').toLowerCase();
+      if(mod && k==='k'){ e.preventDefault(); this.setState(s=>({cmdkOpen:!s.cmdkOpen})); }
+      else if(mod && k==='j'){ e.preventDefault(); if(this.state.view==='focus') this.setState({viewerId:null}); }
+      else if(mod && k==='\\'){ e.preventDefault(); this.setState(s=>({navOpen:!s.navOpen})); }
+      else if(k==='escape'){ this.setState({cmdkOpen:false}); }
+    };
+    window.addEventListener('keydown', this._key);
+  }
+  componentWillUnmount(){ window.removeEventListener('keydown', this._key); }
+
+  open(id){ this.setState({ view:'focus', selectedId:id, cmdkOpen:false, viewerId:null }); }
+
+  dotStyle(accent, status){
+    let s = `display:inline-block;width:9px;height:9px;flex:none;border-radius:50%;background:${accent};color:${accent};`;
+    if(status==='working') s += 'animation:pulse 1.6s infinite;';
+    else if(status==='needs') s += `box-shadow:0 0 9px ${accent};`;
+    return s;
+  }
+  pillStyle(accent){
+    return `flex:none;font-size:10.5px;font-weight:600;padding:3px 9px;border-radius:20px;background:${accent}22;color:${accent};border:1px solid ${accent}55;`;
+  }
+
+  seg(active){
+    return active
+      ? "padding:5px 13px;background:var(--border2);border:none;border-radius:7px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif"
+      : "padding:5px 13px;background:transparent;border:none;border-radius:7px;color:var(--dim);font-size:12px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif";
+  }
+  segTheme(active){
+    return active
+      ? "padding:3px 10px;background:var(--panel3);border:none;border-radius:6px;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif"
+      : "padding:3px 10px;background:transparent;border:none;border-radius:6px;color:var(--dim);font-size:11px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif";
+  }
+  tab(active){
+    return active
+      ? "flex:1;padding:7px 0;background:var(--elev);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif"
+      : "flex:1;padding:7px 0;background:transparent;border:1px solid transparent;border-radius:8px;color:var(--dim);font-size:12px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif";
+  }
+
+  renderVals(){
+    const st = this.state;
+    const th = this.THEMES[st.theme] || this.THEMES.beacon;
+    const themeVars = Object.entries(th.vars).map(([k,v])=>`${k}:${v};`).join('');
+
+    const mapTask = (t)=>{
+      const accent = th.status[t.status];
+      const label = { working:'Working', needs:'Needs you', idle:'Idle', stale:'Unaccounted' }[t.status];
+      const parts = (t.branch||'').split('/');
+      return {
+        ...t, accent, statusLabel:label,
+        branchShort: parts.length>1 ? parts.slice(1).join('/') : t.branch,
+        ctxW: (t.ctx||0)+'%',
+        dot: this.dotStyle(accent, t.status),
+        pill: this.pillStyle(accent),
+        shadow: t.status==='needs' ? `0 0 26px -8px ${accent}, 0 1px 3px rgba(0,0,0,.22)` : '0 1px 3px rgba(0,0,0,.16)',
+        onOpen: ()=>this.open(t.id),
+      };
+    };
+
+    const all = this.TASKS.map(mapTask);
+    const byId = id => all.find(x=>x.id===id) || all[0];
+
+    const railTasks = all.map(t=>{
+      const sel = t.id===st.selectedId ? 'background:var(--panel3);border:1px solid var(--border2);' : 'background:transparent;border:1px solid transparent;';
+      return { ...t, railStyle:`width:40px;height:40px;border-radius:11px;${sel}display:flex;align-items:center;justify-content:center;cursor:pointer;` };
+    });
+
+    const order = { needs:0, working:1, idle:2, stale:3 };
+    const c = { total:this.TASKS.length, repos:this.REPOS.length,
+      needs:this.TASKS.filter(t=>t.status==='needs').length,
+      working:this.TASKS.filter(t=>t.status==='working').length,
+      idle:this.TASKS.filter(t=>t.status==='idle').length,
+      stale:this.TASKS.filter(t=>t.status==='stale').length };
+
+    const chip = (key,label,color,count)=>{
+      const active = st.filter===key;
+      const base = `display:flex;align-items:center;gap:7px;height:32px;padding:0 13px;border-radius:9px;font-size:12.5px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif;`;
+      const style = active
+        ? base + `background:${color}22;border:1px solid ${color}66;color:${color};`
+        : base + `background:var(--panel2);border:1px solid var(--border2);color:var(--dim);`;
+      const dot = color ? `width:7px;height:7px;border-radius:50%;background:${color};` : 'display:none;';
+      return { label, count, style, dot, onClick:()=>this.setState({filter:key}) };
+    };
+    const filters = [
+      chip('all','All','', c.total),
+      chip('needs','Needs you', th.status.needs, c.needs),
+      chip('working','Working', th.status.working, c.working),
+      chip('idle','Idle', th.status.idle, c.idle),
+      chip('stale','Unaccounted', th.status.stale, c.stale),
+    ];
+    filters[0].dot = 'display:none;';
+
+    let harborTasks = all.slice().sort((a,b)=> order[a.status]-order[b.status]);
+    if(st.filter!=='all') harborTasks = harborTasks.filter(t=>t.status===st.filter);
+    const cmdkList = all.slice().sort((a,b)=> order[a.status]-order[b.status]);
+    const selected = byId(st.selectedId);
+
+    const badge = s => {
+      const col = s==='A'?'#5fc389':s==='D'?'#d46b64':'#e0a34a';
+      return `flex:none;width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;background:${col}33;color:${col};`;
+    };
+    const files = (this.FILES[st.selectedId]||[]).map(f=>({
+      ...f, glyph: badge(f.status),
+      onSelect: ()=>this.setState({viewerId:f.path}),
+      rowStyle: (st.viewerId===f.path)
+        ? "display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px 7px 24px;background:var(--elev);border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text);font-size:12.5px;font-family:'JetBrains Mono',monospace"
+        : "display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px 7px 24px;background:transparent;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--dim);font-size:12.5px;font-family:'JetBrains Mono',monospace",
+    }));
+    const viewerRaw = (this.FILES[st.selectedId]||[]).find(f=>f.path===st.viewerId);
+    const viewer = viewerRaw ? { ...viewerRaw, badge: badge(viewerRaw.status) } : null;
+
+    const primaryBtn = `display:flex;align-items:center;gap:8px;height:38px;padding:0 16px;background:${th.primaryBtn};border:none;border-radius:10px;color:${th.primaryText};font-size:13px;font-weight:600;font-family:'Space Grotesk',sans-serif;cursor:pointer;box-shadow:${th.primaryShadow}`;
+    const primaryBtnSm = `padding:8px 15px;background:${th.primaryBtn};border:none;border-radius:9px;color:${th.primaryText};font-size:12.5px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif`;
+
+    return {
+      themeVars,
+      isHarbor: st.view==='harbor',
+      isFocus: st.view==='focus',
+      showBeam: this.props.showBeam ?? true,
+      counts: c, filters, harborTasks, railTasks,
+      repos: this.REPOS, history: this.HISTORY, cmdkList,
+      cmdkOpen: st.cmdkOpen, navOpen: st.navOpen,
+      selected, selectedFiles: files, viewer, hasViewer: !!viewer,
+      isSummary: st.termMode==='summary' && !viewer,
+      isTerminal: st.termMode==='terminal' && !viewer,
+      isChanges: st.navTab==='changes', isFiles: st.navTab==='files', isHistory: st.navTab==='history',
+      primaryBtn, primaryBtnSm,
+      segTermStyle: this.seg(st.termMode==='terminal'),
+      segSumStyle: this.seg(st.termMode==='summary'),
+      themeBeaconStyle: this.segTheme(st.theme==='beacon'),
+      themeNativeStyle: this.segTheme(st.theme==='native'),
+      tabChangesStyle: this.tab(st.navTab==='changes'),
+      tabFilesStyle: this.tab(st.navTab==='files'),
+      tabHistoryStyle: this.tab(st.navTab==='history'),
+      navBtnStyle: st.navOpen
+        ? "width:34px;height:34px;border-radius:9px;background:var(--border2);border:1px solid var(--border);color:var(--primary);cursor:pointer;font-size:14px"
+        : "width:34px;height:34px;border-radius:9px;background:var(--panel2);border:1px solid var(--border2);color:var(--dim);cursor:pointer;font-size:14px",
+      mergeStyle: (selected && selected.status==='idle')
+        ? `padding:7px 14px;background:${th.idleBtn};border:none;border-radius:9px;color:${th.idleBtnText};font-size:12.5px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif`
+        : "padding:7px 14px;background:var(--panel3);border:1px solid var(--border2);color:var(--text);border-radius:9px;font-size:12.5px;font-weight:500;cursor:pointer;font-family:'Space Grotesk',sans-serif",
+      openCmdk: ()=>this.setState({cmdkOpen:true}),
+      closeCmdk: ()=>this.setState({cmdkOpen:false}),
+      stop: (e)=>{ e.stopPropagation(); },
+      newTask: ()=>this.setState({cmdkOpen:true}),
+      backToHarbor: ()=>this.setState({view:'harbor', viewerId:null}),
+      toggleNav: ()=>this.setState(s=>({navOpen:!s.navOpen})),
+      tabChanges: ()=>this.setState({navTab:'changes'}),
+      tabFiles: ()=>this.setState({navTab:'files'}),
+      tabHistory: ()=>this.setState({navTab:'history'}),
+      setSummary: ()=>this.setState({termMode:'summary', viewerId:null}),
+      setTerminal: ()=>this.setState({termMode:'terminal', viewerId:null}),
+      closeViewer: ()=>this.setState({viewerId:null}),
+      setBeacon: ()=>this.setState({theme:'beacon'}),
+      setNative: ()=>this.setState({theme:'native'}),
+      merge: ()=>{},
+    };
+  }
+}
+</script>
+</body>
+</html>

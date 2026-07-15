@@ -4,6 +4,7 @@ import LighthouseTaskEngine
 
 struct SidebarView: View {
     @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
     @Binding var showCreateTask: Bool
     @Binding var showRegisterRepo: Bool
     @Binding var taskPendingRemoval: TaskRecord?
@@ -29,9 +30,10 @@ struct SidebarView: View {
                 ForEach(runtime.model.repos) { repo in
                     VStack(alignment: .leading) {
                         Text(repo.pathURL.lastPathComponent)
+                            .foregroundStyle(theme.text)
                         Text("\(repo.baseBranch) · \(repo.path)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .font(LHFont.meta)
+                            .foregroundStyle(theme.dim)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -49,6 +51,8 @@ struct SidebarView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(theme.chrome)
         .navigationTitle("Lighthouse build \(BuildInfo.stamp)")
         .toolbar {
             ToolbarItem {
@@ -75,6 +79,7 @@ struct SidebarView: View {
 
 struct TaskRow: View {
     @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
     let task: TaskRecord
 
     var body: some View {
@@ -82,9 +87,10 @@ struct TaskRow: View {
             AttentionBadge(state: runtime.model.attentionState(of: task.id))
             VStack(alignment: .leading) {
                 Text(task.name)
+                    .foregroundStyle(theme.text)
                 Text(task.branch)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(LHFont.meta)
+                    .foregroundStyle(theme.dim)
             }
         }
     }

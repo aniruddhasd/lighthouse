@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SwiftUI
 import LighthouseAdapter
 import LighthouseAppCore
 import LighthouseGit
@@ -20,6 +21,11 @@ final class AppRuntime {
     let git = GitClient()
     private let listener: AttentionSocketListener
     private let adapter = ClaudeCodeAdapter()
+
+    /// Owns the active theme and drives app-wide re-resolution; the resolved
+    /// Theme is injected via `.environment(\.theme)`. Seeded from persisted
+    /// config, and persists back through AppModel on every flip.
+    let themeController: ThemeController
 
     var selectedTaskId: UUID?
     var switcherPresented = false
@@ -57,6 +63,12 @@ final class AppRuntime {
         } catch {
             lastError = "Could not load config: \(error)"
         }
+        // Seed the theme from persisted config (unknown value fails safe to
+        // Beacon); each flip persists back through AppModel.
+        let loadedModel = model
+        themeController = ThemeController(
+            initial: LighthouseTheme.from(rawValue: model.theme),
+            onChange: { newTheme in loadedModel.setTheme(newTheme.rawValue) })
         notifications.onSelectTask = { [weak self] id in self?.selectedTaskId = id }
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
@@ -77,6 +89,114 @@ final class AppRuntime {
         runNavigatorCheckIfRequested()
         runMergeWalkCheckIfRequested()
         runNotificationCheckIfRequested()
+        runThemeCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_THEME=1: proves the theme foundation in the REAL app —
+    /// both palettes resolve and DIFFER, `termbg` stays dark across the flip
+    /// (the "viewer stays dark" rule), and the custom titlebar came up with its
+    /// trailing accessory + theme switcher + centered wordmark. Logs stage
+    /// markers for Scripts/smoke-run.sh to assert. Follows the existing
+    /// LIGHTHOUSE_DEBUG_* stdout stage-logging pattern; launched directly like
+    /// the GEOMETRY gate (a window is created, which the titlebar needs).
+    private func runThemeCheckIfRequested() {
+        guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_THEME"] == "1" else { return }
+        Task { @MainActor in
+            func log(_ m: String) {
+                FileHandle.standardOutput.write(Data("THEME-STAGE \(m)\n".utf8))
+            }
+            let beacon = Theme.beacon
+            let native = Theme.native
+
+            // Every token resolves to a real sRGB color in BOTH themes (a nil
+            // means a token that could not resolve — a real failure).
+            let beaconResolves = Self.allTokensResolve(beacon)
+            let nativeResolves = Self.allTokensResolve(native)
+            log("beacon-all-resolve=\(beaconResolves) native-all-resolve=\(nativeResolves)")
+
+            // Representative tokens, with Beacon's exact documented hex.
+            // Theme-prefixed keys so the two lines don't collide when parsed.
+            log("beacon-bg=\(beacon.bg.srgbHex ?? "nil") beacon-chrome=\(beacon.chrome.srgbHex ?? "nil") beacon-primary=\(beacon.primary.srgbHex ?? "nil") beacon-termbg=\(beacon.termbg.srgbHex ?? "nil")")
+            log("native-bg=\(native.bg.srgbHex ?? "nil") native-chrome=\(native.chrome.srgbHex ?? "nil") native-primary=\(native.primary.srgbHex ?? "nil") native-termbg=\(native.termbg.srgbHex ?? "nil")")
+
+            // Flipping visibly changes chrome.
+            log("differ=\((beacon.bg.srgbHex ?? "a") != (native.bg.srgbHex ?? "b"))")
+
+            // termbg near-black in BOTH themes (guards the stay-dark rule).
+            let bDark = (beacon.termbg.srgbLuminance ?? 1) < 0.15
+            let nDark = (native.termbg.srgbLuminance ?? 1) < 0.15
+            log("termbg-dark-beacon=\(bDark) termbg-dark-native=\(nDark)")
+
+            // Actually flip the live controller and confirm termbg stays dark.
+            themeController.set(.native)
+            let afterFlipDark = (themeController.resolved.termbg.srgbLuminance ?? 1) < 0.15
+            log("flip=beacon->native termbg-still-dark=\(afterFlipDark)")
+            themeController.set(.beacon)
+
+            // Poll for the custom titlebar to finish installing on the window.
+            var titlebar: LighthouseTitlebar?
+            for _ in 0..<100 {
+                if let current = LighthouseTitlebar.current, current.hasTrailingAccessory {
+                    titlebar = current
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            log("titlebar-accessory=\(titlebar?.hasTrailingAccessory ?? false) switcher=\(titlebar?.hasSwitcher ?? false) wordmark=\(titlebar?.hasWordmark ?? false)")
+
+            // COHERENCE (the 2026-07-15 half-light bug): for each theme, pin the
+            // live window appearance, then resolve tokens WITHIN THAT WINDOW
+            // APPEARANCE — mirroring exactly what the user sees. This depends on
+            // the app actually pinning the window (without the pin, the window
+            // stays in the process/system appearance and Native's semantic bg
+            // resolves DARK under a dark process → the native-bg-light assertion
+            // FAILS). Independent of the process/system Light/Dark setting.
+            for kind in [LighthouseTheme.beacon, LighthouseTheme.native] {
+                themeController.set(kind)
+                let expected = kind.nsAppearanceName
+                var appearance: NSAppearance?
+                // Re-fetch the live titlebar each iteration (not a captured ref)
+                // so a slow first install can't produce a flaky nil, and wait
+                // for the window's effective appearance to settle on the flip.
+                for _ in 0..<50 {
+                    if let ea = LighthouseTitlebar.current?.windowEffectiveAppearance,
+                       ea.bestMatch(from: [.aqua, .darkAqua]) == expected {
+                        appearance = ea
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                let theme = Theme.forKind(kind)
+                let ea = appearance ?? LighthouseTitlebar.current?.windowEffectiveAppearance
+                let matched = ea?.bestMatch(from: [.aqua, .darkAqua]) == expected
+                let bgLum = ea.flatMap { theme.bg.srgbLuminance(in: $0) } ?? -1
+                let textLum = ea.flatMap { theme.text.srgbLuminance(in: $0) } ?? -1
+                let name = kind == .beacon ? "beacon" : "native"
+                log("\(name)-window-pinned=\(matched) \(name)-bg-lum=\(String(format: "%.3f", bgLum)) \(name)-text-lum=\(String(format: "%.3f", textLum))")
+                if kind == .beacon {
+                    log("beacon-bg-dark=\(bgLum >= 0 && bgLum < 0.15) beacon-text-light=\(textLum > 0.6)")
+                } else {
+                    log("native-bg-light=\(bgLum > 0.7) native-text-dark=\(textLum >= 0 && textLum < 0.3)")
+                }
+            }
+            themeController.set(.beacon)
+            log("done")
+        }
+    }
+
+    /// Every SwiftUI Color token in a theme resolves to a real sRGB triple.
+    private static func allTokensResolve(_ t: Theme) -> Bool {
+        let tokens: [Color] = [
+            t.bg, t.chrome, t.panel, t.panel2, t.panel3, t.elev,
+            t.border, t.border2, t.borderSoft,
+            t.text, t.dim, t.faint, t.faint2, t.termbg,
+            t.primary, t.primaryText, t.sb,
+            t.working, t.needs, t.idle, t.stale,
+            t.addedTextChrome, t.addedTextTerminal, t.removedTextChrome, t.removedTextTerminal,
+            t.modelDot, t.contextMeterStart, t.contextMeterEnd, t.diffVsBase,
+            t.badgeAdded, t.badgeModified, t.badgeDeleted,
+        ]
+        return tokens.allSatisfy { $0.srgbHex != nil }
     }
 
     /// Whether the first-run setup sheet is showing.

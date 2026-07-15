@@ -19,18 +19,37 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
     /// The "notifications are off" inbox hint has been dismissed (schema v3) —
     /// shown once, never nagging.
     public var notificationsHintDismissed: Bool
+    /// Persisted UI theme (schema v4). Raw string ("beacon" / "native") so this
+    /// value layer stays free of SwiftUI; the app maps it to its Theme enum and
+    /// treats an unknown value as the default. Only this field is wired to the
+    /// UI in Phase 1.
+    public var theme: String
+    /// Preferred landing view (schema v4): "harbor" / "focus". STORED-BUT-UNUSED
+    /// in Phase 1 — persisted now so the two-mode shell (Phase 2) needs no
+    /// second migration.
+    public var startView: String
+    /// Ambient Harbor beam on/off (schema v4). STORED-BUT-UNUSED in Phase 1 —
+    /// consumed by the motion pass (Phase 5); persisted now to avoid a second
+    /// migration.
+    public var showBeam: Bool
 
     public init(
         repos: [RepoConfig] = [], tasks: [TaskRecord] = [],
         worktreesRootOverride: String? = nil,
         hasCompletedSetup: Bool = false,
-        notificationsHintDismissed: Bool = false
+        notificationsHintDismissed: Bool = false,
+        theme: String = "beacon",
+        startView: String = "harbor",
+        showBeam: Bool = true
     ) {
         self.repos = repos
         self.tasks = tasks
         self.worktreesRootOverride = worktreesRootOverride
         self.hasCompletedSetup = hasCompletedSetup
         self.notificationsHintDismissed = notificationsHintDismissed
+        self.theme = theme
+        self.startView = startView
+        self.showBeam = showBeam
     }
 
     public static let empty = LighthouseConfig()
@@ -49,7 +68,7 @@ public enum ConfigStoreError: Error, Sendable, Equatable {
 /// same directory, then rename over the target). The directory is injected;
 /// production uses `ConfigStore.defaultDirectory()`, tests use temp dirs.
 public struct ConfigStore: Sendable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
     public static let fileName = "config.json"
 
     public let directory: URL
@@ -117,11 +136,29 @@ public struct ConfigStore: Sendable {
             } catch {
                 throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
             }
+            // v3 → v4: no theme/startView/showBeam recorded yet — the init
+            // defaults them (beacon / harbor / true). Everything else passes
+            // through untouched.
             return LighthouseConfig(
                 repos: stored.repos, tasks: stored.tasks,
                 worktreesRootOverride: stored.worktreesRootOverride,
                 hasCompletedSetup: stored.hasCompletedSetup,
                 notificationsHintDismissed: stored.notificationsHintDismissed)
+        case 4:
+            let stored: StoredConfigV4
+            do {
+                stored = try decoder.decode(StoredConfigV4.self, from: data)
+            } catch {
+                throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
+            }
+            return LighthouseConfig(
+                repos: stored.repos, tasks: stored.tasks,
+                worktreesRootOverride: stored.worktreesRootOverride,
+                hasCompletedSetup: stored.hasCompletedSetup,
+                notificationsHintDismissed: stored.notificationsHintDismissed,
+                theme: stored.theme,
+                startView: stored.startView,
+                showBeam: stored.showBeam)
         default:
             throw ConfigStoreError.unsupportedSchemaVersion(
                 found: probe.schemaVersion, newest: Self.currentSchemaVersion)
@@ -129,13 +166,16 @@ public struct ConfigStore: Sendable {
     }
 
     public func save(_ config: LighthouseConfig) throws {
-        let stored = StoredConfigV3(
+        let stored = StoredConfigV4(
             schemaVersion: Self.currentSchemaVersion,
             repos: config.repos,
             tasks: config.tasks,
             worktreesRootOverride: config.worktreesRootOverride,
             hasCompletedSetup: config.hasCompletedSetup,
-            notificationsHintDismissed: config.notificationsHintDismissed)
+            notificationsHintDismissed: config.notificationsHintDismissed,
+            theme: config.theme,
+            startView: config.startView,
+            showBeam: config.showBeam)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data: Data
@@ -193,6 +233,21 @@ public struct ConfigStore: Sendable {
         var worktreesRootOverride: String?
         var hasCompletedSetup: Bool
         var notificationsHintDismissed: Bool
+    }
+
+    /// v4 (2026-07-15): adds the persisted UI theme plus start-view and
+    /// ambient-beam preferences (the latter two stored-but-unused until later
+    /// redesign phases — persisted now so there is no second migration).
+    private struct StoredConfigV4: Codable {
+        var schemaVersion: Int
+        var repos: [RepoConfig]
+        var tasks: [TaskRecord]
+        var worktreesRootOverride: String?
+        var hasCompletedSetup: Bool
+        var notificationsHintDismissed: Bool
+        var theme: String
+        var startView: String
+        var showBeam: Bool
     }
 
     /// v1 → current: same repos/tasks; no override configured; setup treated

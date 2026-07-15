@@ -42,7 +42,7 @@ final class ConfigStoreTests {
         #expect {
             _ = try self.store.load()
         } throws: { error in
-            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 3)
+            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 4)
         }
         // Never silently rewritten: byte-identical after the failed load.
         #expect(try Data(contentsOf: store.fileURL) == futureFile)
@@ -194,6 +194,49 @@ final class ConfigStoreTests {
     @Test func schemaVersionIsWrittenFromDayOne() throws {
         try store.save(.empty)
         let text = String(decoding: try Data(contentsOf: store.fileURL), as: UTF8.self)
-        #expect(text.contains(#""schemaVersion" : 3"#))
+        #expect(text.contains(#""schemaVersion" : 4"#))
+    }
+
+    // MARK: v3 → v4 (theme + start-view + beam preferences)
+
+    /// A real v3 file (written before the theme existed) must load and migrate:
+    /// existing fields preserved, the new preferences defaulted (beacon / harbor
+    /// / true) rather than crashing or blanking.
+    @Test func v3FileMigratesToV4WithDefaultPreferences() throws {
+        let repoId = UUID()
+        let v3 = """
+        {"schemaVersion": 3, "worktreesRootOverride": "/custom",
+         "hasCompletedSetup": true, "notificationsHintDismissed": true,
+         "repos": [{"id": "\(repoId.uuidString)", "path": "/tmp/r", "baseBranch": "main"}],
+         "tasks": []}
+        """
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(v3.utf8).write(to: store.fileURL)
+
+        let migrated = try store.load()
+        // Existing fields survive.
+        #expect(migrated.worktreesRootOverride == "/custom")
+        #expect(migrated.hasCompletedSetup)
+        #expect(migrated.notificationsHintDismissed)
+        #expect(migrated.repos.count == 1)
+        // New preferences default.
+        #expect(migrated.theme == "beacon")
+        #expect(migrated.startView == "harbor")
+        #expect(migrated.showBeam == true)
+    }
+
+    /// A v4 file round-trips every new preference (non-default values, so the
+    /// test fails if any field is dropped or defaulted on the way through).
+    @Test func v4PreferencesRoundTrip() throws {
+        var config = sampleConfig()
+        config.theme = "native"
+        config.startView = "focus"
+        config.showBeam = false
+        try store.save(config)
+        let loaded = try store.load()
+        #expect(loaded.theme == "native")
+        #expect(loaded.startView == "focus")
+        #expect(loaded.showBeam == false)
+        #expect(loaded == config)
     }
 }

@@ -600,3 +600,102 @@ if problems:
 print("NOTIFY GATE: PASS (banner display depends on user authorization — not asserted)")
 PY
 rm -rf "$notify_cfg" "$(dirname "$notify_out")"
+
+# --- Theme gate: the runtime theme foundation in the real app --------------
+# The Theme tokens are pure and unit-tested, but the LIVE flip + the custom
+# titlebar are SwiftUI/AppKit surfaces unit tests cannot reach.
+# LIGHTHOUSE_DEBUG_THEME=1 resolves BOTH palettes in the running app, proves
+# they differ, proves `termbg` stays near-black across the flip (the
+# viewer/terminal stay-dark rule), and confirms the custom titlebar came up
+# with its trailing accessory, the theme switcher, and the centered wordmark.
+# Launched directly (a window is created — the titlebar needs one), like the
+# GEOMETRY gate.
+theme_log="$(mktemp)"
+theme_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_THEME=1 LIGHTHOUSE_CONFIG_DIR="$theme_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$theme_log" 2>&1 &
+theme_pid=$!
+trap 'kill -9 "$theme_pid" 2>/dev/null || true; rm -rf "$theme_cfg"' EXIT
+
+theme_tries=0
+until grep -q "THEME-STAGE done" "$theme_log"; do
+    theme_tries=$((theme_tries + 1))
+    if [ "$theme_tries" -gt 150 ]; then
+        echo "THEME GATE: FAIL (no done stage within 30s)" >&2
+        grep "THEME-STAGE" "$theme_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$theme_pid" 2>/dev/null; then
+        echo "THEME GATE: FAIL (app exited during theme check)" >&2
+        grep "THEME-STAGE" "$theme_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$theme_pid" 2>/dev/null || true
+theme_tries=0
+while kill -0 "$theme_pid" 2>/dev/null; do
+    theme_tries=$((theme_tries + 1))
+    [ "$theme_tries" -gt 15 ] && kill -9 "$theme_pid" 2>/dev/null || true
+    [ "$theme_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$theme_cfg"
+
+python3 - "$theme_log" <<'PY'
+import sys
+stages = {}
+for l in open(sys.argv[1]):
+    if not l.startswith("THEME-STAGE "):
+        continue
+    body = l.removeprefix("THEME-STAGE ").strip()
+    for tok in body.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            stages[k] = v
+    if body == "done":
+        stages["done"] = "true"
+print(f"THEME stages: {stages}")
+
+problems = []
+def want(key, val):
+    if stages.get(key) != val:
+        problems.append(f"{key}={stages.get(key)} (expected {val})")
+
+want("beacon-all-resolve", "true")
+want("native-all-resolve", "true")
+# Beacon's exact documented hex, resolved live in the app.
+want("beacon-bg", "0a0d14")
+want("beacon-primary", "f0b45e")
+want("beacon-termbg", "080b11")
+# Native termbg is the fixed dark value (not themed to light).
+want("native-termbg", "1e1e22")
+# Both palettes differ + termbg dark in both + dark after the live flip.
+want("differ", "true")
+want("termbg-dark-beacon", "true")
+want("termbg-dark-native", "true")
+want("termbg-still-dark", "true")
+# The custom titlebar came up with its accessory + switcher + wordmark.
+want("titlebar-accessory", "true")
+want("switcher", "true")
+want("wordmark", "true")
+# COHERENCE (the 2026-07-15 half-light bug): each theme pins the live window
+# appearance, and tokens resolved WITHIN that window appearance are coherent —
+# Native is light (bg light, text dark), Beacon is dark (bg dark, text light) —
+# independent of the process/system Light/Dark setting. Without the window
+# appearance pin these FAIL (Native bg resolves dark under a dark process).
+want("native-window-pinned", "true")
+want("beacon-window-pinned", "true")
+want("native-bg-light", "true")
+want("native-text-dark", "true")
+want("beacon-bg-dark", "true")
+want("beacon-text-light", "true")
+if "done" not in stages:
+    problems.append("no done stage")
+if problems:
+    print("THEME GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("THEME GATE: PASS")
+PY
+rm -f "$theme_log"

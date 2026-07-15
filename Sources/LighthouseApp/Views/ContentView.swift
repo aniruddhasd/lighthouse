@@ -11,6 +11,9 @@ struct ContentView: View {
 
     var body: some View {
         @Bindable var runtime = runtime
+        // Reading `.resolved` here registers observation on the ThemeController,
+        // so a flip re-runs this body and re-injects the new tokens app-wide.
+        let theme = runtime.themeController.resolved
         NavigationSplitView {
             SidebarView(
                 showCreateTask: $showCreateTask,
@@ -26,8 +29,24 @@ struct ContentView: View {
                     "No task selected",
                     systemImage: "rectangle.on.rectangle",
                     description: Text("Create a task or pick one from the sidebar (⌘K)."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.bg)
             }
         }
+        // The custom titlebar installs itself on the host window from here; a
+        // zero-size background view, so no layout is affected.
+        .background(TitlebarConfigurator(controller: runtime.themeController, theme: theme))
+        .environment(\.theme, theme)
+        // THE COHERENCE FIX (2026-07-15): pin the window's appearance to the
+        // theme's — Beacon dark, Native light — so Native's NSColor SEMANTIC
+        // tokens (bg/panel/text/…) resolve LIGHT even under a Dark system,
+        // matching its literal-light-hex tokens instead of splitting half-light.
+        // This must go through SwiftUI (`.preferredColorScheme`), not a manual
+        // `window.appearance` set, which SwiftUI clobbers on its next pass. It
+        // cascades to the SwiftUI `Color(nsColor:)` tokens, the native controls
+        // (segmented switcher, List selection), and the titlebar accessories.
+        // Terminal/viewer keep their own dark colors (unaffected).
+        .preferredColorScheme(theme.colorScheme)
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $showRegisterRepo) { RegisterRepoSheet() }
         .sheet(item: $taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
@@ -71,6 +90,7 @@ struct ContentView: View {
 struct TaskDetailView: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.theme) private var theme
     let task: TaskRecord
     @State private var workbench: WorkbenchModel?
 
@@ -95,6 +115,10 @@ struct TaskDetailView: View {
         // scar); the representable's sizeThatFits then carries the full area
         // down to the terminal.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Chrome behind the detail area flips with the theme; the terminal and
+        // the WKWebView viewer paint their own dark surfaces over this and are
+        // deliberately NOT themed (handoff: they stay dark in both themes).
+        .background(theme.bg)
         .debugSize("detail")
         .navigationTitle(task.name)
         .navigationSubtitle(task.branch)
