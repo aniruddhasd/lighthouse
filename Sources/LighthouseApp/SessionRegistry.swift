@@ -127,6 +127,10 @@ final class TerminalController: NSObject {
         self.terminalView = LighthouseTerminalView(
             frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         super.init()
+        // JetBrains Mono (bundled) instead of SwiftTerm's default SF Mono;
+        // SwiftTerm derives bold/italic from this base. Set before the view is
+        // shown so the cell metrics are right from the first layout.
+        terminalView.font = TerminalFont.base
         terminalView.processDelegate = self
     }
 

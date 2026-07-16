@@ -14,10 +14,12 @@ cd "$package_root"
 build_stamp="$(git -C "$package_root" rev-parse --short HEAD)$(git -C "$package_root" diff --quiet HEAD 2>/dev/null || printf '%s' '-dirty')"
 
 # Supply-chain gates BEFORE anything is built or copied:
-#  - vendored diff2html assets match their canonical checksums;
+#  - vendored diff2html assets + bundled fonts match their canonical checksums;
 #  - Package.resolved revisions match the canonical pinned-revisions lock.
 "$package_root/Scripts/verify-vendored-assets.sh" \
     "$package_root/Sources/LighthouseApp/Resources/diff2html"
+"$package_root/Scripts/verify-vendored-assets.sh" \
+    "$package_root/Sources/LighthouseApp/Resources/fonts"
 "$package_root/Scripts/verify-pins.sh" \
     "$package_root/Package.resolved" "$package_root/Scripts/pinned-revisions.txt"
 

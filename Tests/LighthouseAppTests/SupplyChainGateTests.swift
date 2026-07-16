@@ -30,6 +30,12 @@ struct SupplyChainGateTests {
         #expect(result.code == 0, "\(result.output)")
     }
 
+    @Test func vendoredFontsPassAgainstCanonicalSums() {
+        let result = run("verify-vendored-assets.sh",
+                         ["\(root)/Sources/LighthouseApp/Resources/fonts"])
+        #expect(result.code == 0, "\(result.output)")
+    }
+
     @Test func tamperedAssetFailsLoudly() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("supply-\(UUID().uuidString.prefix(8))", isDirectory: true)
