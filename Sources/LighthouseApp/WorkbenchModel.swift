@@ -13,13 +13,29 @@ import LighthouseTaskEngine
 /// file page simply does not reference).
 @MainActor @Observable
 final class ContentViewerModel {
-    let webView: WKWebView
+    /// The live viewer WKWebView — nil ONLY under the unit-test harness. See
+    /// `skipWebViewUnderTest`: `swift test` has no NSApplication run loop, so
+    /// WebKit's web-content XPC handshake intermittently wedges when many
+    /// WKWebViews are created in parallel, deadlocking the whole suite at 0% CPU.
+    /// Unit tests assert this model's OBSERVABLE state (hasContent / renderError
+    /// / body mode), never real rendering; the DIFFRENDER / FILERENDER runtime
+    /// gates exercise the REAL WKWebView in the actual app. So under XCTest we
+    /// skip WebKit entirely — the app never hits this path (the env var below is
+    /// set only by the test runner, and is absent in the shipped binary and the
+    /// gate launches).
+    let webView: WKWebView?
     private let renderDirectory: URL?
     private let navigationGate: LocalOnlyNavigationDelegate
     private(set) var renderError: String?
     /// True once any page has been loaded — the empty-viewer placeholder hides
     /// after the first selection.
     private(set) var hasContent = false
+
+    /// Set by XCTest/swift-testing runners, never by the app or the runtime
+    /// gates (which launch the real binary). The single seam that keeps live
+    /// WebKit out of the headless unit-test process.
+    static let skipWebViewUnderTest =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     init() {
         var directory: URL?
@@ -31,20 +47,29 @@ final class ContentViewerModel {
         self.renderDirectory = directory
         let root = directory ?? FileManager.default.temporaryDirectory
         self.navigationGate = LocalOnlyNavigationDelegate(allowedRoot: root)
-        self.webView = DiffWebViewFactory.makeWebView(
-            renderDirectory: root, navigationGate: navigationGate)
+        self.webView = Self.skipWebViewUnderTest
+            ? nil
+            : DiffWebViewFactory.makeWebView(renderDirectory: root, navigationGate: navigationGate)
     }
 
     /// Loads a viewer request; for a diff with a scroll target, scrolls to it
     /// once the page's bridge is installed.
     func apply(_ request: ViewerRequest) {
         guard let renderDirectory else { return }
+        // No WKWebView under the test harness: still record the observable state
+        // the tests assert (a page's content is present, prior error cleared) —
+        // the successful-load outcome, without touching WebKit.
+        guard let webView else {
+            hasContent = true
+            renderError = nil
+            return
+        }
         do {
             try DiffWebViewFactory.load(
                 page: request.html, into: webView, renderDirectory: renderDirectory)
             hasContent = true
             renderError = nil
-            if let file = request.scrollToFile { scrollTo(file: file) }
+            if let file = request.scrollToFile { scrollTo(file: file, in: webView) }
         } catch {
             renderError = String(describing: error)
         }
@@ -53,11 +78,11 @@ final class ContentViewerModel {
     /// The diff page installs `window.lighthouseScrollToFile` after diff2html
     /// runs; the file load is async, so poll briefly for the bridge before
     /// calling it (a bare one-shot eval raced the load and silently no-opped).
-    private func scrollTo(file path: String) {
+    private func scrollTo(file path: String, in webView: WKWebView) {
         let encoded = Data(path.utf8).base64EncodedString()
         Task { @MainActor in
             for _ in 0..<40 {
-                if await bridgeReady() {
+                if await Self.bridgeReady(in: webView) {
                     // Callback overload (nil handler) — in this async context the
                     // bare form resolves to the `async throws` overload.
                     webView.evaluateJavaScript(
@@ -69,7 +94,7 @@ final class ContentViewerModel {
         }
     }
 
-    private func bridgeReady() async -> Bool {
+    private static func bridgeReady(in webView: WKWebView) async -> Bool {
         await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(
                 "typeof window.lighthouseScrollToFile === 'function'"

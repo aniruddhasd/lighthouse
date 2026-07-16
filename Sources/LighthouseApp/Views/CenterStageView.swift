@@ -114,8 +114,13 @@ struct FocusBodyView: View {
         VStack(spacing: 0) {
             viewerHeader
             ZStack {
-                DiffWebViewHost(webView: workbench.viewer.webView)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The viewer WKWebView is always present in the real app; it is
+                // nil only under the unit-test harness (ContentViewerModel skips
+                // WebKit there), which never renders this view.
+                if let webView = workbench.viewer.webView {
+                    DiffWebViewHost(webView: webView)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
                 if !workbench.viewer.hasContent {
                     ContentUnavailableView(
                         "Nothing selected",
