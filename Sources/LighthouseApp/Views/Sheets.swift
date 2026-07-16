@@ -70,52 +70,64 @@ struct CreateTaskSheet: View {
     }
 }
 
-/// Guardrail 1 UI: destroying unmerged work lists the exact (repo, branch)
-/// pairs and requires typing the task name — the typed confirmation VALUE
-/// (UnmergedDestructionConfirmation) is only constructed after that.
+/// Guardrail 1 UI: destroying work-losing hazards (unmerged commits AND/OR
+/// dirty worktrees) lists each hazard distinctly and requires typing the task
+/// name — the typed confirmation VALUE (RemovalConfirmation) is only
+/// constructed after that.
 struct RemoveTaskSheet: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.dismiss) private var dismiss
     let task: TaskRecord
 
-    @State private var unmerged: [UnmergedWorkItem]?
+    @State private var hazards: [RemovalHazard]?
     @State private var typedName = ""
     @State private var working = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Remove \(task.name)").font(.headline)
-            if let unmerged {
-                if unmerged.isEmpty {
-                    Text("All workspaces are merged into their base branches. Worktrees and branches will be removed.")
-                    removalButtons(mode: .refuseIfUnmerged, label: "Remove Task")
+            if let hazards {
+                if hazards.isEmpty {
+                    Text("All workspaces are merged into their base branches with no uncommitted changes. Worktrees and branches will be removed.")
+                    removalButtons(mode: .refuseIfHazards, label: "Remove Task")
                 } else {
-                    Label("This will DESTROY unmerged work:", systemImage: "exclamationmark.triangle.fill")
+                    Label("This will PERMANENTLY DESTROY work:", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
-                    ForEach(unmerged, id: \.self) { item in
-                        Text("• \(item.repoPath) — branch '\(item.branch)'")
+                    ForEach(hazards, id: \.self) { hazard in
+                        // Untrusted content: repo path / branch render as Text.
+                        Text("• \(hazardDescription(hazard))")
                             .font(.system(.caption, design: .monospaced))
                     }
                     TextField("Type the task name to confirm", text: $typedName)
                     removalButtons(
-                        mode: .destroyUnmergedWork(
-                            UnmergedDestructionConfirmation(destroying: unmerged)),
-                        label: "Destroy Unmerged Work",
+                        mode: .destroy(RemovalConfirmation(destroying: hazards)),
+                        label: "Remove and Discard Local Work",
                         enabled: typedName == task.name)
                 }
             } else {
-                ProgressView("Checking for unmerged work…")
+                ProgressView("Checking for unmerged or uncommitted work…")
             }
         }
         .padding(20)
         .frame(width: 460)
         .task {
             do {
-                unmerged = try await runtime.model.unmergedWork(for: task)
+                hazards = try await runtime.model.removalHazards(for: task)
             } catch {
                 runtime.lastError = String(describing: error)
                 dismiss()
             }
+        }
+    }
+
+    /// Each hazard named specifically and distinctly so the user knows exactly
+    /// what is being discarded.
+    private func hazardDescription(_ hazard: RemovalHazard) -> String {
+        switch hazard {
+        case .unmergedCommits(_, let repoPath, let branch):
+            return "\(repoPath): branch '\(branch)' is not merged into its base branch"
+        case .dirtyWorktree(_, let repoPath, let branch):
+            return "\(repoPath): worktree for '\(branch)' has uncommitted local changes that will be permanently lost"
         }
     }
 

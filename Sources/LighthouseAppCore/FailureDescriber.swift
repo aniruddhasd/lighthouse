@@ -68,9 +68,16 @@ public enum FailureDescriber {
         case .setupScriptFailed(let repoPath, let script, let exitCode, let stderr):
             let detail = stderr.isEmpty ? "" : "\n\(stderr)"
             return "Setup script \(script) in \(repoPath) exited \(exitCode).\(detail)"
-        case .unmergedWorkPresent(let items):
-            return "Unmerged work in: "
-                + items.map { "\($0.repoPath) (branch '\($0.branch)')" }.joined(separator: ", ")
+        case .removalHazardsPresent(let hazards):
+            return "Work would be lost in: "
+                + hazards.map { hazard in
+                    switch hazard {
+                    case .unmergedCommits:
+                        return "\(hazard.repoPath) (branch '\(hazard.branch)' not merged)"
+                    case .dirtyWorktree:
+                        return "\(hazard.repoPath) (uncommitted changes)"
+                    }
+                }.joined(separator: ", ")
         case .staleConfirmation:
             return "The confirmation no longer matches the repos' current state — review again."
         case .git(let gitError):

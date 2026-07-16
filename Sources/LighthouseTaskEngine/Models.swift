@@ -89,16 +89,31 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// One (repo, branch) pair whose branch tip is not reachable from the repo's
-/// base branch — work that would be destroyed by removing the task.
-public struct UnmergedWorkItem: Sendable, Equatable, Hashable {
-    public let repoId: UUID
-    public let repoPath: String
-    public let branch: String
+/// A work-losing condition on one workspace — either kind is destroyed by
+/// removing the task and so demands the same explicit, typed confirmation.
+/// Both hazards can hold for the same (repo, branch): a branch with unmerged
+/// commits AND uncommitted changes lists two hazards, and the repo is forced.
+public enum RemovalHazard: Sendable, Equatable, Hashable {
+    /// The branch tip is not reachable from the repo's base branch:
+    /// committed work would be lost.
+    case unmergedCommits(repoId: UUID, repoPath: String, branch: String)
+    /// The worktree directory has uncommitted/untracked changes that
+    /// `git worktree remove` refuses and only `--force` would discard.
+    case dirtyWorktree(repoId: UUID, repoPath: String, branch: String)
 
-    public init(repoId: UUID, repoPath: String, branch: String) {
-        self.repoId = repoId
-        self.repoPath = repoPath
-        self.branch = branch
+    public var repoId: UUID {
+        switch self {
+        case .unmergedCommits(let id, _, _), .dirtyWorktree(let id, _, _): return id
+        }
+    }
+    public var repoPath: String {
+        switch self {
+        case .unmergedCommits(_, let path, _), .dirtyWorktree(_, let path, _): return path
+        }
+    }
+    public var branch: String {
+        switch self {
+        case .unmergedCommits(_, _, let branch), .dirtyWorktree(_, _, let branch): return branch
+        }
     }
 }

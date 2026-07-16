@@ -24,10 +24,11 @@ public enum TaskEngineError: Error, Sendable {
     case envCopySourceMissing(repoPath: String, entry: String)
     case setupScriptNotFound(repoPath: String, script: String)
     case setupScriptFailed(repoPath: String, script: String, exitCode: Int32, stderr: String)
-    /// Removal refused: these branches hold work not reachable from base.
-    case unmergedWorkPresent(items: [UnmergedWorkItem])
+    /// Removal refused: these workspaces hold work-losing hazards (unmerged
+    /// commits and/or dirty worktrees) with no matching confirmation.
+    case removalHazardsPresent(hazards: [RemovalHazard])
     /// The confirmation's list no longer matches reality — re-confirm.
-    case staleConfirmation(confirmed: [UnmergedWorkItem], actual: [UnmergedWorkItem])
+    case staleConfirmation(confirmed: [RemovalHazard], actual: [RemovalHazard])
     case git(GitClientError)
 }
 

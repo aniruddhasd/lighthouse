@@ -204,7 +204,7 @@ final class AppModelTests {
         let (task, _) = try await model.createTask(
             name: "short-lived", branch: "task/short-lived", repoIds: [registered.id])
 
-        try await model.removeTask(task, mode: .refuseIfUnmerged)
+        try await model.removeTask(task, mode: .refuseIfHazards)
         #expect(model.tasks.isEmpty)
         #expect(model.attention[task.id] == nil)
         let reloaded = try ConfigStore(directory: storeDirectory).load()

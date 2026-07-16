@@ -322,8 +322,8 @@ public final class AppModel {
             displayName: task.name)
     }
 
-    public func unmergedWork(for task: TaskRecord) async throws -> [UnmergedWorkItem] {
-        try await engine.unmergedWork(in: task, repos: repos)
+    public func removalHazards(for task: TaskRecord) async throws -> [RemovalHazard] {
+        try await engine.removalHazards(in: task, repos: repos)
     }
 
     @discardableResult

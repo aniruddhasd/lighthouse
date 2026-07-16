@@ -181,7 +181,7 @@ final class WorktreeLocationTests {
             repos: [repoConfig])
 
         _ = try await engine.removeTask(
-            task, repos: [repoConfig], mode: .refuseIfUnmerged)
+            task, repos: [repoConfig], mode: .refuseIfHazards)
 
         let grouping = repo.path.deletingLastPathComponent()
             .appendingPathComponent(TaskEngine.worktreesDirectoryName)
@@ -199,7 +199,7 @@ final class WorktreeLocationTests {
             repos: [repoConfig])
 
         _ = try await engine.removeTask(
-            doomed, repos: [repoConfig], mode: .refuseIfUnmerged)
+            doomed, repos: [repoConfig], mode: .refuseIfHazards)
 
         // The shared grouping dir stays (non-empty); only doomed's task dir
         // is gone; keeper's worktree is untouched.
@@ -210,7 +210,7 @@ final class WorktreeLocationTests {
             atPath: grouping.appendingPathComponent("doomed").path))
         #expect(FileManager.default.fileExists(
             atPath: URL(fileURLWithPath: keep.workspaces[0].worktreePath).path))
-        _ = try await engine.removeTask(keep, repos: [repoConfig], mode: .refuseIfUnmerged)
+        _ = try await engine.removeTask(keep, repos: [repoConfig], mode: .refuseIfHazards)
         #expect(!FileManager.default.fileExists(atPath: grouping.path))
     }
 
@@ -222,7 +222,7 @@ final class WorktreeLocationTests {
             name: "solo", branch: "task/solo", adapterKind: "claude-code",
             repos: [repoConfig], worktreesRootOverride: override)
 
-        _ = try await engine.removeTask(task, repos: [repoConfig], mode: .refuseIfUnmerged)
+        _ = try await engine.removeTask(task, repos: [repoConfig], mode: .refuseIfHazards)
 
         // The task dir inside the override is cleaned, but the user-chosen
         // root directory itself is never deleted, even when empty.

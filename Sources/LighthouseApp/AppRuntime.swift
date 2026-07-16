@@ -1161,6 +1161,12 @@ final class AppRuntime {
 
     func removeTask(_ task: TaskRecord, mode: TaskRemovalMode) async -> Bool {
         do {
+            // Engine removal FIRST: it can refuse (a dirty/unmerged worktree
+            // with no matching confirmation) and throw. Only once the engine
+            // has committed to removal do we tear down the local session/tabs/
+            // digests — a failed removal must leave the task fully intact
+            // (session alive, still listed) so the user can retry or cancel.
+            _ = try await model.removeTask(task, mode: mode)
             if let ref = task.sessionRef {
                 await listener.unregister(sessionRef: ref)
             }
@@ -1168,7 +1174,6 @@ final class AppRuntime {
             tabs[task.id] = nil
             focusedTab[task.id] = nil
             digests.remove(taskId: task.id)
-            _ = try await model.removeTask(task, mode: mode)
             if selectedTaskId == task.id { selectedTaskId = nil }
             updateDockBadge() // a needs-input task may have gone away
             return true

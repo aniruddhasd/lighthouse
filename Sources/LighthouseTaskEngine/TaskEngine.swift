@@ -1,22 +1,24 @@
 import Foundation
 import LighthouseGit
 
-/// How `removeTask` treats unmerged work. Destroying it requires a typed
-/// confirmation carrying the exact (repo, branch) pairs being destroyed —
-/// the call cannot be constructed without that list (guardrail 1, spec §7:
-/// enforced at the API level, not hidden in UI).
+/// How `removeTask` treats work-losing hazards (unmerged commits AND/OR
+/// dirty worktrees). Destroying them requires a typed confirmation carrying
+/// the exact hazard set — the call cannot be constructed without that list
+/// (guardrail 1, spec §7: enforced at the API level, not hidden in UI).
 public enum TaskRemovalMode: Sendable, Equatable {
-    case refuseIfUnmerged
-    case destroyUnmergedWork(UnmergedDestructionConfirmation)
+    case refuseIfHazards
+    case destroy(RemovalConfirmation)
 }
 
 /// The caller's record of an explicit user confirmation. `destroying` must
-/// equal the engine's own freshly computed unmerged set at removal time;
-/// any mismatch (stale confirmation) aborts before anything is touched.
-public struct UnmergedDestructionConfirmation: Sendable, Equatable {
-    public let destroying: [UnmergedWorkItem]
+/// equal the engine's own freshly computed hazard set at removal time — for
+/// BOTH hazard kinds; any mismatch (a worktree that became dirty or got
+/// cleaned, or new commits, between showing and confirming) aborts before
+/// anything is touched.
+public struct RemovalConfirmation: Sendable, Equatable {
+    public let destroying: [RemovalHazard]
 
-    public init(destroying: [UnmergedWorkItem]) {
+    public init(destroying: [RemovalHazard]) {
         self.destroying = destroying
     }
 }
@@ -338,62 +340,86 @@ public actor TaskEngine {
             : .incomplete(removed: removed, debris: debris)
     }
 
-    // MARK: - Unmerged-work detection (guardrail 1)
+    // MARK: - Removal-hazard detection (guardrail 1)
 
-    /// (repo, branch) pairs whose branch tip is NOT reachable from the repo's
-    /// base branch — verified live via `git merge-base --is-ancestor`.
-    public func unmergedWork(
+    /// Every work-losing condition removal would hit, across all workspaces:
+    ///   • `.unmergedCommits` — branch tip NOT reachable from base (live
+    ///     `git merge-base --is-ancestor`); skipped when the branch is already
+    ///     gone (external cleanup — nothing left to destroy).
+    ///   • `.dirtyWorktree` — the worktree directory has modified/untracked
+    ///     files (live `git status`, run IN THE WORKTREE); skipped when the
+    ///     directory is already gone (nothing to lose). Ignored files never
+    ///     count — `RepoStatus.isClean` excludes them, matching what
+    ///     `git worktree remove` refuses.
+    /// Fail-secure: if the dirty check itself errors, the worktree is reported
+    /// as a hazard, never assumed clean — we never remove on an unknown state.
+    /// A single workspace can contribute BOTH hazards.
+    public func removalHazards(
         in task: TaskRecord, repos: [RepoConfig]
-    ) async throws -> [UnmergedWorkItem] {
-        var items: [UnmergedWorkItem] = []
+    ) async throws -> [RemovalHazard] {
+        var hazards: [RemovalHazard] = []
         for workspace in task.workspaces {
             guard let repo = repos.first(where: { $0.id == workspace.repoId }) else {
                 throw TaskEngineError.unknownRepo(repoId: workspace.repoId)
             }
             let repoURL = repo.pathURL
-            // Branch already gone (external cleanup): nothing left to destroy.
-            guard try await liftGit({ try await self.git.branchExists(task.branch, in: repoURL) }) else {
-                continue
+
+            // Hazard 1: unmerged commits (only meaningful if the branch exists).
+            if try await liftGit({ try await self.git.branchExists(task.branch, in: repoURL) }) {
+                let merged = try await liftGit {
+                    try await self.git.isAncestor(task.branch, of: repo.baseBranch, in: repoURL)
+                }
+                if !merged {
+                    hazards.append(.unmergedCommits(
+                        repoId: repo.id, repoPath: repo.path, branch: task.branch))
+                }
             }
-            let merged = try await liftGit {
-                try await self.git.isAncestor(task.branch, of: repo.baseBranch, in: repoURL)
-            }
-            if !merged {
-                items.append(UnmergedWorkItem(
-                    repoId: repo.id, repoPath: repo.path, branch: task.branch))
+
+            // Hazard 2: dirty worktree. A gone directory has nothing to lose.
+            if FileManager.default.fileExists(atPath: workspace.worktreePath) {
+                let dirty: Bool
+                do {
+                    dirty = try await !self.git.status(in: workspace.worktreeURL).isClean
+                } catch {
+                    dirty = true  // fail-secure: unknown state is treated as hazardous
+                }
+                if dirty {
+                    hazards.append(.dirtyWorktree(
+                        repoId: repo.id, repoPath: repo.path, branch: task.branch))
+                }
             }
         }
-        return items
+        return hazards
     }
 
     // MARK: - Removal (guardrail 1)
 
     /// Removes every workspace's worktree and branch. If ANY workspace holds
-    /// unmerged work, `.refuseIfUnmerged` throws with the exact list, and
-    /// `.destroyUnmergedWork` must carry that same list — freshly recomputed
-    /// here; a stale list aborts before anything is touched.
+    /// a removal hazard (unmerged commits and/or a dirty worktree),
+    /// `.refuseIfHazards` throws with the exact list, and `.destroy` must
+    /// carry that same list — freshly recomputed here (both hazard kinds); a
+    /// stale list aborts before anything is touched.
     public func removeTask(
         _ task: TaskRecord, repos: [RepoConfig], mode: TaskRemovalMode
     ) async throws -> TaskRemovalReport {
-        let actual = try await unmergedWork(in: task, repos: repos)
+        let actual = try await removalHazards(in: task, repos: repos)
         switch mode {
-        case .refuseIfUnmerged:
+        case .refuseIfHazards:
             guard actual.isEmpty else {
-                throw TaskEngineError.unmergedWorkPresent(items: actual)
+                throw TaskEngineError.removalHazardsPresent(hazards: actual)
             }
-        case .destroyUnmergedWork(let confirmation):
+        case .destroy(let confirmation):
             guard Set(confirmation.destroying) == Set(actual) else {
                 throw TaskEngineError.staleConfirmation(
                     confirmed: confirmation.destroying, actual: actual)
             }
         }
 
-        // Force applies ONLY to workspaces the confirmation actually lists.
-        // A dirty worktree whose branch is merged was never in any list, so
-        // it still refuses loudly — guardrail 1's "with that confirmation"
-        // means confirmation for THAT repo, not any confirmation at all.
+        // Force applies to any repo the confirmation lists a hazard for
+        // (unmerged commits OR dirty worktree). A repo with NO hazard is
+        // removed WITHOUT force — a clean worktree is never `--force`d.
         let confirmedRepoIds: Set<UUID>
-        if case .destroyUnmergedWork(let confirmation) = mode {
+        if case .destroy(let confirmation) = mode {
             confirmedRepoIds = Set(confirmation.destroying.map(\.repoId))
         } else {
             confirmedRepoIds = []
@@ -410,7 +436,7 @@ public actor TaskEngine {
             do {
                 let removalMode: WorktreeRemovalMode = confirmedRepoIds.contains(repo.id)
                     ? .forceDiscardingChanges(
-                        justification: "user confirmed destruction of unmerged work")
+                        justification: "user confirmed destruction of unmerged or uncommitted work")
                     : .refuseIfDirty
                 try await liftGit {
                     try await self.git.removeWorktree(at: worktreeURL, in: repoURL, mode: removalMode)
