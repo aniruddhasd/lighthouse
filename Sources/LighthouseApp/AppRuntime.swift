@@ -38,6 +38,10 @@ final class AppRuntime {
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading
     /// a binding down; the old sidebar that owned this trigger was retired.
     var taskPendingRemoval: TaskRecord?
+    /// Drives the Register-Repo sheet. On the runtime (like `switcherPresented`)
+    /// so the File menu command AND the Harbor "Add repo" controls can all open
+    /// it — the sidebar that used to own this trigger was retired.
+    var registerRepoPresented = false
     /// Two-mode navigation (spec §3.4): Harbor overview ⇄ Focus. Seeded from
     /// the persisted `startView` in init; a persisted `.focus` with nothing
     /// selected falls back to Harbor. Mutating it re-renders the shell (normal

@@ -28,6 +28,9 @@ struct LighthouseMain: App {
             // Cmd+T / Cmd+W for terminal tabs. Ctrl+T is deliberately NOT
             // used — it is a control byte that TUIs (Claude Code) intercept.
             CommandGroup(after: .newItem) {
+                Button("Register Repo…") { runtime.registerRepoPresented = true }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
                 Button("New Terminal Tab") {
                     if let id = runtime.selectedTaskId,
                        let task = runtime.model.tasks.first(where: { $0.id == id }) {

@@ -10,7 +10,6 @@ struct ContentView: View {
     /// `motionEnabled` live.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showCreateTask = false
-    @State private var showRegisterRepo = false
 
     var body: some View {
         @Bindable var runtime = runtime
@@ -59,7 +58,7 @@ struct ContentView: View {
         // Terminal/viewer keep their own dark colors (unaffected).
         .preferredColorScheme(theme.colorScheme)
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
-        .sheet(isPresented: $showRegisterRepo) { RegisterRepoSheet() }
+        .sheet(isPresented: $runtime.registerRepoPresented) { RegisterRepoSheet() }
         .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
         .sheet(isPresented: Binding(
             get: { runtime.setupPresented },

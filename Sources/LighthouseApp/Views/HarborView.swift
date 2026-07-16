@@ -262,10 +262,26 @@ struct HarborView: View {
     private var reposSection: some View {
         if !runtime.model.repos.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                Text("REPOS")
-                    .font(LHFont.mono(13, .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(theme.dim)
+                HStack {
+                    Text("REPOS")
+                        .font(LHFont.mono(13, .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(theme.dim)
+                    Spacer()
+                    Button { runtime.registerRepoPresented = true } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus")
+                            Text("Add repo").font(LHFont.button)
+                        }
+                        .foregroundStyle(theme.dim)
+                        .padding(.horizontal, 10).frame(height: 28)
+                        .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.chip))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.chip)
+                            .strokeBorder(theme.border2, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Register another local repo")
+                }
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
                     spacing: 16
@@ -297,14 +313,18 @@ struct HarborView: View {
                  : "Create a task to put an agent to work.")
                 .font(LHFont.body)
                 .foregroundStyle(theme.dim)
-            Button { showCreateTask = true } label: {
-                Text("New task").font(LHFont.button).foregroundStyle(theme.primaryText)
+            // With no repos, the first step is registering one — offer THAT
+            // (enabled) rather than a dead disabled "New task" button.
+            let needsRepo = runtime.model.repos.isEmpty
+            Button {
+                if needsRepo { runtime.registerRepoPresented = true } else { showCreateTask = true }
+            } label: {
+                Text(needsRepo ? "Register a repo" : "New task")
+                    .font(LHFont.button).foregroundStyle(theme.primaryText)
                     .padding(.horizontal, 16).frame(minHeight: 38)
                     .background(theme.primary, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
             }
             .buttonStyle(.plain)
-            .disabled(runtime.model.repos.isEmpty)
-            .opacity(runtime.model.repos.isEmpty ? 0.5 : 1)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 80)
