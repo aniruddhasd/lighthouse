@@ -111,6 +111,21 @@ public actor GitClient {
         return try Self.parseNameStatus(result.stdout)
     }
 
+    /// Deterministic add/del/file counts for the live review surface:
+    /// `git diff --numstat --merge-base <base> --` — the working tree relative
+    /// to the merge base of `<base>` and HEAD (committed + staged + unstaged),
+    /// the same range as `liveDiff`. `--end-of-options` keeps a base ref
+    /// beginning with `-` out of git's option parser (verified git 2.50.1,
+    /// mirroring the neighbouring diff methods); parsing (binary `-`/`-`,
+    /// renames, zero-change) is handled by the pure `DiffStat.parse`. Untracked
+    /// files are NOT counted here (they never appear in a diff vs the merge
+    /// base) — the live review surface renders them separately.
+    public func diffStat(worktree: URL, base: String) async throws -> DiffStat {
+        let result = try await runExpectingSuccess(
+            ["diff", "--numstat", "--merge-base", "--end-of-options", base, "--"], in: worktree)
+        return DiffStat.parse(numstat: result.stdoutText)
+    }
+
     /// Renders an untracked file as an added-file patch:
     /// `git diff --no-index -- /dev/null <path>`. Like diff(1), --no-index
     /// exits 1 when differences exist — that is the expected outcome here,

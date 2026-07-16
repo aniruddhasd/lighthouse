@@ -13,6 +13,10 @@ import LighthouseTaskEngine
 @MainActor @Observable
 final class AppRuntime {
     let model: AppModel
+    /// Per-task derived metadata for the Harbor cards / Focus footer / Summary
+    /// (Phase 4). Re-derivable, not persisted; fed by the attention signal loop
+    /// (baked/action/model/ctx) and Focus entry / Stop (diffStat).
+    let digests = TaskDigestCache()
     let registry = SessionRegistry()
     /// Routes wheel events over terminals into mouse reports when the TUI
     /// owns the mouse (see LighthouseTerminalView).
@@ -102,6 +106,130 @@ final class AppRuntime {
         runThemeCheckIfRequested()
         runHarborCheckIfRequested()
         runFocusCheckIfRequested()
+        runDigestCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_DIGEST=1: proves the Phase-4 per-task digest in the REAL
+    /// app. The pure pieces (DiffStat.parse, TranscriptReader, TaskDigestCache,
+    /// baked timing) are unit-tested; this gate proves the wiring end-to-end —
+    /// the DETERMINISTIC diff counts are EXACT for a seeded task against a real
+    /// temp git fixture with a known add/del/files; the Summary renders and
+    /// DEGRADES GRACEFULLY with no transcript/recap (model/ctx stay blank, NOT
+    /// zeros); and a hostile `action` (script/markup) is stored VERBATIM and
+    /// rendered inert (SwiftUI `Text`, which never interprets markup).
+    ///
+    /// Builds the fixture synchronously, seeds an ephemeral repo+task over it,
+    /// then drives + asserts in a Task. Emits `DIGEST-STAGE …` facts; the
+    /// smoke-run block asserts on them (with fail-before evidence).
+    private func runDigestCheckIfRequested() {
+        guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_DIGEST"] == "1" else { return }
+        setupPresented = false
+
+        func log(_ m: String) {
+            FileHandle.standardOutput.write(Data("DIGEST-STAGE \(m)\n".utf8))
+        }
+
+        // A real git fixture with a KNOWN diff vs base "main":
+        //   a.txt: append 2 lines            → +2 / -0   (unstaged)
+        //   c.txt: remove 1 line             → +0 / -1   (unstaged)
+        //   b.txt: new 1-line file, staged   → +1 / -0
+        // Expected total: files=3, added=3, deleted=1 (append & pure-delete are
+        // unambiguous in git numstat, so the target is deterministic).
+        guard let fixture = Self.buildDigestFixture() else {
+            log("fixture-failed"); log("done"); return
+        }
+
+        let repo = RepoConfig(path: fixture.path, baseBranch: "main")
+        model.insertEphemeralRepo(repo)
+        let workspace = Workspace(
+            repoId: repo.id, worktreePath: fixture.path, mergeState: .unmerged)
+        let task = TaskRecord(
+            name: "digest-probe", branch: "task/digest", adapterKind: "debug",
+            sessionRef: nil, state: .done, workspaces: [workspace])
+        model.insertEphemeralTask(task)
+
+        // A hostile last-assistant-message: markup + script + markdown. Stored
+        // verbatim, rendered via `Text` (inert). Also proves baked timing when
+        // fed through the cache's real recordStop path with explicit clocks.
+        let hostile = "<script>alert('x')</script> **bold** [link](javascript:void) </div>"
+
+        Task { @MainActor in
+            // 1. Deterministic diffStat, EXACT against the fixture.
+            await refreshDiffDigest(for: task)
+            let stat = digests.digest(for: task.id).diffStat
+            let files = stat?.filesChanged ?? -1
+            let add = stat?.added ?? -1
+            let del = stat?.deleted ?? -1
+            log("diffstat=files=\(files),add=\(add),del=\(del)")
+            log("diffstat-exact=\(files == 3 && add == 3 && del == 1)")
+
+            // 2. baked timing (explicit clocks: 2.0s turn) + hostile action.
+            let t0 = Date()
+            digests.noteWorkStarted(taskId: task.id, at: t0)
+            digests.recordStop(taskId: task.id, action: hostile, at: t0.addingTimeInterval(2))
+            let d = digests.digest(for: task.id)
+            log("baked=\(d.baked ?? -1)")
+
+            // 3. Graceful degradation: NO transcript was read, so model/ctx are
+            //    blank (nil) — NOT zeros — while the deterministic diff stands.
+            log("degrade-model-blank=\(d.model == nil) degrade-ctx-blank=\(d.context == nil) "
+                + "degrade-diff-known=\(d.diffStat != nil)")
+
+            // 4. Hostile action stored VERBATIM (not stripped/interpreted); the
+            //    Summary renders it through SwiftUI `Text` (inert by type).
+            log("action-verbatim=\(d.action == hostile)")
+
+            // 5. Summary renders without crashing: enter Focus + Summary mode
+            //    and settle. Reaching `done` after this is the no-crash proof.
+            open(task.id)
+            try? await Task.sleep(for: .milliseconds(300))
+            FocusDebug.currentWorkbench?.setBodyMode(.summary)
+            try? await Task.sleep(for: .milliseconds(500))
+            log("summary-rendered=true")
+            backToHarbor()
+            log("done")
+        }
+    }
+
+    /// Builds a throwaway git repo on branch `main` with a deterministic known
+    /// diff (see the gate). Returns its URL, or nil on any git failure. Uses
+    /// /usr/bin/git directly with an argument array (no shell).
+    private static func buildDigestFixture() -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lighthouse-digest-\(UUID().uuidString)", isDirectory: true)
+
+        func git(_ args: [String]) -> Bool {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = args
+            process.currentDirectoryURL = root
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return false }
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        }
+        func write(_ name: String, _ contents: String) -> Bool {
+            (try? contents.write(
+                to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)) != nil
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch { return nil }
+
+        guard git(["init", "-b", "main"]),
+              write("a.txt", "a\nb\nc\n"),
+              write("c.txt", "x\ny\nz\n"),
+              git(["add", "a.txt", "c.txt"]),
+              git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base"]),
+              // Working changes vs the base commit (== merge base of main/HEAD):
+              write("a.txt", "a\nb\nc\nd\ne\n"),   // +2
+              write("c.txt", "x\ny\n"),            // -1
+              write("b.txt", "hello\n"),           // new
+              git(["add", "b.txt"])                // stage the new file so it appears
+        else { return nil }
+        return root
     }
 
     /// LIGHTHOUSE_DEBUG_FOCUS=1: proves the Phase-3 Focus reshape in the REAL
@@ -493,6 +621,11 @@ final class AppRuntime {
         selectedTaskId = id
         switcherPresented = false
         nav.open()
+        // Focus entry is a digest refresh trigger (spec §4): recompute the
+        // deterministic diff counts for the task now being viewed.
+        if let task = model.tasks.first(where: { $0.id == id }) {
+            Task { await refreshDiffDigest(for: task) }
+        }
     }
 
     /// Back to the Harbor overview (the Focus toolbar ◱ button / `backToHarbor`).
@@ -781,7 +914,58 @@ final class AppRuntime {
         for await signal in stream {
             let transition = model.apply(signal)
             handleTransition(transition)
+            feedDigest(from: signal)
         }
+    }
+
+    /// Feeds the digest cache from a raw attention signal. `baked` is measured
+    /// between this task's most recent `agentWorking` (UserPromptSubmit) and its
+    /// `agentStopped` (Stop); on Stop we also stash the untrusted action and
+    /// kick off the (bounded) transcript read for model/ctx and a diffStat
+    /// refresh. Wall-clock is stamped here, at the moment the signal lands.
+    private func feedDigest(from signal: TaskAttentionSignal) {
+        let now = Date()
+        switch signal.event {
+        case .agentWorking:
+            digests.noteWorkStarted(taskId: signal.taskId, at: now)
+        case .agentStopped:
+            digests.recordStop(
+                taskId: signal.taskId, action: signal.lastAssistantMessage, at: now)
+            if let path = signal.transcriptPath {
+                refreshTranscriptDigest(taskId: signal.taskId, transcriptPath: path)
+            }
+            if let task = model.tasks.first(where: { $0.id == signal.taskId }) {
+                Task { await refreshDiffDigest(for: task) }
+            }
+        default:
+            break
+        }
+    }
+
+    /// Reads the transcript OFF the main actor (bounded tail, malformed-safe)
+    /// and folds the honest model + ctx estimate into the cache. Any failure
+    /// leaves those fields blank — never fabricated.
+    private func refreshTranscriptDigest(taskId: UUID, transcriptPath: String) {
+        Task {
+            let digest = await Task.detached { TranscriptReader.read(path: transcriptPath) }.value
+            digests.setTranscript(taskId: taskId, model: digest.model, context: digest.context)
+        }
+    }
+
+    /// Recomputes the deterministic diff counts for a task by summing
+    /// `git diff --numstat --merge-base <base>` across its worktrees (each vs
+    /// its repo's base). A per-worktree failure leaves that worktree out rather
+    /// than fabricating a number; if EVERY worktree fails the stat is marked
+    /// unknown (nil → blank), distinct from a real all-zero reading.
+    func refreshDiffDigest(for task: TaskRecord) async {
+        var total: DiffStat?
+        for workspace in task.workspaces {
+            guard let repo = model.repos.first(where: { $0.id == workspace.repoId }) else { continue }
+            guard let stat = try? await git.diffStat(
+                worktree: workspace.worktreeURL, base: repo.baseBranch) else { continue }
+            total = (total ?? .zero).adding(stat)
+        }
+        digests.setDiffStat(taskId: task.id, total)
     }
 
     let notifications = NotificationService()
@@ -930,6 +1114,7 @@ final class AppRuntime {
             registry.discardTask(taskId: task.id)
             tabs[task.id] = nil
             focusedTab[task.id] = nil
+            digests.remove(taskId: task.id)
             _ = try await model.removeTask(task, mode: mode)
             if selectedTaskId == task.id { selectedTaskId = nil }
             updateDockBadge() // a needs-input task may have gone away

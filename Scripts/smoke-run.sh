@@ -930,3 +930,97 @@ if problems:
 print("FOCUS GATE: PASS")
 PY
 rm -f "$focus_log"
+
+# --- Digest gate: the Phase-4 per-task metadata in the real app -------------
+# The pure pieces (DiffStat.parse, TranscriptReader, TaskDigestCache, baked
+# timing) are unit-tested; the end-to-end wiring is not headlessly testable.
+# LIGHTHOUSE_DEBUG_DIGEST=1 builds a throwaway git fixture with a KNOWN diff,
+# seeds an ephemeral repo+task over it, and proves in the running app: the
+# DETERMINISTIC diff counts are EXACT (files=3,add=3,del=1 — computed by git,
+# not hardcoded in the app: a wrong reading flips diffstat-exact to false, the
+# fail-before shown at build time); baked is the measured turn duration; the
+# Summary DEGRADES GRACEFULLY with no transcript/recap (model/ctx stay BLANK,
+# not zeros, while the deterministic diff stands); a hostile action is stored
+# VERBATIM and rendered inert (SwiftUI Text); and the Summary pane renders
+# without crashing. Launched directly (a window is created), like HARBOR/FOCUS.
+digest_log="$(mktemp)"
+digest_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_DIGEST=1 LIGHTHOUSE_CONFIG_DIR="$digest_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$digest_log" 2>&1 &
+digest_pid=$!
+trap 'kill -9 "$digest_pid" 2>/dev/null || true; rm -rf "$digest_cfg"' EXIT
+
+digest_tries=0
+until grep -q "DIGEST-STAGE done" "$digest_log"; do
+    digest_tries=$((digest_tries + 1))
+    if [ "$digest_tries" -gt 150 ]; then
+        echo "DIGEST GATE: FAIL (no done stage within 30s)" >&2
+        grep "DIGEST-STAGE" "$digest_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$digest_pid" 2>/dev/null; then
+        echo "DIGEST GATE: FAIL (app exited during digest check)" >&2
+        grep "DIGEST-STAGE" "$digest_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$digest_pid" 2>/dev/null || true
+digest_tries=0
+while kill -0 "$digest_pid" 2>/dev/null; do
+    digest_tries=$((digest_tries + 1))
+    [ "$digest_tries" -gt 15 ] && kill -9 "$digest_pid" 2>/dev/null || true
+    [ "$digest_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$digest_cfg"
+
+echo "--- DIGEST gate stdout ---"
+grep "DIGEST-STAGE" "$digest_log" || true
+echo "--------------------------"
+
+python3 - "$digest_log" <<'PY'
+import sys
+log = sys.argv[1]
+stages = {}
+for l in open(log):
+    if not l.startswith("DIGEST-STAGE "):
+        continue
+    body = l.removeprefix("DIGEST-STAGE ").strip()
+    if body == "done":
+        stages["done"] = "true"
+        continue
+    for tok in body.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            stages[k] = v
+print(f"DIGEST stages: {stages}")
+
+problems = []
+def want(key, val):
+    if stages.get(key) != val:
+        problems.append(f"{key}={stages.get(key)} (expected {val})")
+
+# Deterministic diff counts EXACT against the real git fixture.
+want("diffstat-exact", "true")
+# baked is the measured turn duration (explicit 2s clock in the gate).
+want("baked", "2.0")
+# Graceful degradation: no transcript read, so model/ctx are BLANK (not zeros),
+# while the deterministic diff is known.
+want("degrade-model-blank", "true")
+want("degrade-ctx-blank", "true")
+want("degrade-diff-known", "true")
+# Untrusted action stored verbatim (never stripped/interpreted); Summary renders
+# it through SwiftUI Text (inert). The pane rendered without crashing.
+want("action-verbatim", "true")
+want("summary-rendered", "true")
+if "done" not in stages:
+    problems.append("no done stage")
+
+if problems:
+    print("DIGEST GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("DIGEST GATE: PASS")
+PY
+rm -f "$digest_log"

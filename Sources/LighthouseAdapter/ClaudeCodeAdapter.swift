@@ -83,6 +83,11 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         let session_id: String
         let hook_event_name: String
         let notification_type: String?
+        /// Stop-only; ignored for other events (see contract doc). Optional so
+        /// payloads without it still decode (unknown-field tolerance kept).
+        let last_assistant_message: String?
+        /// Present on every payload; the transcript JSONL for the digest reader.
+        let transcript_path: String?
     }
 
     public func attentionSignal(fromPayload payload: Data) -> AgentAttentionSignal? {
@@ -91,7 +96,9 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         }
         return AgentAttentionSignal(
             sessionRef: decoded.session_id,
-            event: Self.event(forHook: decoded.hook_event_name, notificationType: decoded.notification_type))
+            event: Self.event(forHook: decoded.hook_event_name, notificationType: decoded.notification_type),
+            lastAssistantMessage: decoded.last_assistant_message,
+            transcriptPath: decoded.transcript_path)
     }
 
     /// Event mapping — the minimal hook set covering working/needs-input/done

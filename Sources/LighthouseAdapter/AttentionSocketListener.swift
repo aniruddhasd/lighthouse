@@ -6,11 +6,21 @@ public struct TaskAttentionSignal: Sendable, Equatable {
     public let taskId: UUID
     public let sessionRef: String
     public let event: AttentionEvent
+    /// The agent's final message on a `Stop` (untrusted; Phase-4 digest).
+    /// Optional + backward-compatible.
+    public let lastAssistantMessage: String?
+    /// The session transcript JSONL path (Phase-4 digest reader).
+    public let transcriptPath: String?
 
-    public init(taskId: UUID, sessionRef: String, event: AttentionEvent) {
+    public init(
+        taskId: UUID, sessionRef: String, event: AttentionEvent,
+        lastAssistantMessage: String? = nil, transcriptPath: String? = nil
+    ) {
         self.taskId = taskId
         self.sessionRef = sessionRef
         self.event = event
+        self.lastAssistantMessage = lastAssistantMessage
+        self.transcriptPath = transcriptPath
     }
 }
 
@@ -190,7 +200,10 @@ public actor AttentionSocketListener {
             recordDrop("unknown session \(signal.sessionRef)")
             return
         }
-        core.yield(TaskAttentionSignal(taskId: taskId, sessionRef: signal.sessionRef, event: event))
+        core.yield(TaskAttentionSignal(
+            taskId: taskId, sessionRef: signal.sessionRef, event: event,
+            lastAssistantMessage: signal.lastAssistantMessage,
+            transcriptPath: signal.transcriptPath))
     }
 
     private func recordDrop(_ reason: String) {

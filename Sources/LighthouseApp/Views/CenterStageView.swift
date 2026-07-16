@@ -92,23 +92,11 @@ struct FocusBodyView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: Summary pane (Phase-4 feature — HONEST placeholder here, no data)
+    // MARK: Summary pane (Phase-4 lean Summary — spec §5.3 minus the rich parts)
 
     @ViewBuilder
     private var summaryPane: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 28))
-                .foregroundStyle(theme.faint)
-            Text("The task summary will appear here.")
-                .font(LHFont.summaryHead)
-                .foregroundStyle(theme.dim)
-            Text("A digest of what the agent did lands in a later phase.")
-                .font(LHFont.body)
-                .foregroundStyle(theme.faint)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.bg)
+        SummaryPaneView(task: task)
     }
 
     // MARK: Viewer pane (restyled header — handoff §2: path · read-only · ⌘J)
@@ -165,6 +153,159 @@ struct FocusBodyView: View {
         .padding(.horizontal, 12)
         .frame(height: 40)
         .background(Color.black.opacity(0.28))
+    }
+}
+
+/// The lean Summary (spec §5.3 minus the rich transcript-derived parts, which
+/// are deferred to Phase 4b): a status line + "baked for {baked}", the untrusted
+/// action line, and two stat cards (Changes / Context). Pure presentation over
+/// the `TaskDigest` + live attention state. Centered, max-width 720, `--bg`,
+/// fully token-driven. Every field degrades to a graceful blank — a task with no
+/// transcript/recap yields the deterministic stat cards + (if present) the
+/// action line, never fabricated numbers.
+struct SummaryPaneView: View {
+    @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
+    let task: TaskRecord
+
+    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                statusLine
+                actionLine
+                statCards
+                // Phase 4b will add the rich transcript-derived Summary here:
+                // "What the agent did" (✓ per steps[]) and the amber "Next step"
+                // callout (next). Until then the deterministic cards + action
+                // line above are the whole Summary; it degrades gracefully.
+            }
+            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 36)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+    }
+
+    // status dot + label, then "baked for {baked}" when the timing is known.
+    private var statusLine: some View {
+        HStack(spacing: 10) {
+            Circle().fill(theme.accent(for: state)).frame(width: 9, height: 9)
+            Text(Self.statusLabel(state))
+                .font(LHFont.ui(15, .semibold))
+                .foregroundStyle(theme.text)
+            if let baked = digest.baked {
+                Text("baked for \(Self.bakedText(baked))")
+                    .font(LHFont.mono(12))
+                    .foregroundStyle(theme.dim)
+            }
+        }
+    }
+
+    // The agent's last message — UNTRUSTED. Rendered as plain SwiftUI `Text`
+    // (no markup interpretation) with a line limit. Omitted when absent.
+    @ViewBuilder
+    private var actionLine: some View {
+        if let action = digest.action {
+            Text(action)
+                .font(LHFont.body)
+                .foregroundStyle(theme.dim)
+                .lineLimit(8)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var statCards: some View {
+        HStack(alignment: .top, spacing: 16) {
+            changesCard
+            contextCard
+        }
+    }
+
+    // Changes card: +add/−del + files. Known-zero renders real `0`s; unknown
+    // (nil diffStat) renders a dim "not computed" note, never fake zeros.
+    private var changesCard: some View {
+        card(title: "Changes") {
+            if let stat = digest.diffStat {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Text("+\(stat.added)")
+                            .font(LHFont.ui(20, .semibold)).foregroundStyle(theme.addedTextChrome)
+                        Text("\u{2212}\(stat.deleted)")
+                            .font(LHFont.ui(20, .semibold)).foregroundStyle(theme.removedTextChrome)
+                    }
+                    Text("\(stat.filesChanged) file\(stat.filesChanged == 1 ? "" : "s") changed")
+                        .font(LHFont.meta).foregroundStyle(theme.faint)
+                }
+            } else {
+                Text("Not computed yet").font(LHFont.meta).foregroundStyle(theme.faint)
+            }
+        }
+    }
+
+    // Context card: ctx% + "model · window" when honest; else just the model;
+    // else a dim placeholder. ctx% is an estimate (prefixed "~").
+    private var contextCard: some View {
+        card(title: "Context") {
+            if let context = digest.context {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("~\(context.percent)%")
+                        .font(LHFont.ui(20, .semibold)).foregroundStyle(theme.text)
+                    Text(digest.model.map { "\($0) · \(Self.windowText(context.windowTokens))" }
+                        ?? Self.windowText(context.windowTokens))
+                        .font(LHFont.meta).foregroundStyle(theme.faint)
+                }
+            } else if let model = digest.model {
+                ModelChip(model: model, font: LHFont.ui(14, .medium))
+            } else {
+                Text("No model recorded").font(LHFont.meta).foregroundStyle(theme.faint)
+            }
+        }
+    }
+
+    private func card<Content: View>(
+        title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title.uppercased())
+                .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
+        .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card)
+            .strokeBorder(theme.border, lineWidth: 1))
+    }
+
+    static func statusLabel(_ state: TaskAttentionState) -> String {
+        switch state {
+        case .working: return "Working"
+        case .needsInput: return "Needs you"
+        case .done: return "Idle"
+        case .dirty: return "Unaccounted"
+        }
+    }
+
+    /// "45s", "2m 14s", "1h 3m" — a compact turn duration.
+    static func bakedText(_ interval: TimeInterval) -> String {
+        let total = Int(interval.rounded())
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+
+    /// 1_000_000 → "1M", 200_000 → "200K", else the raw count.
+    static func windowText(_ tokens: Int) -> String {
+        if tokens % 1_000_000 == 0 { return "\(tokens / 1_000_000)M" }
+        if tokens % 1_000 == 0 { return "\(tokens / 1_000)K" }
+        return "\(tokens)"
     }
 }
 

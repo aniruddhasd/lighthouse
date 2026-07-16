@@ -127,3 +127,51 @@ exec-form curl delivery works end-to-end.
 Also learned the hard way: macOS caps unix socket paths (`sun_path`) at
 ~104 bytes — the listener rejects longer paths loudly at start. The prod
 socket directory (app container) must stay comfortably under that.
+
+## Transcript JSONL — schema for the digest (Phase 4)
+
+- **Verified on:** 2026-07-15, against a real session transcript under
+  `~/.claude/projects/<slug>/<session-id>.jsonl` (structure/keys only — no
+  conversation content was copied anywhere). Treat every byte as untrusted.
+
+The transcript is line-delimited JSON (one object per line). Each line has a
+top-level `type`; the values observed were `user`, `assistant`, `system`,
+`summary`, `attachment`, `file-history-snapshot`, plus several bookkeeping
+types (`agent-name`, `ai-title`, `mode`, `permission-mode`, `last-prompt`,
+`queue-operation`). Only `assistant` lines matter for the digest.
+
+An `assistant` line carries a nested `message` object (the raw Anthropic API
+message) alongside envelope keys (`uuid`, `parentUuid`, `sessionId`,
+`timestamp`, `gitBranch`, `cwd`, `version`, `requestId`, …). Inside `message`:
+
+| Field | Shape | Digest use |
+|---|---|---|
+| `message.model` | string, e.g. `claude-opus-4-8`; synthetic/injected turns carry the literal `<synthetic>` | **model** chip — the honest source. `<synthetic>` is filtered out. |
+| `message.usage.input_tokens` | int (uncached prompt tokens for that request) | ctx numerator |
+| `message.usage.cache_read_input_tokens` | int (prompt tokens served from cache) | ctx numerator |
+| `message.usage.cache_creation_input_tokens` | int (prompt tokens newly written to cache) | ctx numerator |
+| `message.usage.output_tokens` | int | — |
+
+**ctx% — DECISION: build the meter (honest estimate).** The three input-side
+counters on a request are disjoint and sum to the full prompt size sent to the
+model that turn: `prompt = input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens`. On the **last non-synthetic `assistant` line**,
+that sum is a genuine measure of how full the context window is right now.
+Divide by the model's context window to get an occupancy estimate. Context
+windows (verified 2026-07-15 via the `claude-api` skill's model catalog):
+`claude-opus-4-*`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-fable-5`,
+`claude-mythos-5` → **1,000,000**; `claude-haiku-4-5` → **200,000**. The meter
+is framed as an **estimate**, and is **omitted** (field stays nil, nothing
+renders) whenever the model id is unknown to that map or the transcript has no
+usable last-usage line — never a fabricated or hand-waved percentage.
+
+`baked` (turn duration) does **not** need the transcript: it is wall-clock
+between this task's most recent `UserPromptSubmit` (agentWorking) hook and its
+`Stop` (agentStopped) hook, tracked per task in the runtime. `action` is the
+`Stop` hook's `last_assistant_message` (untrusted; rendered inert as SwiftUI
+`Text`). Both are surfaced from the hook payload, not read here.
+
+The reader is read-only, byte-bounded (tails the file — a transcript can be
+hundreds of MB), and malformed-safe: bad/partial JSON on any line is skipped,
+missing fields yield nil, and it never throws to the caller. No transcript
+content is ever logged, committed, or written into this doc.

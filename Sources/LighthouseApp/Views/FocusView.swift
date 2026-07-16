@@ -276,9 +276,10 @@ struct FocusCenter: View {
 // MARK: - Task header (52px, spec §C.1)
 
 /// Replaces the retired detail toolbar: status · title/meta · Terminal/Summary
-/// segmented · navigator toggle (◨) · Merge to base. The Merge button is
-/// promoted (filled green/idle) ONLY when the task is done; the context meter +
-/// model chip are OMITTED (Phase 4 — no fabricated numbers).
+/// segmented · context meter (honest only) · navigator toggle (◨) · Merge to
+/// base. The Merge button is promoted (filled green/idle) ONLY when the task is
+/// done; the context meter renders ONLY when an honest estimate exists (Phase 4
+/// — omitted, not faked, otherwise the header stays as Phase 3).
 struct FocusTaskHeader: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
@@ -286,6 +287,7 @@ struct FocusTaskHeader: View {
     let task: TaskRecord
 
     private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -303,6 +305,9 @@ struct FocusTaskHeader: View {
             }
             Spacer(minLength: 12)
             modeToggle
+            if let context = digest.context {
+                ContextMeter(context: context)
+            }
             navigatorToggle
             mergeButton
         }
@@ -381,13 +386,16 @@ struct FocusTaskHeader: View {
 
 // MARK: - Footer status line (30px, spec §C.4 — honest fields ONLY)
 
-/// The Focus footer: account · repo(s) · "N agents" (a REAL count of this task's
-/// running controllers). Model / ctx% / accept-edits are OMITTED — no honest
-/// source yet (Phase 4). A sparse honest footer is correct; nothing invented.
+/// The Focus footer: account · repo(s) · model · ctx% (honest only) · "N agents"
+/// (a REAL count of this task's running controllers). Model + ctx% render only
+/// when honestly derived (Phase 4); accept-edits is still OMITTED (no honest
+/// source). A sparse honest footer is correct; nothing invented.
 struct FocusFooter: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
     let task: TaskRecord
+
+    private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -397,6 +405,12 @@ struct FocusFooter: View {
             }
             if !repoNames.isEmpty {
                 Text("⌥ \(repoNames)")
+            }
+            if let model = digest.model {
+                ModelChip(model: model)
+            }
+            if let context = digest.context {
+                ContextMeter(context: context)
             }
             Spacer(minLength: 12)
             Text("\(agentCount) agent\(agentCount == 1 ? "" : "s")")

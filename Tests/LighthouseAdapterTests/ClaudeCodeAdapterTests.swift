@@ -37,6 +37,30 @@ struct ClaudeCodeAdapterTests {
             sessionRef: "$(rm -rf /); `evil`", event: .agentStopped))
     }
 
+    @Test func stopPayloadSurfacesTranscriptExtras() {
+        // A real Stop payload (contract doc): last_assistant_message +
+        // transcript_path ride through as optional signal fields.
+        let payload = #"""
+        {"session_id":"s1","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"Done <b>x</b>","transcript_path":"/p/s1.jsonl"}
+        """#
+        let signal = adapter.attentionSignal(fromPayload: Data(payload.utf8))
+        #expect(signal == AgentAttentionSignal(
+            sessionRef: "s1", event: .agentStopped,
+            lastAssistantMessage: "Done <b>x</b>", transcriptPath: "/p/s1.jsonl"))
+    }
+
+    @Test func extrasAreOptionalAndBackwardCompatible() {
+        // UserPromptSubmit carries transcript_path but no last_assistant_message.
+        let payload = #"{"session_id":"s2","hook_event_name":"UserPromptSubmit","transcript_path":"/p/s2.jsonl"}"#
+        let signal = adapter.attentionSignal(fromPayload: Data(payload.utf8))
+        #expect(signal?.lastAssistantMessage == nil)
+        #expect(signal?.transcriptPath == "/p/s2.jsonl")
+        // A payload with neither still decodes (fields nil).
+        let bare = adapter.attentionSignal(
+            fromPayload: Data(#"{"session_id":"s3","hook_event_name":"Stop"}"#.utf8))
+        #expect(bare == AgentAttentionSignal(sessionRef: "s3", event: .agentStopped))
+    }
+
     @Test func unknownEventsAndNotificationTypesMapToNilEvent() {
         #expect(ClaudeCodeAdapter.event(forHook: "PreToolUse", notificationType: nil) == nil)
         #expect(ClaudeCodeAdapter.event(forHook: "SomeFutureEvent", notificationType: nil) == nil)
@@ -71,8 +95,12 @@ struct ClaudeCodeAdapterTests {
         "tool_input":{"command":"npm test"},"unknown_future_field":{"nested":true}}
         """
         let signal = adapter.attentionSignal(fromPayload: Data(payload.utf8))
+        // transcript_path now rides through (Phase 4); this Notification has no
+        // last_assistant_message.
         #expect(signal == AgentAttentionSignal(
-            sessionRef: "7c2f0000-1111-2222-3333-444455556666", event: .agentNeedsInput))
+            sessionRef: "7c2f0000-1111-2222-3333-444455556666", event: .agentNeedsInput,
+            lastAssistantMessage: nil,
+            transcriptPath: "/Users/u/.claude/projects/x/transcript.jsonl"))
     }
 
     // MARK: Launch plans

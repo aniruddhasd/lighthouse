@@ -297,6 +297,7 @@ struct TaskCardView: View {
     let task: TaskRecord
 
     private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
         let accent = theme.accent(for: state)
@@ -318,12 +319,18 @@ struct TaskCardView: View {
                 Spacer(minLength: 8)
                 StatusPill(state: state)
             }
-            // Footer: honest relative time only. Phase-4 metric slots
-            // (model/+add/−del/files) are intentionally omitted — no invented
-            // numbers (spec §3, NO fabrication).
+            // Footer (handoff §1): model chip · +add/−del · files · time. Every
+            // slot is honest — a nil digest field renders NOTHING (never a fake
+            // 0/placeholder). A real no-change diff shows `0` (known zero).
             Divider().overlay(theme.borderSoft).padding(.top, 13)
-            HStack {
-                Spacer()
+            HStack(spacing: 12) {
+                if let model = digest.model {
+                    ModelChip(model: model)
+                }
+                if let stat = digest.diffStat {
+                    DiffMetrics(stat: stat)
+                }
+                Spacer(minLength: 8)
                 if let since = runtime.model.attentionSince(of: task.id) {
                     Text(relativeTime(since))
                         .font(LHFont.metaFaint)

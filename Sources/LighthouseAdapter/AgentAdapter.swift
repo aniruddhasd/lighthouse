@@ -70,10 +70,23 @@ public struct SessionSpec: Sendable, Equatable {
 public struct AgentAttentionSignal: Sendable, Equatable {
     public let sessionRef: String
     public let event: AttentionEvent?
+    /// The agent's final message on a `Stop` (the hook's
+    /// `last_assistant_message`), else nil. UNTRUSTED content — carried through
+    /// for the Phase-4 digest, never interpreted here. Optional and
+    /// backward-compatible: decoders treat it as absent by default.
+    public let lastAssistantMessage: String?
+    /// The session transcript JSONL path (`transcript_path`), present on every
+    /// hook payload, else nil. Read-only source for model/ctx in the digest.
+    public let transcriptPath: String?
 
-    public init(sessionRef: String, event: AttentionEvent?) {
+    public init(
+        sessionRef: String, event: AttentionEvent?,
+        lastAssistantMessage: String? = nil, transcriptPath: String? = nil
+    ) {
         self.sessionRef = sessionRef
         self.event = event
+        self.lastAssistantMessage = lastAssistantMessage
+        self.transcriptPath = transcriptPath
     }
 }
 
