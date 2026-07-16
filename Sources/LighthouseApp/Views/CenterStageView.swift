@@ -17,25 +17,33 @@ import LighthouseTaskEngine
 struct FocusBodyView: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
+    @Environment(\.motionEnabled) private var motionEnabled
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
     var body: some View {
         let body = workbench.effectiveBody
         ZStack {
+            // The terminal pane keeps its fill-everything structure untouched —
+            // no scale/transform on it — so the retained-terminal invariant and
+            // the geometry contract are unaffected by the motion pass.
             terminalPane
                 .opacity(body == .terminal ? 1 : 0)
                 .allowsHitTesting(body == .terminal)
             summaryPane
                 .opacity(body == .summary ? 1 : 0)
                 .allowsHitTesting(body == .summary)
+            // pop (~.18s scale+opacity) on the file viewer's appearance
+            // (handoff). Reduce-motion gated: the scale rests at 1 (no pop) and
+            // the transition is instant.
             viewerPane
                 .opacity(body == .viewer ? 1 : 0)
+                .scaleEffect((motionEnabled && body != .viewer) ? 0.98 : 1)
                 .allowsHitTesting(body == .viewer)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
-        .animation(.easeInOut(duration: 0.18), value: body)
+        .animation(motionEnabled ? .easeInOut(duration: 0.18) : nil, value: body)
     }
 
     // MARK: Terminal pane (the fill-everything host — the sizing-scar structure)

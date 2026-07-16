@@ -44,9 +44,10 @@ public final class AppModel {
     /// First-run setup flags (config schema v3).
     public private(set) var hasCompletedSetup = false
     public private(set) var notificationsHintDismissed = false
-    /// Persisted UI preferences (config schema v4). `theme` is wired to the UI
-    /// this phase; `startView` and `showBeam` are stored-but-unused until later
-    /// redesign phases. Raw strings so this UI-free layer needs no SwiftUI.
+    /// Persisted UI preferences (config schema v4), all wired to the UI: `theme`
+    /// drives the runtime theme, `startView` seeds the landing view at launch,
+    /// `showBeam` gates the ambient Harbor beam (Preferences, Phase 5). Raw
+    /// strings/bool so this UI-free layer needs no SwiftUI.
     public private(set) var theme: String = "beacon"
     public private(set) var startView: String = "harbor"
     public private(set) var showBeam: Bool = true
@@ -140,6 +141,24 @@ public final class AppModel {
     public func setTheme(_ value: String) {
         guard theme != value else { return }
         theme = value
+        try? persist()
+    }
+
+    /// Persists the preferred landing view (raw "harbor"/"focus"), consumed at
+    /// the next launch (AppRuntime seeds `nav` from it). Best-effort, no-op on a
+    /// redundant set — mirrors `setTheme`.
+    public func setStartView(_ value: String) {
+        guard startView != value else { return }
+        startView = value
+        try? persist()
+    }
+
+    /// Persists the ambient-beam preference; the Harbor beam reads `showBeam`
+    /// live, so the change takes effect immediately. Best-effort, no-op on a
+    /// redundant set — mirrors `setTheme`.
+    public func setShowBeam(_ value: Bool) {
+        guard showBeam != value else { return }
+        showBeam = value
         try? persist()
     }
 

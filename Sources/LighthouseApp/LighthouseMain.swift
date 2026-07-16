@@ -47,6 +47,15 @@ struct LighthouseMain: App {
                 Button("Run Setup Checks") { runtime.openSetup() }
             }
         }
+
+        // The standard macOS Preferences window (⌘,). A `Settings` scene is a
+        // separate window that does NOT inherit the WindowGroup's environment,
+        // so the runtime is injected explicitly; PreferencesView themes itself
+        // from the same `themeController`.
+        Settings {
+            PreferencesView()
+                .environment(runtime)
+        }
     }
 }
 

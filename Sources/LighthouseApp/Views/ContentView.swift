@@ -5,6 +5,10 @@ import LighthouseTaskEngine
 
 struct ContentView: View {
     @Environment(AppRuntime.self) private var runtime
+    /// System reduce-motion (System Settings → Accessibility → Display). SwiftUI
+    /// invalidates this body when the user flips it, so the app re-resolves
+    /// `motionEnabled` live.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showCreateTask = false
     @State private var showRegisterRepo = false
     @State private var taskPendingRemoval: TaskRecord?
@@ -14,6 +18,12 @@ struct ContentView: View {
         // Reading `.resolved` here registers observation on the ThemeController,
         // so a flip re-runs this body and re-injects the new tokens app-wide.
         let theme = runtime.themeController.resolved
+        // The single reduce-motion decision, injected once at the root: system
+        // reduce-motion, forced on by LIGHTHOUSE_DEBUG_REDUCE_MOTION for the
+        // MOTION gate. Every animation downstream keys off `\.motionEnabled`.
+        let motionEnabled = MotionResolver.motionEnabled(
+            reduceMotion: MotionResolver.effectiveReduceMotion(
+                system: reduceMotion, forcedByDebug: MotionDebug.forceReduceMotion))
         // Two-mode shell (spec §3.4): Harbor overview ⇄ Focus (the current
         // NavigationSplitView, lightly adapted; Phase 3 reshapes it). A ZStack
         // + switch, never a Group — a Group would attach these modifiers to
@@ -38,6 +48,7 @@ struct ContentView: View {
         // zero-size background view, so no layout is affected.
         .background(TitlebarConfigurator(controller: runtime.themeController, theme: theme))
         .environment(\.theme, theme)
+        .environment(\.motionEnabled, motionEnabled)
         // THE COHERENCE FIX (2026-07-15): pin the window's appearance to the
         // theme's — Beacon dark, Native light — so Native's NSColor SEMANTIC
         // tokens (bg/panel/text/…) resolve LIGHT even under a Dark system,

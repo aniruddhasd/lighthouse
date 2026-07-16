@@ -211,6 +211,55 @@ final class AppModelTests {
         #expect(reloaded.tasks.isEmpty)
     }
 
+    // MARK: UI preferences (Phase 5 — startView / showBeam setters)
+
+    /// The start-view preference persists through ConfigStore and comes back on
+    /// a fresh model (mirrors a relaunch). Defaults to "harbor".
+    @Test func startViewPreferencePersistsAcrossReload() throws {
+        #expect(model.startView == "harbor")
+        model.setStartView("focus")
+        #expect(model.startView == "focus")
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.startView == "focus")
+    }
+
+    /// The ambient-beam preference persists through ConfigStore and comes back
+    /// on a fresh model. Defaults to true (beam on).
+    @Test func showBeamPreferencePersistsAcrossReload() throws {
+        #expect(model.showBeam == true)
+        model.setShowBeam(false)
+        #expect(model.showBeam == false)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.showBeam == false)
+    }
+
+    /// A redundant set is a no-op (mirrors `setTheme`): the value is unchanged
+    /// and nothing new is written to churn.
+    @Test func redundantPreferenceSetsAreNoOps() throws {
+        model.setStartView("harbor") // already the default
+        #expect(model.startView == "harbor")
+        model.setShowBeam(true)       // already the default
+        #expect(model.showBeam == true)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.startView == "harbor")
+        #expect(reloaded.showBeam == true)
+    }
+
     // MARK: Attention reducer
 
     private func makeTask(named name: String = "attn") async throws -> TaskRecord {

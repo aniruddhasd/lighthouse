@@ -10,7 +10,9 @@ import LighthouseTaskEngine
 struct SwitcherOverlay: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
+    @Environment(\.motionEnabled) private var motionEnabled
     @State private var query = ""
+    @State private var popped = false
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -28,10 +30,22 @@ struct SwitcherOverlay: View {
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.palette)
                     .strokeBorder(theme.border, lineWidth: 1))
                 .shadow(color: .black.opacity(0.5), radius: 40, y: 24)
+                // pop (~.16s scale+opacity) on appear, reduce-motion gated:
+                // instant final state when motion is off. Only the panel pops;
+                // the scrim is immediate.
+                .scaleEffect(motionEnabled ? (popped ? 1 : 0.96) : 1)
+                .opacity(motionEnabled ? (popped ? 1 : 0) : 1)
                 .padding(.top, 90)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear { fieldFocused = true }
+        .onAppear {
+            fieldFocused = true
+            if motionEnabled {
+                withAnimation(.easeOut(duration: 0.16)) { popped = true }
+            } else {
+                popped = true
+            }
+        }
     }
 
     @ViewBuilder

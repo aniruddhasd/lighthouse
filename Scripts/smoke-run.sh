@@ -1024,3 +1024,96 @@ if problems:
 print("DIGEST GATE: PASS")
 PY
 rm -f "$digest_log"
+
+# --- Motion gate: the Phase-5 reduce-motion contract in the real app --------
+# The pure decisions (MotionResolver) are unit-tested; the ambient beam is a
+# LIVE SwiftUI layer no unit test can reach. LIGHTHOUSE_DEBUG_MOTION=1 with
+# LIGHTHOUSE_DEBUG_REDUCE_MOTION=1 forces reduce-motion and proves in the
+# running app: motion is disabled (motion-enabled=false); beamVisible tracks
+# `showBeam && motionEnabled` across the matrix; and — the load-bearing safety
+# property + fail-before target — the beam is ABSENT even with the showBeam pref
+# ON (reduce-motion wins), with the env-injected motionEnabled resolved false.
+# A beam that ignored reduce-motion would flip beam-present/beam-when-reduced to
+# true here. Launched directly (a window is created — Harbor renders), like
+# HARBOR/FOCUS/DIGEST.
+motion_log="$(mktemp)"
+motion_cfg="$(mktemp -d)"
+LIGHTHOUSE_DEBUG_MOTION=1 LIGHTHOUSE_DEBUG_REDUCE_MOTION=1 LIGHTHOUSE_CONFIG_DIR="$motion_cfg" \
+    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$motion_log" 2>&1 &
+motion_pid=$!
+trap 'kill -9 "$motion_pid" 2>/dev/null || true; rm -rf "$motion_cfg"' EXIT
+
+motion_tries=0
+until grep -q "MOTION-STAGE done" "$motion_log"; do
+    motion_tries=$((motion_tries + 1))
+    if [ "$motion_tries" -gt 150 ]; then
+        echo "MOTION GATE: FAIL (no done stage within 30s)" >&2
+        grep "MOTION-STAGE" "$motion_log" >&2 || true
+        exit 1
+    fi
+    if ! kill -0 "$motion_pid" 2>/dev/null; then
+        echo "MOTION GATE: FAIL (app exited during motion check)" >&2
+        grep "MOTION-STAGE" "$motion_log" >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+kill -TERM "$motion_pid" 2>/dev/null || true
+motion_tries=0
+while kill -0 "$motion_pid" 2>/dev/null; do
+    motion_tries=$((motion_tries + 1))
+    [ "$motion_tries" -gt 15 ] && kill -9 "$motion_pid" 2>/dev/null || true
+    [ "$motion_tries" -gt 40 ] && break
+    sleep 0.2
+done
+trap - EXIT
+rm -rf "$motion_cfg"
+
+echo "--- MOTION gate stdout ---"
+grep "MOTION-STAGE" "$motion_log" || true
+echo "--------------------------"
+
+python3 - "$motion_log" <<'PY'
+import sys
+stages = {}
+for l in open(sys.argv[1]):
+    if not l.startswith("MOTION-STAGE "):
+        continue
+    body = l.removeprefix("MOTION-STAGE ").strip()
+    if body == "done":
+        stages["done"] = "true"
+        continue
+    for tok in body.split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            stages[k] = v
+print(f"MOTION stages: {stages}")
+
+problems = []
+def want(key, val):
+    if stages.get(key) != val:
+        problems.append(f"{key}={stages.get(key)} (expected {val})")
+
+# Reduce-motion forced on → motion disabled.
+want("forced-reduce", "true")
+want("motion-enabled", "false")
+# beamVisible == showBeam && motionEnabled, across the matrix (both cases).
+want("beamvis-motion-on-beam-on", "true")
+want("beamvis-motion-on-beam-off", "false")
+want("beamvis-motion-off-beam-on", "false")
+# The pref is ON, yet the LIVE beam is absent (reduce-motion wins), and the
+# env-injected motionEnabled the app resolved is false. These are the
+# fail-before targets: a beam ignoring reduce-motion flips them.
+want("showbeam-pref", "true")
+want("harbor-bg-appeared", "true")
+want("beam-present", "false")
+want("env-motion-enabled", "false")
+want("beam-when-reduced", "absent")
+if "done" not in stages:
+    problems.append("no done stage")
+if problems:
+    print("MOTION GATE: FAIL (" + "; ".join(problems) + ")")
+    sys.exit(1)
+print("MOTION GATE: PASS")
+PY
+rm -f "$motion_log"

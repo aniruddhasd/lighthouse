@@ -193,6 +193,7 @@ struct FocusCenter: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.theme) private var theme
+    @Environment(\.motionEnabled) private var motionEnabled
     let task: TaskRecord
     @State private var workbench: WorkbenchModel?
 
@@ -258,7 +259,9 @@ struct FocusCenter: View {
                     .transition(.move(edge: .trailing))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: workbench.navigatorVisible)
+        // slidein (~.2s, keep Phase 3's); reduce-motion makes it instant (nil
+        // animation → the move transition applies with no interpolation).
+        .animation(motionEnabled ? .easeInOut(duration: 0.2) : nil, value: workbench.navigatorVisible)
         // Keystrokes, each mirrored by a visible control (spec §F):
         //   ⌘J  close the file viewer (Focus only) → return to the mode
         //   ⌘\  toggle the navigator overlay (replaces the old ⌥⌘S)

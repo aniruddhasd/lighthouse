@@ -107,6 +107,54 @@ final class AppRuntime {
         runHarborCheckIfRequested()
         runFocusCheckIfRequested()
         runDigestCheckIfRequested()
+        runMotionCheckIfRequested()
+    }
+
+    /// LIGHTHOUSE_DEBUG_MOTION=1: proves the Phase-5 reduce-motion contract in
+    /// the REAL app. The pure decisions (MotionResolver) are unit-tested; this
+    /// gate proves the wiring the unit tests cannot — that the ambient beam, a
+    /// LIVE SwiftUI layer, is genuinely ABSENT under reduce-motion even with the
+    /// `showBeam` pref ON (reduce-motion wins), and that the env-injected
+    /// `motionEnabled` the app resolved is false. Run WITH
+    /// LIGHTHOUSE_DEBUG_REDUCE_MOTION=1 to force reduce-motion in a headless
+    /// context; the beam's own render fact (from HarborBackground) is the
+    /// fail-before target — a beam that ignored reduce-motion would flip
+    /// `beam-present` to true here.
+    private func runMotionCheckIfRequested() {
+        guard MotionDebug.enabled else { return }
+        // Keep the first-run setup sheet down (empty isolated config), matching
+        // the other launched-directly gates.
+        setupPresented = false
+        Task { @MainActor in
+            func log(_ m: String) {
+                FileHandle.standardOutput.write(Data("MOTION-STAGE \(m)\n".utf8))
+            }
+            let forced = MotionDebug.forceReduceMotion
+            let system = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let effReduce = MotionResolver.effectiveReduceMotion(
+                system: system, forcedByDebug: forced)
+            let motionEnabled = MotionResolver.motionEnabled(reduceMotion: effReduce)
+            log("forced-reduce=\(forced) system-reduce=\(system) motion-enabled=\(motionEnabled)")
+
+            // beamVisible tracks `showBeam && motionEnabled` EXACTLY — the full
+            // matrix, so both the true and the false cases are asserted (the env
+            // is immutable for the run, so the positive case is proven here via
+            // the resolver rather than by flipping the override at runtime).
+            log("beamvis-motion-on-beam-on="
+                + "\(MotionResolver.beamVisible(showBeam: true, motionEnabled: true))")
+            log("beamvis-motion-on-beam-off="
+                + "\(MotionResolver.beamVisible(showBeam: false, motionEnabled: true))")
+            log("beamvis-motion-off-beam-on="
+                + "\(MotionResolver.beamVisible(showBeam: true, motionEnabled: false))")
+
+            // The pref is ON by default (empty config) — so a live beam under
+            // forced reduce-motion must be ABSENT. Let Harbor settle, then
+            // report whether the beam layer actually mounted.
+            log("showbeam-pref=\(model.showBeam)")
+            try? await Task.sleep(for: .milliseconds(900))
+            log("beam-when-reduced=\(MotionDebug.beamMounted ? "present" : "absent")")
+            log("done")
+        }
     }
 
     /// LIGHTHOUSE_DEBUG_DIGEST=1: proves the Phase-4 per-task digest in the REAL

@@ -40,20 +40,39 @@ func harborStatusLabel(_ state: TaskAttentionState) -> String {
     }
 }
 
-/// A 9px status dot in the state accent (handoff: pulsing is Phase 5 — static
-/// here). `glow` adds the needs-you amber halo the handoff calls for.
+/// A 9px status dot in the state accent. `.working` gets a pulsing expanding
+/// ring (~1.6s infinite, handoff) — reduce-motion gated, so it is a steady dot
+/// when motion is off. The ring is an OVERLAY (never changes the dot's frame),
+/// so a pulsing dot never reflows the row. `glow` adds the needs-you amber halo.
 struct StatusDot: View {
     @Environment(\.theme) private var theme
+    @Environment(\.motionEnabled) private var motionEnabled
     let state: TaskAttentionState
     var size: CGFloat = 9
     var glow: Bool = false
+    @State private var pulsing = false
 
     var body: some View {
+        let accent = theme.accent(for: state)
         Circle()
-            .fill(theme.accent(for: state))
+            .fill(accent)
             .frame(width: size, height: size)
-            .shadow(color: glow ? theme.accent(for: state).opacity(0.65) : .clear,
-                    radius: glow ? 5 : 0)
+            .overlay {
+                // Only the working state pulses, and only when motion is on:
+                // the ring view is absent under reduce-motion, so no infinite
+                // animation is ever mounted (not merely paused).
+                if state == .working && motionEnabled {
+                    Circle()
+                        .stroke(accent, lineWidth: 1.5)
+                        .scaleEffect(pulsing ? 2.6 : 1)
+                        .opacity(pulsing ? 0 : 0.7)
+                        .animation(
+                            .easeOut(duration: 1.6).repeatForever(autoreverses: false),
+                            value: pulsing)
+                        .onAppear { pulsing = true }
+                }
+            }
+            .shadow(color: glow ? accent.opacity(0.65) : .clear, radius: glow ? 5 : 0)
     }
 }
 
@@ -124,7 +143,10 @@ struct HarborView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(theme.bg)
+        // The base bg + the ambient beam (when the pref AND motion allow it).
+        // A background layer: never affects the grid layout, never intercepts
+        // clicks (the beam is allowsHitTesting(false)).
+        .background(HarborBackground())
         .onAppear { HarborDebug.emit("rendered-cards=\(cards.count)") }
     }
 
@@ -288,13 +310,17 @@ struct HarborView: View {
     }
 }
 
-/// A Harbor task card (handoff §1). Static — no fadeup/hover (motion is Phase
-/// 5). Honest metadata only: relative time + repo names; the Phase-4 fields
-/// (model/ctx%/+add/−del/files) are graceful blanks, never fabricated numbers.
+/// A Harbor task card (handoff §1). `fadeup` entrance (~.4s, reduce-motion
+/// gated); needs-you cards carry a static amber glow shadow (the ambient
+/// "look at me" — NOT motion-gated, per the handoff). Honest metadata only:
+/// relative time + repo names; the Phase-4 fields (model/ctx%/+add/−del/files)
+/// are graceful blanks, never fabricated numbers.
 struct TaskCardView: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
+    @Environment(\.motionEnabled) private var motionEnabled
     let task: TaskRecord
+    @State private var appeared = false
 
     private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
@@ -350,6 +376,23 @@ struct TaskCardView: View {
                 topLeadingRadius: Theme.Radius.card, bottomLeadingRadius: Theme.Radius.card)
                 .fill(accent)
                 .frame(width: 3)
+        }
+        // Needs-you card glow shadow (handoff §1: `0 0 26px -8px {accent}`) —
+        // a STATIC ambient signal, not motion-gated. The 3px accent border
+        // above stays.
+        .shadow(color: state == .needsInput ? accent.opacity(0.5) : .clear,
+                radius: state == .needsInput ? 13 : 0)
+        // fadeup entrance (~.4s subtle offset+opacity), reduce-motion gated:
+        // when motion is off the card is shown in its final frame with no
+        // animation.
+        .opacity(motionEnabled ? (appeared ? 1 : 0) : 1)
+        .offset(y: motionEnabled ? (appeared ? 0 : 8) : 0)
+        .onAppear {
+            if motionEnabled {
+                withAnimation(.easeOut(duration: 0.4)) { appeared = true }
+            } else {
+                appeared = true
+            }
         }
         .contentShape(Rectangle())
     }
