@@ -251,6 +251,7 @@ struct HarborView: View {
                     TaskCardView(task: task)
                 }
                 .buttonStyle(.plain)
+                .taskContextMenu(for: task)
             }
         }
     }
@@ -537,5 +538,32 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+/// Right-click actions shared by every task surface (Harbor card, beacon-rail
+/// dot): resume a resumable session, and remove the task (opens the
+/// confirmation sheet via `runtime.taskPendingRemoval`). Restores the affordance
+/// the retired sidebar carried — reachable now from wherever a task appears.
+private struct TaskContextMenu: ViewModifier {
+    @Environment(AppRuntime.self) private var runtime
+    let task: TaskRecord
+
+    func body(content: Content) -> some View {
+        content.contextMenu {
+            if runtime.model.canResume(task) {
+                Button("Resume Session") { runtime.resumeSession(for: task) }
+            }
+            Button("Remove Task…", role: .destructive) {
+                runtime.taskPendingRemoval = task
+            }
+        }
+    }
+}
+
+extension View {
+    /// Attaches the resume / remove context menu to a task surface.
+    func taskContextMenu(for task: TaskRecord) -> some View {
+        modifier(TaskContextMenu(task: task))
     }
 }

@@ -11,7 +11,6 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showCreateTask = false
     @State private var showRegisterRepo = false
-    @State private var taskPendingRemoval: TaskRecord?
 
     var body: some View {
         @Bindable var runtime = runtime
@@ -61,7 +60,7 @@ struct ContentView: View {
         .preferredColorScheme(theme.colorScheme)
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $showRegisterRepo) { RegisterRepoSheet() }
-        .sheet(item: $taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
+        .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
         .sheet(isPresented: Binding(
             get: { runtime.setupPresented },
             set: { runtime.setupPresented = $0 })) { SetupView() }

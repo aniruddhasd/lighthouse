@@ -355,3 +355,31 @@ struct TerminalTabBar: View {
         .padding(.horizontal, 6).padding(.vertical, 3)
     }
 }
+
+/// The ambient attention signal (spec §1 problem 2). Badges the agent tab in
+/// the terminal tab bar. (The redesign's task cards / rail use the themed
+/// `StatusDot`; this compact symbol badge is the tab-bar variant.)
+struct AttentionBadge: View {
+    let state: TaskAttentionState
+
+    var body: some View {
+        switch state {
+        case .working:
+            ProgressView()
+                .controlSize(.small)
+                .help("Agent is working")
+        case .needsInput:
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+                .help("Needs your input")
+        case .done:
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(.green)
+                .help("Idle — nothing pending")
+        case .dirty:
+            Image(systemName: "circle.dotted.circle")
+                .foregroundStyle(.yellow)
+                .help("Unaccounted-for changes (session died or edits with no agent)")
+        }
+    }
+}

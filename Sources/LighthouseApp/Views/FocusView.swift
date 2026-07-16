@@ -161,6 +161,7 @@ struct BeaconRail: View {
         }
         .buttonStyle(.plain)
         .help(task.name)
+        .taskContextMenu(for: task)
     }
 
     private var newTaskButton: some View {

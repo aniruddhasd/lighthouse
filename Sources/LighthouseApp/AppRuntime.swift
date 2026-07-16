@@ -33,6 +33,11 @@ final class AppRuntime {
 
     var selectedTaskId: UUID?
     var switcherPresented = false
+    /// The task the user is confirming removal of, if any — drives the
+    /// RemoveTaskSheet. On the runtime (not a view's @State) so any task
+    /// surface (Harbor card, beacon-rail dot) can trigger it without threading
+    /// a binding down; the old sidebar that owned this trigger was retired.
+    var taskPendingRemoval: TaskRecord?
     /// Two-mode navigation (spec §3.4): Harbor overview ⇄ Focus. Seeded from
     /// the persisted `startView` in init; a persisted `.focus` with nothing
     /// selected falls back to Harbor. Mutating it re-renders the shell (normal
