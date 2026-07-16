@@ -247,22 +247,26 @@ struct FocusCenter: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .focusDebugSize("focusBody")
                 .debugSize("focusBody")
+                // The navigator is an OVERLAY (spec §E), never a split column,
+                // and is anchored to the BODY — NOT the whole column — so it
+                // floats over the content only and never covers the task header
+                // or the footer (the overlap bug). The terminal stays full-width
+                // beneath it.
+                .overlay(alignment: .trailing) {
+                    if workbench.navigatorVisible {
+                        NavigatorOverlay(workbench: workbench)
+                            .transition(.move(edge: .trailing))
+                    }
+                }
+                // slidein (~.2s, keep Phase 3's); reduce-motion makes it instant
+                // (nil animation → the move transition applies with no interp).
+                .animation(motionEnabled ? .easeInOut(duration: 0.2) : nil,
+                           value: workbench.navigatorVisible)
             FocusFooter(task: task)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .focusDebugSize("centerColumn")
         .debugSize("centerColumn")
-        // The navigator is an OVERLAY (spec §E), never a split column: it floats
-        // over the right edge; the terminal stays full-width beneath.
-        .overlay(alignment: .trailing) {
-            if workbench.navigatorVisible {
-                NavigatorOverlay(workbench: workbench)
-                    .transition(.move(edge: .trailing))
-            }
-        }
-        // slidein (~.2s, keep Phase 3's); reduce-motion makes it instant (nil
-        // animation → the move transition applies with no interpolation).
-        .animation(motionEnabled ? .easeInOut(duration: 0.2) : nil, value: workbench.navigatorVisible)
         // Keystrokes, each mirrored by a visible control (spec §F):
         //   ⌘J  close the file viewer (Focus only) → return to the mode
         //   ⌘\  toggle the navigator overlay (replaces the old ⌥⌘S)
@@ -458,16 +462,8 @@ struct NavigatorOverlay: View {
             .overlay(alignment: .leading) {
                 Rectangle().fill(theme.borderSoft).frame(width: 1)
             }
-            .overlay(alignment: .topTrailing) {
-                Button { workbench.navigatorVisible = false } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.dim)
-                        .padding(8)
-                }
-                .buttonStyle(.plain)
-                .help("Close the navigator (⌘\\)")
-            }
+            // The close × lives in NavigatorView's header row now (spec §2), so
+            // it aligns with the repo selector instead of floating over it.
             .focusDebugSize("navigatorOverlay")
             .onAppear {
                 FocusDebug.navigatorMounted = true

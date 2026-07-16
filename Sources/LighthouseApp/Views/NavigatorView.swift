@@ -8,62 +8,94 @@ import LighthouseGit
 /// I/O + swap). Narrow and hideable; the live-diff watcher behind Changes runs
 /// for the whole time this is on screen, regardless of the active segment.
 struct NavigatorView: View {
+    @Environment(\.theme) private var theme
     @Bindable var workbench: WorkbenchModel
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
-            Picker("Navigator", selection: $workbench.navigatorMode) {
-                ForEach(NavigatorMode.allCases) { mode in
-                    Label(mode.title, systemImage: mode.systemImage).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(6)
-            .onChange(of: workbench.navigatorMode) { _, mode in
-                workbench.ensureLoaded(for: mode)
-            }
-            Divider()
+            tabs
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if let error = errorText {
-                Text(error).font(.caption).foregroundStyle(.red).lineLimit(2).padding(4)
+                Text(error)
+                    .font(LHFont.meta).foregroundStyle(.red).lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.chrome)
         .onAppear { workbench.ensureLoaded(for: workbench.navigatorMode) }
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 8) {
+            Text("REPO")
+                .font(LHFont.mono(10.5, .semibold)).tracking(0.6)
+                .foregroundStyle(theme.faint)
             Picker("Repo", selection: $workbench.selectedWorkspaceIndex) {
                 ForEach(workbench.review.workspaces, id: \.index) { entry in
                     Text(entry.repoName).tag(entry.index)
                 }
             }
             .pickerStyle(.menu)
+            .labelsHidden()
             .fixedSize()
-            Spacer()
             if workbench.navigatorMode == .changes {
-                Text("diff vs base · live")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text("diff vs base")
+                    .font(LHFont.mono(11))
+                    .foregroundStyle(theme.diffVsBase)
+                    .lineLimit(1)
                 Button { workbench.review.refreshNow() } label: {
                     Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11)).foregroundStyle(theme.dim)
                 }
                 .buttonStyle(.plain)
                 .help("Refresh diff (⌘R)")
                 // Cmd+R while the navigator is on screen.
                 Button("", action: { workbench.review.refreshNow() })
                     .keyboardShortcut("r", modifiers: .command)
-                    .frame(width: 0, height: 0)
-                    .opacity(0)
-                    .accessibilityHidden(true)
+                    .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            }
+            Spacer(minLength: 4)
+            // Close × lives in the header row (spec §2), not floating over it.
+            Button { workbench.navigatorVisible = false } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(theme.dim)
+            }
+            .buttonStyle(.plain)
+            .help("Close the navigator (⌘\\)")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .overlay(alignment: .bottom) { Rectangle().fill(theme.borderSoft).frame(height: 1) }
+    }
+
+    /// Changes / Files / History — an equal-width segmented control, active
+    /// segment `--elev` bg + `--border` (handoff §2 "Navigator overlay: Tabs").
+    private var tabs: some View {
+        HStack(spacing: 0) {
+            ForEach(NavigatorMode.allCases) { mode in
+                let active = workbench.navigatorMode == mode
+                Button {
+                    workbench.navigatorMode = mode
+                    workbench.ensureLoaded(for: mode)
+                } label: {
+                    Text(mode.title)
+                        .font(LHFont.button)
+                        .foregroundStyle(active ? theme.text : theme.dim)
+                        .frame(maxWidth: .infinity).frame(height: 26)
+                        .background(active ? theme.elev : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: Theme.Radius.segment))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.segment)
+                            .strokeBorder(active ? theme.border : Color.clear, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
             }
         }
-        .padding(6)
+        .padding(3)
+        .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.segment + 3))
+        .padding(.horizontal, 10).padding(.vertical, 8)
     }
 
     @ViewBuilder
@@ -104,6 +136,7 @@ struct NavigatorView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -127,6 +160,7 @@ struct NavigatorView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -161,6 +195,7 @@ struct NavigatorView: View {
                 .buttonStyle(.plain)
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
     }
 }
