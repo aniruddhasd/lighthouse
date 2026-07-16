@@ -38,4 +38,14 @@ enum TerminalFont {
         return NSFont(name: familyName, size: size)
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
+
+    /// Default (un-ANSI-colored) text color — a crisp near-white, replacing
+    /// SwiftTerm's dim grey default so plain shell/agent output is readable on
+    /// the dark terminal. ANSI-colored output overrides this per run.
+    static let foreground = NSColor(srgbRed: 0.918, green: 0.929, blue: 0.957, alpha: 1) // #eaedf4
+
+    /// Terminal background — near-black, matching the design's `--termbg`
+    /// (the terminal stays dark in both themes). The fallback when a program
+    /// hasn't set its own background.
+    static let background = NSColor(srgbRed: 0.031, green: 0.043, blue: 0.067, alpha: 1) // #080b11
 }

@@ -131,6 +131,10 @@ final class TerminalController: NSObject {
         // SwiftTerm derives bold/italic from this base. Set before the view is
         // shown so the cell metrics are right from the first layout.
         terminalView.font = TerminalFont.base
+        // Near-white default text on the near-black --termbg (SwiftTerm's
+        // default foreground is a dim grey); ANSI-colored output overrides it.
+        terminalView.nativeForegroundColor = TerminalFont.foreground
+        terminalView.nativeBackgroundColor = TerminalFont.background
         terminalView.processDelegate = self
     }
 
