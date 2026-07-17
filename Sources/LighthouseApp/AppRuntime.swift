@@ -81,6 +81,10 @@ final class AppRuntime {
         } catch {
             lastError = "Could not load config: \(error)"
         }
+        // Seed the terminal font size from persisted config so the first session
+        // opens at the chosen size (subsequent changes go through
+        // setTerminalFontSize, which also re-fonts live terminals).
+        registry.applyFontSize(CGFloat(model.terminalFontSize))
         // Seed the theme from persisted config (unknown value fails safe to
         // Beacon); each flip persists back through AppModel.
         let loadedModel = model
@@ -1106,6 +1110,13 @@ final class AppRuntime {
         } catch {
             lastError = String(describing: error)
         }
+    }
+
+    /// Preferences → terminal font size: persist it AND re-font every live
+    /// terminal immediately (the model clamps to its allowed range).
+    func setTerminalFontSize(_ size: Double) {
+        model.setTerminalFontSize(size)
+        registry.applyFontSize(CGFloat(model.terminalFontSize))
     }
 
     private func startAgentSession(taskId: UUID, plan: LaunchPlan) {

@@ -11,9 +11,16 @@ struct TerminalFontTests {
     /// app. If registration had failed, `base` would be the SF Mono fallback
     /// and the family name would differ.
     @Test func bundledFontRegistersAndResolvesToJetBrainsMono() {
-        let font = TerminalFont.base
+        let font = TerminalFont.base()
         #expect(font.familyName == TerminalFont.familyName)
-        #expect(font.pointSize == TerminalFont.size)
+        #expect(font.pointSize == TerminalFont.defaultSize)
+    }
+
+    /// A requested size flows through to the resolved font — proving the
+    /// Preferences font-size control actually changes the terminal typeface.
+    @Test func baseHonorsRequestedSize() {
+        #expect(TerminalFont.base(size: 11).pointSize == 11)
+        #expect(TerminalFont.base(size: 18).pointSize == 18)
     }
 
     /// The default text color is near-white, not SwiftTerm's dim grey.

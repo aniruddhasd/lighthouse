@@ -43,6 +43,19 @@ struct PreferencesView: View {
                     .font(LHFont.metaFaint)
                     .foregroundStyle(theme.dim)
             }
+
+            Section {
+                Stepper(
+                    value: terminalFontSizeBinding,
+                    in: AppModel.terminalFontRange,
+                    step: 1
+                ) {
+                    Text("Terminal font size: \(Int(runtime.model.terminalFontSize.rounded())) pt")
+                }
+                Text("Applies to every terminal immediately. JetBrains Mono, \(Int(AppModel.terminalFontRange.lowerBound))–\(Int(AppModel.terminalFontRange.upperBound)) pt.")
+                    .font(LHFont.metaFaint)
+                    .foregroundStyle(theme.dim)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 420)
@@ -68,5 +81,13 @@ struct PreferencesView: View {
         Binding(
             get: { runtime.model.showBeam },
             set: { runtime.model.setShowBeam($0) })
+    }
+
+    /// Font size routes through the runtime (not the model directly) so live
+    /// terminals are re-fonted in the same call that persists the value.
+    private var terminalFontSizeBinding: Binding<Double> {
+        Binding(
+            get: { runtime.model.terminalFontSize },
+            set: { runtime.setTerminalFontSize($0) })
     }
 }

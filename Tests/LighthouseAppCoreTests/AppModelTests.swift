@@ -321,6 +321,38 @@ final class AppModelTests {
         #expect(reloaded.showBeam == true)
     }
 
+    /// The terminal font size persists across a reload and defaults to the
+    /// config default.
+    @Test func terminalFontSizePersistsAcrossReload() throws {
+        #expect(model.terminalFontSize == LighthouseConfig.defaultTerminalFontSize)
+        model.setTerminalFontSize(11)
+        #expect(model.terminalFontSize == 11)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.terminalFontSize == 11)
+    }
+
+    /// The setter clamps out-of-range values to `terminalFontRange` — a huge or
+    /// tiny request never yields an unreadable terminal, and the clamped value
+    /// is what persists.
+    @Test func terminalFontSizeClampsToRange() throws {
+        model.setTerminalFontSize(999)
+        #expect(model.terminalFontSize == AppModel.terminalFontRange.upperBound)
+        model.setTerminalFontSize(1)
+        #expect(model.terminalFontSize == AppModel.terminalFontRange.lowerBound)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            socketPath: fixtures.root,
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.terminalFontSize == AppModel.terminalFontRange.lowerBound)
+    }
+
     // MARK: Attention reducer
 
     private func makeTask(named name: String = "attn") async throws -> TaskRecord {

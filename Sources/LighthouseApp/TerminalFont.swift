@@ -7,10 +7,10 @@ import CoreText
 /// `Resources/fonts` and pinned by `SHA256SUMS` (the supply-chain gate verifies
 /// them at build time, same as the diff2html assets).
 enum TerminalFont {
-    /// Point size (chosen 14pt). SwiftTerm derives the bold/italic faces from
-    /// this base via NSFontManager, which finds the registered JetBrains Mono
-    /// bold/italic faces.
-    static let size: CGFloat = 14
+    /// Fallback point size when no persisted preference is available. The live
+    /// size comes from `AppModel.terminalFontSize` (config schema v5) and is
+    /// pushed into every terminal via `SessionRegistry.applyFontSize`.
+    static let defaultSize: CGFloat = 13
 
     /// The PostScript family name Core Text exposes for the bundled font.
     static let familyName = "JetBrains Mono"
@@ -30,10 +30,10 @@ enum TerminalFont {
         return any
     }()
 
-    /// The base terminal font: JetBrains Mono when the bundled font is present,
-    /// else SF Mono at the same size. Forcing `registered` first guarantees the
-    /// faces are available before `NSFont(name:)` looks them up.
-    static var base: NSFont {
+    /// The base terminal font at `size`: JetBrains Mono when the bundled font is
+    /// present, else SF Mono at the same size. Forcing `registered` first
+    /// guarantees the faces are available before `NSFont(name:)` looks them up.
+    static func base(size: CGFloat = defaultSize) -> NSFont {
         _ = registered
         return NSFont(name: familyName, size: size)
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
@@ -44,8 +44,11 @@ enum TerminalFont {
     /// the dark terminal. ANSI-colored output overrides this per run.
     static let foreground = NSColor(srgbRed: 0.918, green: 0.929, blue: 0.957, alpha: 1) // #eaedf4
 
-    /// Terminal background — near-black, matching the design's `--termbg`
-    /// (the terminal stays dark in both themes). The fallback when a program
-    /// hasn't set its own background.
-    static let background = NSColor(srgbRed: 0.031, green: 0.043, blue: 0.067, alpha: 1) // #080b11
+    /// Terminal background — a dark GRAY, not near-black. Measured against
+    /// Ghostty (bg #23272D), our old near-black #080b11 pushed contrast to
+    /// ~14:1 (near-white on near-black), which haloes and tires the eyes over a
+    /// long session. This gray lands contrast in the comfortable ~10:1 range
+    /// like Ghostty while the text stays crisp and near-white. The fallback when
+    /// a program hasn't set its own background.
+    static let background = NSColor(srgbRed: 0.137, green: 0.153, blue: 0.176, alpha: 1) // #23272D
 }

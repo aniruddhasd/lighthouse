@@ -25,6 +25,13 @@ public enum RepoRemovalError: Error, Sendable, Equatable {
     case unknownRepo(UUID)
 }
 
+extension Comparable {
+    /// Clamps the value into `range` (below → lowerBound, above → upperBound).
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 /// The app's observable core: config-backed repo registry and task list,
 /// per-task attention state, and the orchestration of TaskEngine + adapter
 /// for creation/resume/removal. Deliberately free of any UI import — every
@@ -51,6 +58,12 @@ public final class AppModel {
     public private(set) var theme: String = "beacon"
     public private(set) var startView: String = "harbor"
     public private(set) var showBeam: Bool = true
+    /// Terminal font point size (config schema v5), wired to every SwiftTerm
+    /// session and adjustable from Preferences. Kept in `terminalFontRange`.
+    public private(set) var terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize
+    /// Sane bounds for the terminal font size — the Preferences control and the
+    /// setter both clamp to this.
+    public static let terminalFontRange: ClosedRange<Double> = 9...24
     /// Injectable clock so ordering tests are deterministic.
     private let now: @Sendable () -> Date
     /// Debug-only tasks/repos (geometry + review probes): visible to the
@@ -111,6 +124,8 @@ public final class AppModel {
         theme = config.theme
         startView = config.startView
         showBeam = config.showBeam
+        // Clamp on load too: a hand-edited config can carry an out-of-range size.
+        terminalFontSize = config.terminalFontSize.clamped(to: Self.terminalFontRange)
         attention = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.state) })
         attentionSince = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
     }
@@ -162,6 +177,16 @@ public final class AppModel {
         try? persist()
     }
 
+    /// Persists the terminal font size (clamped to `terminalFontRange`). The
+    /// session layer applies it to every live terminal on change; best-effort,
+    /// no-op on a redundant set — mirrors `setShowBeam`.
+    public func setTerminalFontSize(_ value: Double) {
+        let clamped = value.clamped(to: Self.terminalFontRange)
+        guard terminalFontSize != clamped else { return }
+        terminalFontSize = clamped
+        try? persist()
+    }
+
     public func setWorktreesRootOverride(_ path: String?) throws {
         worktreesRootOverride = path
         try persist()
@@ -191,7 +216,8 @@ public final class AppModel {
             notificationsHintDismissed: notificationsHintDismissed,
             theme: theme,
             startView: startView,
-            showBeam: showBeam))
+            showBeam: showBeam,
+            terminalFontSize: terminalFontSize))
     }
 
     // MARK: - Repo registry

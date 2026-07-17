@@ -32,6 +32,12 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
     /// consumed by the motion pass (Phase 5); persisted now to avoid a second
     /// migration.
     public var showBeam: Bool
+    /// Terminal font point size (schema v5). Drives the SwiftTerm font in every
+    /// session; adjustable from Preferences. Clamped by the app to a sane range.
+    public var terminalFontSize: Double
+
+    /// The default terminal font size when none is persisted (schema < v5).
+    public static let defaultTerminalFontSize: Double = 13
 
     public init(
         repos: [RepoConfig] = [], tasks: [TaskRecord] = [],
@@ -40,7 +46,8 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
         notificationsHintDismissed: Bool = false,
         theme: String = "beacon",
         startView: String = "harbor",
-        showBeam: Bool = true
+        showBeam: Bool = true,
+        terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize
     ) {
         self.repos = repos
         self.tasks = tasks
@@ -50,6 +57,7 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
         self.theme = theme
         self.startView = startView
         self.showBeam = showBeam
+        self.terminalFontSize = terminalFontSize
     }
 
     public static let empty = LighthouseConfig()
@@ -68,7 +76,7 @@ public enum ConfigStoreError: Error, Sendable, Equatable {
 /// same directory, then rename over the target). The directory is injected;
 /// production uses `ConfigStore.defaultDirectory()`, tests use temp dirs.
 public struct ConfigStore: Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
     public static let fileName = "config.json"
 
     public let directory: URL
@@ -151,6 +159,8 @@ public struct ConfigStore: Sendable {
             } catch {
                 throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
             }
+            // v4 → v5: no terminal font size recorded yet — the init defaults it
+            // (defaultTerminalFontSize). Everything else passes through.
             return LighthouseConfig(
                 repos: stored.repos, tasks: stored.tasks,
                 worktreesRootOverride: stored.worktreesRootOverride,
@@ -159,6 +169,22 @@ public struct ConfigStore: Sendable {
                 theme: stored.theme,
                 startView: stored.startView,
                 showBeam: stored.showBeam)
+        case 5:
+            let stored: StoredConfigV5
+            do {
+                stored = try decoder.decode(StoredConfigV5.self, from: data)
+            } catch {
+                throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
+            }
+            return LighthouseConfig(
+                repos: stored.repos, tasks: stored.tasks,
+                worktreesRootOverride: stored.worktreesRootOverride,
+                hasCompletedSetup: stored.hasCompletedSetup,
+                notificationsHintDismissed: stored.notificationsHintDismissed,
+                theme: stored.theme,
+                startView: stored.startView,
+                showBeam: stored.showBeam,
+                terminalFontSize: stored.terminalFontSize)
         default:
             throw ConfigStoreError.unsupportedSchemaVersion(
                 found: probe.schemaVersion, newest: Self.currentSchemaVersion)
@@ -166,7 +192,7 @@ public struct ConfigStore: Sendable {
     }
 
     public func save(_ config: LighthouseConfig) throws {
-        let stored = StoredConfigV4(
+        let stored = StoredConfigV5(
             schemaVersion: Self.currentSchemaVersion,
             repos: config.repos,
             tasks: config.tasks,
@@ -175,7 +201,8 @@ public struct ConfigStore: Sendable {
             notificationsHintDismissed: config.notificationsHintDismissed,
             theme: config.theme,
             startView: config.startView,
-            showBeam: config.showBeam)
+            showBeam: config.showBeam,
+            terminalFontSize: config.terminalFontSize)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data: Data
@@ -248,6 +275,21 @@ public struct ConfigStore: Sendable {
         var theme: String
         var startView: String
         var showBeam: Bool
+    }
+
+    /// v5 (2026-07-17): adds the persisted terminal font size. Everything else
+    /// carries over from v4 unchanged.
+    private struct StoredConfigV5: Codable {
+        var schemaVersion: Int
+        var repos: [RepoConfig]
+        var tasks: [TaskRecord]
+        var worktreesRootOverride: String?
+        var hasCompletedSetup: Bool
+        var notificationsHintDismissed: Bool
+        var theme: String
+        var startView: String
+        var showBeam: Bool
+        var terminalFontSize: Double
     }
 
     /// v1 → current: same repos/tasks; no override configured; setup treated
