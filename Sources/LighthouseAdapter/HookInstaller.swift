@@ -176,7 +176,9 @@ public struct HookInstaller: Sendable {
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(
                 withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url)
+            // Atomic (temp-then-rename): a crash mid-write must never truncate
+            // the user's settings file — we only ever leave the old or the new.
+            try data.write(to: url, options: .atomic)
         } catch {
             throw HookInstallerError.ioFailure(path: url.path, detail: String(describing: error))
         }
@@ -195,7 +197,9 @@ public struct HookInstaller: Sendable {
         do {
             try FileManager.default.createDirectory(
                 at: excludeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data(content.utf8).write(to: excludeURL)
+            // Atomic: this is the repo's SHARED info/exclude — a truncating
+            // crash here would corrupt a file we don't own.
+            try Data(content.utf8).write(to: excludeURL, options: .atomic)
         } catch {
             throw HookInstallerError.ioFailure(
                 path: excludeURL.path, detail: String(describing: error))

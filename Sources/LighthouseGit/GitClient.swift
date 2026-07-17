@@ -191,7 +191,8 @@ public actor GitClient {
     /// resolution for a binary conflict (no text transform possible).
     public func takeWholeFile(_ side: ConflictSide, path: String, in repository: URL) async throws {
         let flag = side == .ours ? "--ours" : "--theirs"
-        try await runExpectingSuccess(["checkout", flag, "--", path], in: repository)
+        try await runExpectingSuccess(
+            ["--literal-pathspecs", "checkout", flag, "--", path], in: repository)
         try await stage(paths: [path], in: repository)
     }
 
@@ -200,15 +201,19 @@ public actor GitClient {
     /// keep-modified choice. Paths are pathspecs (not revisions); the `--`
     /// separator keeps a path beginning with `-` out of the option parser
     /// (`git add` does not accept `--end-of-options`; verified git 2.50.1).
+    /// `--literal-pathspecs` additionally disables pathspec magic, so a path
+    /// git handed us that begins with `:` (e.g. `:(exclude)`) is treated as a
+    /// literal filename rather than a magic pathspec — belt to the `--` braces.
     public func stage(paths: [String], in repository: URL) async throws {
         guard !paths.isEmpty else { return }
-        try await runExpectingSuccess(["add", "--"] + paths, in: repository)
+        try await runExpectingSuccess(["--literal-pathspecs", "add", "--"] + paths, in: repository)
     }
 
     /// `git rm -- <path>` — the keep-deleted resolution for a delete/modify
-    /// conflict (records the deletion in the index).
+    /// conflict (records the deletion in the index). `--literal-pathspecs`
+    /// disables `:`-prefixed pathspec magic, same as `stage`.
     public func removeConflictedPath(_ path: String, in repository: URL) async throws {
-        try await runExpectingSuccess(["rm", "--", path], in: repository)
+        try await runExpectingSuccess(["--literal-pathspecs", "rm", "--", path], in: repository)
     }
 
     /// True when a conflicted path is binary: `git diff --numstat` between

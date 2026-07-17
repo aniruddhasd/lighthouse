@@ -255,6 +255,35 @@ final class AttentionSocketListenerTests {
         ])
     }
 
+    /// A burst of back-to-back deliveries must surface in send order. Each
+    /// request is framed serially by the accept thread and drained by ONE
+    /// ordered consumer; the previous per-request `Task` had undefined
+    /// scheduling order, so two quick deliveries could reorder and strand the
+    /// badge. Twenty distinct sessions make any reorder visible as a taskId
+    /// permutation.
+    @Test func burstOfDeliveriesArrivesInSendOrder() async throws {
+        let url = try await listener.start()
+        defer { listener.stop() }
+        let count = 20
+        let taskIds = (0..<count).map { _ in UUID() }
+        for (index, taskId) in taskIds.enumerated() {
+            await listener.register(sessionRef: "burst-\(index)", taskId: taskId)
+        }
+        let stream = await listener.signals()
+
+        for index in 0..<count {
+            _ = RawSocketClient.post(
+                json: payload(session: "burst-\(index)", event: "Stop"), to: url.path)
+        }
+
+        var received: [UUID] = []
+        for await signal in stream {
+            received.append(signal.taskId)
+            if received.count == count { break }
+        }
+        #expect(received == taskIds)
+    }
+
     @Test func unregisteredSessionStopsYielding() async throws {
         let url = try await listener.start()
         defer { listener.stop() }

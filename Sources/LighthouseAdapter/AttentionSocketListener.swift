@@ -134,11 +134,17 @@ public actor AttentionSocketListener {
         withUnsafeMutableBytes(of: &address.sun_path) { raw in
             raw.copyBytes(from: Array(path.utf8))
         }
+        // Create the socket node owner-only FROM THE START: bind(2) honours the
+        // umask, so 0177 yields a 0600 node with no window between bind and the
+        // explicit chmod below where another process could connect. Restored
+        // immediately after bind (umask is process-global).
+        let previousUmask = umask(0o177)
         let bindResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        umask(previousUmask)
         guard bindResult == 0 else {
             let savedErrno = errno
             close(fd)
@@ -164,6 +170,19 @@ public actor AttentionSocketListener {
             throw AttentionSocketError.alreadyStarted
         }
 
+        // Single ordered consumer: the accept thread frames requests serially
+        // and enqueues them; this one task drains them IN ORDER onto the actor.
+        // (Previously each request spawned its own Task, whose scheduling order
+        // was undefined — two quick deliveries could process out of order.)
+        let (stream, inboxContinuation) = AsyncStream.makeStream(of: Inbound.self)
+        core.setInbox(inboxContinuation)
+        Task { [weak self] in
+            for await item in stream {
+                guard let self else { return }
+                await self.consume(item)
+            }
+        }
+
         // Blocking accept loop on its own thread; connections are handled
         // serially (hook payloads are tiny and rare; a stalled client is
         // bounded by the 5s receive timeout).
@@ -175,6 +194,16 @@ public actor AttentionSocketListener {
         thread.start()
 
         return socketURL
+    }
+
+    /// Drains one inbox item on the actor, in order. Accepted bodies go through
+    /// the same `process`/`recordDrop` as before — only the delivery is now
+    /// serialized rather than one detached Task per request.
+    private func consume(_ item: Inbound) {
+        switch item {
+        case .body(let data): process(body: data)
+        case .drop(let reason): recordDrop(reason)
+        }
     }
 
     /// Synchronous and callable from anywhere (deinit, defer): closes the
@@ -235,14 +264,12 @@ public actor AttentionSocketListener {
             switch readRequest(from: connection, deadlineInterval: deadlineInterval) {
             case .success(let body):
                 respond(connection, status: "200 OK")
-                if let owner {
-                    Task { await owner.process(body: body) }
-                }
+                // Enqueue in accept order onto the single ordered consumer
+                // (core is a Sendable `let`, safe to touch off the actor).
+                owner?.core.enqueue(.body(body))
             case .failure(let reason):
                 respond(connection, status: "400 Bad Request")
-                if let owner {
-                    Task { await owner.recordDrop(reason) }
-                }
+                owner?.core.enqueue(.drop(reason))
             }
             close(connection)
         }
@@ -326,6 +353,16 @@ public actor AttentionSocketListener {
     }
 }
 
+/// One framed unit of work handed from the (background) accept thread to the
+/// single ordered consumer on the actor. Routing BOTH accepted bodies and
+/// framing-drops through one FIFO is what guarantees in-order processing:
+/// spawning a `Task` per request let two quick deliveries (UserPromptSubmit
+/// then Stop) land out of order and leave the badge wrong.
+private enum Inbound: Sendable {
+    case body(Data)
+    case drop(String)
+}
+
 /// Lock-guarded socket lifecycle + signal continuation, so shutdown is
 /// synchronous, idempotent, and callable from deinit/defer while the accept
 /// thread and the actor both stay race-free.
@@ -335,6 +372,8 @@ private final class ListenerCore: @unchecked Sendable {
     private var path: String?
     private var started = false
     private var continuation: AsyncStream<TaskAttentionSignal>.Continuation?
+    /// Ordered hand-off from the accept thread to the actor's single consumer.
+    private var inbox: AsyncStream<Inbound>.Continuation?
 
     var isStarted: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -355,6 +394,19 @@ private final class ListenerCore: @unchecked Sendable {
         continuation = new
     }
 
+    func setInbox(_ new: AsyncStream<Inbound>.Continuation) {
+        lock.lock(); defer { lock.unlock() }
+        inbox = new
+    }
+
+    /// Order-preserving enqueue from the accept thread. AsyncStream buffers in
+    /// yield order and the single consumer drains it serially, so the order a
+    /// connection was framed in is the order it is processed in.
+    func enqueue(_ item: Inbound) {
+        lock.lock(); defer { lock.unlock() }
+        inbox?.yield(item)
+    }
+
     func yield(_ signal: TaskAttentionSignal) {
         lock.lock(); defer { lock.unlock() }
         continuation?.yield(signal)
@@ -365,14 +417,24 @@ private final class ListenerCore: @unchecked Sendable {
         let fd = self.fd
         let path = self.path
         let continuation = self.continuation
+        let inbox = self.inbox
         self.fd = -1
         self.path = nil
         self.continuation = nil
+        self.inbox = nil
         started = false
         lock.unlock()
 
-        if fd >= 0 { close(fd) }
+        if fd >= 0 {
+            // Wake a thread blocked in accept() before closing the fd: closing
+            // alone is not a guaranteed wake-up on macOS, and shutdown(2) is the
+            // conventional nudge (its return is irrelevant — the close still
+            // happens). Prevents the accept loop lingering on a dead fd.
+            Darwin.shutdown(fd, SHUT_RDWR)
+            close(fd)
+        }
         if let path { unlink(path) }
+        inbox?.finish() // ends the ordered consumer loop
         continuation?.finish()
     }
 }
