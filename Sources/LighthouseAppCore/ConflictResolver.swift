@@ -144,6 +144,13 @@ public struct ConflictResolver: Sendable {
         } catch {
             throw ConflictResolverError.parseFailed(path: path, detail: String(describing: error))
         }
+        // Parity with `resolveText`: never stage a still-conflicted file. The
+        // well-formed-only parser makes this defence-in-depth (a marker line can
+        // only reach here if a future transform edge case emitted one), but the
+        // two staging paths must refuse identically.
+        guard !ConflictParser.hasConflictMarkers(resolved) else {
+            throw ConflictResolverError.stillConflicted(path: path)
+        }
         try Data(resolved.utf8).write(to: fileURL)
         try await git.stage(paths: [path], in: clone)
     }

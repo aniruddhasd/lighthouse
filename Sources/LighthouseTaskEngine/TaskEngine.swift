@@ -94,6 +94,10 @@ public actor TaskEngine {
         worktreesRootOverride: URL? = nil
     ) async throws -> TaskRecord {
         // ---- Pre-flight (no mutation anywhere) ----
+        guard !repos.isEmpty else {
+            throw TaskCreationFailure(
+                repoPath: nil, cause: .noReposSelected, rollback: .notNeeded)
+        }
         if let reason = Self.taskNameProblem(name) {
             throw TaskCreationFailure(
                 repoPath: nil, cause: .invalidTaskName(name, reason: reason), rollback: .notNeeded)

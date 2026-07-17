@@ -281,6 +281,7 @@ public final class AppModel {
     public func createTask(
         name: String, branch: String, repoIds: [UUID]
     ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
+        guard !repoIds.isEmpty else { throw TaskEngineError.noReposSelected }
         let selected = try repoIds.map { id in
             guard let repo = repos.first(where: { $0.id == id }) else {
                 throw TaskEngineError.unknownRepo(repoId: id)
@@ -294,15 +295,43 @@ public final class AppModel {
                 URL(fileURLWithPath: $0, isDirectory: true)
             })
 
-        let primary = task.workspaces[0].worktreeURL
-        try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
+        // The engine created worktrees + branches and rolled back only failures
+        // INSIDE createTask. Everything below (hook wiring, launch-plan build,
+        // persist) can still throw — e.g. a repo whose base tip carries an
+        // invalid committed `.claude/settings.local.json` makes
+        // prepareWorkspaceAttention throw. Without a teardown here those
+        // worktrees/branches are left on disk but unrecorded in config, and a
+        // retry then fails with `branchAlreadyExists` over invisible debris.
+        do {
+            guard let primary = task.workspaces.first?.worktreeURL else {
+                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
+            }
+            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
 
-        let plan = try adapter.launchPlan(for: sessionSpec(for: task))
-        task.sessionRef = plan.sessionRef
-        tasks.append(task)
-        attention[task.id] = task.state
-        try persist()
-        return (task, plan)
+            let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
+            task.sessionRef = plan.sessionRef
+            tasks.append(task)
+            attention[task.id] = task.state
+            try persist()
+            return (task, plan)
+        } catch {
+            tasks.removeAll { $0.id == task.id }
+            attention.removeValue(forKey: task.id)
+            await rollBackFailedCreation(task)
+            throw error
+        }
+    }
+
+    /// Best-effort teardown of a task the engine created but whose post-engine
+    /// wiring failed. Force-destroys regardless of hazards — the task was never
+    /// live, so leaving its worktree/branch would only orphan on-disk debris a
+    /// retry trips over. Any failure here is swallowed: the caller is already
+    /// rethrowing the original, more informative error, and a lingering artifact
+    /// is strictly better surfaced through that than masked by a rollback error.
+    private func rollBackFailedCreation(_ task: TaskRecord) async {
+        let hazards = (try? await engine.removalHazards(in: task, repos: repos)) ?? []
+        _ = try? await engine.removeTask(
+            task, repos: repos, mode: .destroy(RemovalConfirmation(destroying: hazards)))
     }
 
     /// Resume plan for a task with a stored sessionRef. Resuming an id whose
@@ -310,13 +339,17 @@ public final class AppModel {
     /// conversation found with session ID", exit 1 — verified live).
     public func resumePlan(for task: TaskRecord) throws -> LaunchPlan? {
         guard let ref = task.sessionRef else { return nil }
+        // The single `try` covers both the throwing sessionSpec and resumePlan.
         return try adapter.resumePlan(for: sessionSpec(for: task), sessionRef: ref)
     }
 
-    private func sessionSpec(for task: TaskRecord) -> SessionSpec {
+    private func sessionSpec(for task: TaskRecord) throws -> SessionSpec {
         let worktrees = task.workspaces.map(\.worktreeURL)
+        guard let primary = worktrees.first else {
+            throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
+        }
         return SessionSpec(
-            primaryWorktree: worktrees[0],
+            primaryWorktree: primary,
             additionalWorktrees: Array(worktrees.dropFirst()),
             loginShell: loginShell,
             displayName: task.name)

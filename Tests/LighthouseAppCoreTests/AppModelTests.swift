@@ -145,6 +145,67 @@ final class AppModelTests {
         #expect(reloaded.tasks.isEmpty)
     }
 
+    /// A failure AFTER the engine finished creating (here: the base tip carries
+    /// an invalid committed `.claude/settings.local.json`, so hook installation
+    /// throws) must tear the engine's worktree + branch back down — otherwise a
+    /// retry trips over `branchAlreadyExists` on invisible on-disk debris.
+    @Test func postEngineFailureRollsBackWorktreeAndBranch() async throws {
+        let repo = try fixtures.cleanRepo()
+        // Commit an invalid settings file onto main so the created worktree
+        // checks it out and hook install refuses it (existingSettingsInvalid).
+        let claudeDir = repo.path.appendingPathComponent(".claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        try "{ not valid json".write(
+            to: claudeDir.appendingPathComponent("settings.local.json"),
+            atomically: true, encoding: .utf8)
+        // Force-add: `.claude/` is commonly in a global/XDG gitignore, which git
+        // still honours even with GIT_CONFIG_GLOBAL masked, so a plain add would
+        // stage nothing and the commit would be empty.
+        _ = try fixtures.git(
+            ["add", "-f", ".claude/settings.local.json"], in: repo.path)
+        _ = try fixtures.git(["commit", "-m", "poison settings"], in: repo.path)
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+
+        await #expect {
+            _ = try await self.model.createTask(
+                name: "poisoned", branch: "task/poisoned", repoIds: [registered.id])
+        } throws: { error in
+            guard case .existingSettingsInvalid = error as? HookInstallerError else { return false }
+            return true
+        }
+
+        // Model + store hold nothing.
+        #expect(model.tasks.isEmpty)
+        #expect(try ConfigStore(directory: storeDirectory).load().tasks.isEmpty)
+        // And crucially: no orphaned worktree or branch on disk.
+        let destination = TaskEngine.worktreeDestination(
+            for: registered, taskName: "poisoned", worktreesRootOverride: nil)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        let branches = try fixtures.git(["branch", "--list", "task/poisoned"], in: repo.path)
+        #expect(branches.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        // Debris-free means a retry is possible: register a clean repo path is
+        // not needed — recommitting valid settings lets the SAME branch name
+        // succeed, proving the branch was really deleted.
+        _ = try fixtures.git(["rm", "-f", ".claude/settings.local.json"], in: repo.path)
+        _ = try fixtures.git(["commit", "-m", "drop settings"], in: repo.path)
+        let (task, _) = try await model.createTask(
+            name: "poisoned", branch: "task/poisoned", repoIds: [registered.id])
+        #expect(model.tasks == [task])
+    }
+
+    @Test func creatingWithNoReposSelectedThrowsRatherThanCrashing() async throws {
+        await #expect {
+            _ = try await self.model.createTask(
+                name: "no-repos", branch: "task/no-repos", repoIds: [])
+        } throws: { error in
+            guard let engineError = error as? TaskEngineError,
+                  case .noReposSelected = engineError else { return false }
+            return true
+        }
+        #expect(model.tasks.isEmpty)
+    }
+
     @Test func createTaskWiresSessionHooksAndPlan() async throws {
         let repoA = try fixtures.cleanRepo()
         let repoB = try fixtures.cleanRepo()

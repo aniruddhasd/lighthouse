@@ -8,6 +8,13 @@ public enum TaskEngineError: Error, Sendable {
     case invalidBranchName(String)
     /// The configured repo path does not exist or is not a git work tree.
     case repoNotFound(path: String)
+    /// Creation was requested with no repositories selected — a task must own
+    /// at least one workspace.
+    case noReposSelected
+    /// A loaded/degenerate task record carries zero workspaces, so no session
+    /// (primary worktree) can be derived for it. Guards the `[0]` index at the
+    /// model API boundary against a hand-edited or corrupted config.
+    case taskHasNoWorkspaces(taskId: UUID)
     /// A workspace references a repo id absent from the provided configs.
     case unknownRepo(repoId: UUID)
     case baseBranchMissing(repoPath: String, baseBranch: String)

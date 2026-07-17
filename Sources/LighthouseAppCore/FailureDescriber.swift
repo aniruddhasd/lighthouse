@@ -47,6 +47,10 @@ public enum FailureDescriber {
             return "'\(branch)' is not a valid git branch name."
         case .repoNotFound(let path):
             return "\(path) does not exist or is not a git repository."
+        case .noReposSelected:
+            return "Select at least one repository for the task."
+        case .taskHasNoWorkspaces:
+            return "This task has no workspaces — its configuration is incomplete."
         case .unknownRepo(let id):
             return "A workspace references an unregistered repo (\(id))."
         case .baseBranchMissing(let repoPath, let baseBranch):
