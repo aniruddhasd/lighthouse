@@ -39,10 +39,12 @@ enum TerminalFont {
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
-    /// Default (un-ANSI-colored) text color — a crisp near-white, replacing
-    /// SwiftTerm's dim grey default so plain shell/agent output is readable on
-    /// the dark terminal. ANSI-colored output overrides this per run.
-    static let foreground = NSColor(srgbRed: 0.918, green: 0.929, blue: 0.957, alpha: 1) // #eaedf4
+    /// Default (un-ANSI-colored) text color — a soft near-white matching
+    /// Ghostty's foreground, replacing SwiftTerm's dim grey default. Paired with
+    /// the dark-gray `background` this lands contrast at ~9.9:1 (an exact
+    /// Ghostty match — comfortable for long sessions, still clearly light).
+    /// ANSI-colored output overrides this per run.
+    static let foreground = NSColor(srgbRed: 0.816, green: 0.824, blue: 0.835, alpha: 1) // #d0d2d5
 
     /// Terminal background — a dark GRAY, not near-black. Measured against
     /// Ghostty (bg #23272D), our old near-black #080b11 pushed contrast to

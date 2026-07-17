@@ -23,10 +23,12 @@ struct TerminalFontTests {
         #expect(TerminalFont.base(size: 18).pointSize == 18)
     }
 
-    /// The default text color is near-white, not SwiftTerm's dim grey.
+    /// The default text color is a soft near-white (Ghostty-matched), still well
+    /// clear of SwiftTerm's dim grey default. 0.8 sits below #d0d2d5's 0.835 and
+    /// comfortably above the ~0.5 dim grey it replaces.
     @Test func defaultForegroundIsNearWhite() {
         let fg = TerminalFont.foreground.usingColorSpace(.sRGB)
-        #expect((fg?.brightnessComponent ?? 0) > 0.85)
+        #expect((fg?.brightnessComponent ?? 0) > 0.8)
     }
 
     /// A freshly-created terminal actually adopts the bundled font AND the
@@ -36,6 +38,6 @@ struct TerminalFontTests {
         let controller = TerminalController(key: TabKey(taskId: UUID(), tabId: UUID()))
         #expect(controller.terminalView.font.familyName == TerminalFont.familyName)
         let fg = controller.terminalView.nativeForegroundColor.usingColorSpace(.sRGB)
-        #expect((fg?.brightnessComponent ?? 0) > 0.85)
+        #expect((fg?.brightnessComponent ?? 0) > 0.8)
     }
 }
