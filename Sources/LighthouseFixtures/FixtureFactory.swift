@@ -6,6 +6,11 @@ public struct FixtureRepo: Sendable {
     public let path: URL
     /// The branch the repository was initialized with (`main` unless a scenario says otherwise).
     public let defaultBranch: String
+
+    public init(path: URL, defaultBranch: String) {
+        self.path = path
+        self.defaultBranch = defaultBranch
+    }
 }
 
 /// A repository with all three kinds of dirt in the working tree.
@@ -105,6 +110,12 @@ public struct FixtureFactory: Sendable {
     /// Same as `cleanRepo` but the base branch is `develop`.
     public func developBaseRepo() throws -> FixtureRepo {
         try cleanRepo(defaultBranch: "develop")
+    }
+
+    /// A freshly initialized repository with an unborn HEAD (zero commits).
+    /// The empty-history edge case for `commitLog`.
+    public func emptyRepo(defaultBranch: String = "main") throws -> FixtureRepo {
+        try initRepo(named: "empty", branch: defaultBranch)
     }
 
     /// Working tree with staged, unstaged, and untracked changes at once.

@@ -1,0 +1,120 @@
+import Foundation
+import LighthouseTaskEngine
+
+/// Everything the pty layer needs to start an agent session. The adapter
+/// BUILDS this; it never spawns the interactive session itself.
+///
+/// The pty runs a PERSISTENT interactive login shell (`executable` +
+/// `arguments`), and the agent is launched by TYPING `typedCommand` into that
+/// shell (2026-07-13). Rationale: `exec claude` replaced the shell, so when
+/// Claude exited the pty died and the terminal became a corpse — the opposite
+/// of a real terminal. With a persistent shell, Claude exits back to the
+/// user's prompt in the worktree, with the same per-folder account env (the
+/// `.zshrc` account selector applies to the interactive shell identically).
+public struct LaunchPlan: Sendable, Equatable {
+    /// Executable to spawn (for Claude Code: the user's login shell).
+    public let executable: String
+    /// Argument array for the executable — the persistent-shell flags
+    /// (`-l -i`), NOT `-c <command>`. Never a shell string.
+    public let arguments: [String]
+    /// Extra environment merged over the inherited environment by the pty layer.
+    public let environment: [String: String]
+    public let workingDirectory: URL
+    /// The session reference to persist on the task (deterministic at launch
+    /// when the agent supports pre-assigned session IDs).
+    public let sessionRef: String
+    /// The command to TYPE into the shell after it starts (the pty layer adds
+    /// the trailing newline). ShellQuoter-composed — every argument is one
+    /// shell word, so task/session names never break out. nil for a plain
+    /// shell tab.
+    public let typedCommand: String?
+
+    public init(
+        executable: String, arguments: [String], environment: [String: String],
+        workingDirectory: URL, sessionRef: String, typedCommand: String? = nil
+    ) {
+        self.executable = executable
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.sessionRef = sessionRef
+        self.typedCommand = typedCommand
+    }
+}
+
+/// What a new session should span: the task's primary worktree (cwd) and the
+/// sibling worktrees the agent must also reach.
+public struct SessionSpec: Sendable, Equatable {
+    public let primaryWorktree: URL
+    public let additionalWorktrees: [URL]
+    /// The user's shell (e.g. "/bin/zsh"); prod passes SHELL from the environment.
+    public let loginShell: String
+    /// Human-readable session name (the task name), shown by the agent's own
+    /// UI (Claude Code: `-n`, prompt box + /resume picker).
+    public let displayName: String?
+
+    public init(
+        primaryWorktree: URL, additionalWorktrees: [URL] = [], loginShell: String,
+        displayName: String? = nil
+    ) {
+        self.primaryWorktree = primaryWorktree
+        self.additionalWorktrees = additionalWorktrees
+        self.loginShell = loginShell
+        self.displayName = displayName
+    }
+}
+
+/// A raw attention payload translated into task-engine terms: which session
+/// spoke, and what it means. `event` is nil for payloads that are valid but
+/// irrelevant (e.g. an auth notification).
+public struct AgentAttentionSignal: Sendable, Equatable {
+    public let sessionRef: String
+    public let event: AttentionEvent?
+    /// The agent's final message on a `Stop` (the hook's
+    /// `last_assistant_message`), else nil. UNTRUSTED content — carried through
+    /// for the Phase-4 digest, never interpreted here. Optional and
+    /// backward-compatible: decoders treat it as absent by default.
+    public let lastAssistantMessage: String?
+    /// The session transcript JSONL path (`transcript_path`), present on every
+    /// hook payload, else nil. Read-only source for model/ctx in the digest.
+    public let transcriptPath: String?
+
+    public init(
+        sessionRef: String, event: AttentionEvent?,
+        lastAssistantMessage: String? = nil, transcriptPath: String? = nil
+    ) {
+        self.sessionRef = sessionRef
+        self.event = event
+        self.lastAssistantMessage = lastAssistantMessage
+        self.transcriptPath = transcriptPath
+    }
+}
+
+/// The seam between Lighthouse and any agent CLI (spec guardrail 3: app code
+/// never calls agent CLIs raw). Shaped around capabilities, not Claude
+/// specifics — this is one of the two future-public contracts (§4).
+public protocol AgentAdapter: Sendable {
+    /// Stable identifier persisted as TaskRecord.adapterKind.
+    var kind: String { get }
+
+    /// Plan for a brand-new session. The returned plan's sessionRef is what
+    /// the caller persists for later resume.
+    func launchPlan(for spec: SessionSpec) throws -> LaunchPlan
+
+    /// Plan that resumes a previously persisted sessionRef.
+    func resumePlan(for spec: SessionSpec, sessionRef: String) throws -> LaunchPlan
+
+    /// Installs attention wiring (hook config) into a workspace so the
+    /// running agent pushes events at `socketPath`. Idempotent; merges with
+    /// any existing user configuration.
+    func prepareWorkspaceAttention(in workspace: URL, socketPath: URL) async throws
+
+    /// Removes exactly what prepareWorkspaceAttention installed, leaving any
+    /// user configuration intact.
+    func removeWorkspaceAttention(from workspace: URL) async throws
+
+    /// Translates one raw payload (as delivered to the attention socket)
+    /// into a signal. Returns nil when the payload is not this agent's
+    /// schema — the listener drops it.
+    func attentionSignal(fromPayload payload: Data) -> AgentAttentionSignal?
+}

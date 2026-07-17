@@ -1,8 +1,8 @@
 # Lighthouse
 
 A native macOS developer tool: a single-app home for daily agentic development
-across git worktrees. This repository currently contains the foundation layer —
-the git access layer and its test harness. No UI yet.
+across git worktrees — task-centric sessions, ambient attention state, and
+worktree bookkeeping handled for you.
 
 ## Layout
 
@@ -11,40 +11,90 @@ the git access layer and its test harness. No UI yet.
   (`status --porcelain=v2`, `worktree list --porcelain`). All subprocess calls
   use argument arrays — never a shell. No network git operations exist in this
   API at all (no fetch/pull/push): Lighthouse is fully offline by design.
+- `Sources/LighthouseTaskEngine` — the task lifecycle. Atomic task creation
+  (worktree + branch per repo from the local base tip, env-file copies, setup
+  scripts) with full rollback on any failure; guarded removal in which
+  destroying unmerged work requires a typed confirmation carrying the exact
+  (repo, branch) list; the pure, total attention state machine
+  (working / needs-input / done / dirty); and the schema-versioned JSON config
+  store with atomic writes.
+- `Sources/LighthouseAdapter` — the agent seam. The `AgentAdapter` protocol
+  (launch/resume plans, attention wiring, payload translation — one of the
+  two future-public contracts) and its single v1 implementation,
+  `ClaudeCodeAdapter`. Includes the hook installer (surgical merge into
+  `.claude/settings.local.json` plus a repo-local git exclude entry), the
+  Unix-socket attention listener (0600, size-capped, hostile-input hardened),
+  and the shell quoter guarding the app's single shell string (the
+  login-shell launch). Every Claude Code CLI fact is recorded with its source
+  in `docs/claude-code-contract.md` — re-verify that file when the CLI updates.
+- `Sources/LighthouseAppCore` — the app's testable core, free of UI imports:
+  the observable `AppModel` (repo registry, task list, attention reducer,
+  switcher/inbox ordering, quit and resume derivations), the fuzzy matcher
+  behind Cmd+K, the honest failure formatter, and the merge-back conflict
+  engine (byte-exact zdiff3 parser + transform, and the `ConflictResolver`
+  classifying text/binary/delete-modify from status — never text-parsing
+  binary). The `MergeWalk` engine (task-level merge-to-base over the
+  registered clones in user order, with precondition/conflict pauses and
+  guardrail-5 enforcement) lives in `LighthouseTaskEngine`.
+- `Sources/LighthouseApp` — the macOS app itself: SwiftUI shell
+  (NavigationSplitView, sidebar with attention badges, Cmd+K switcher,
+  guardrail sheets), the SwiftTerm session layer, and the live review pane
+  (per-task repo switcher, changed-files tree, diff-vs-base in a locked-down
+  WKWebView, FSEvents-driven refresh). Terminals live in a registry keyed by
+  task id, outside the SwiftUI view tree — sessions keep running while
+  unfocused and survive tab switches. The diff renderer is vendored
+  diff2html (see `docs/diff-renderer.md`) — fully offline.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway
   git repositories with known state (clean history, dirty trees, detached
   HEAD, content / delete-modify / binary merge conflicts, paths with spaces,
   attached worktrees). Never touches global git config or the network. Kept as
   a separate target so fixtures can never ship inside an app target.
-- `Tests/LighthouseGitTests` — fixture-driven tests plus pure parser tests on
-  synthetic porcelain input. Failure and edge cases are written before happy
-  paths.
+- `Tests/` — fixture-driven tests plus pure tests on synthetic input (porcelain
+  parsing, state-machine table, config round-trips, matcher ranking). Failure
+  and edge cases are written before happy paths.
 
-## Building and testing
+## Building, testing, running
 
-Requires macOS 14+, git >= 2.35, and a Swift 6 toolchain.
-
-```sh
-swift build
-swift test
-```
-
-### On machines with only Command Line Tools (no Xcode)
-
-CLT ships Swift Testing as `Testing.framework`, but SwiftPM (observed with
-Swift 6.3.2 / CLT 26.x, 2026-07) passes that directory to the compiler as a
-swiftmodule search path (`-I`) instead of a framework search path (`-F`). The
-auto-generated test runner then compiles its `#if canImport(Testing)` block
-away, and **`swift test` exits 0 having run zero tests** — a silent false
-green.
-
-After any fresh clone or `.build` wipe, run once:
+Requires macOS 14+, git >= 2.35, Xcode 26+ (SwiftTerm needs the full SDK),
+and the Claude Code CLI on PATH for live sessions.
 
 ```sh
-./Scripts/bootstrap-clt-swift-testing.sh
-swift test
+swift test               # the single test entry point (all targets)
+Scripts/make-app.sh      # assemble dist/Lighthouse.app from the SPM build
+open dist/Lighthouse.app
 ```
 
-A healthy run prints a `Test run with N tests` summary line. If `swift test`
-prints no test summary at all, the shim is missing — do not trust that run.
-Xcode-based toolchains don't need any of this.
+The SPM package is the single source of truth — there is no .xcodeproj.
+`make-app.sh` wraps the release binary in a minimal bundle
+(`dev.lighthouse.app`, ad-hoc signed). **Launch via `open dist/Lighthouse.app`
+(or Finder), not by running the binary directly** — native notifications
+(UNUserNotificationCenter) only work when the app is registered by
+LaunchServices; a direct `exec` of the binary traps in UN*.
+`LIGHTHOUSE_SMOKE=1 Scripts/smoke-run.sh` runs the full gate suite (launch,
+socket 0600, clean quit, terminal geometry, review pane, diff render, merge
+walk, and the notification decision + enqueue path).
+
+## First run and notifications
+
+On first launch (no repos yet) a setup sheet runs prerequisite checks —
+git ≥ 2.35, `claude` resolvable through your login shell, the app container
+writable, the socket path within the macOS limit — requests notification
+permission in context, and runs a hook self-test (a synthetic hook through
+the real curl → socket transport) so a dead attention pipeline is a visible
+failed check, not a mystery. Re-run any time from **Help → Run Setup Checks**.
+
+Notifications fire for needs-input / finished / ended sessions, but only when
+you'd otherwise miss them (app in the background, or a different task
+selected) — never for the task on your screen. The dock icon badges the
+number of tasks awaiting your input. Cmd+K opens the inbox, ordered by what
+needs you first (longest-blocked agent at the top). If notifications are off,
+badges and the inbox still work; a one-time dismissible hint says so.
+
+State locations: config + attention socket in
+`~/Library/Application Support/Lighthouse/`. Task worktrees are created next
+to each repo — `<repo parent>/lighthouse-worktrees/<task name>/<repo>/` — so
+sessions inherit whatever cwd-keyed environment (per-folder account
+selectors, direnv) applies to that directory tree; a global
+`worktreesRootOverride` path in the config replaces the derived location.
+Tasks created before this scheme keep working from their persisted worktree
+paths.

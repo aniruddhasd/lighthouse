@@ -31,6 +31,16 @@ public enum GitClientError: Error, Sendable, Equatable {
     /// git exited 0 but its output did not match the documented porcelain
     /// format; the raw output is carried for diagnosis.
     case unexpectedOutput(description: String, output: String)
+    /// A revision argument failed validation before any subprocess ran (e.g.
+    /// `commitDiff` rejects anything that is not 4–40 hex chars — the one
+    /// place a rev flows into `git show`, so it is validated, not just guarded).
+    case invalidRevision(String)
+    /// `fileContents` refused a path that resolves outside the worktree root
+    /// (`..`, an absolute path, or a symlink escaping the tree).
+    case pathOutsideWorktree(relativePath: String)
+    /// `fileContents` could not read the resolved file (missing, a directory,
+    /// or a filesystem error); the reason is carried for diagnosis.
+    case fileUnreadable(relativePath: String, reason: String)
 }
 
 extension GitClientError: CustomStringConvertible {
@@ -47,6 +57,12 @@ extension GitClientError: CustomStringConvertible {
             return "could not launch \(executable): \(reason)"
         case .unexpectedOutput(let description, _):
             return "unexpected git output: \(description)"
+        case .invalidRevision(let revision):
+            return "not a valid commit hash: \(revision)"
+        case .pathOutsideWorktree(let relativePath):
+            return "path resolves outside the worktree: \(relativePath)"
+        case .fileUnreadable(let relativePath, let reason):
+            return "cannot read \(relativePath): \(reason)"
         }
     }
 }

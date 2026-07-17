@@ -6,39 +6,60 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "LighthouseGit", targets: ["LighthouseGit"]),
+        .library(name: "LighthouseTaskEngine", targets: ["LighthouseTaskEngine"]),
+        .library(name: "LighthouseAdapter", targets: ["LighthouseAdapter"]),
+        .library(name: "LighthouseAppCore", targets: ["LighthouseAppCore"]),
         .library(name: "LighthouseFixtures", targets: ["LighthouseFixtures"]),
+        .executable(name: "Lighthouse", targets: ["LighthouseApp"]),
+    ],
+    dependencies: [
+        // Terminal emulation + local pty (spec §4 consumed contracts).
+        // Latest stable verified against GitHub releases 2026-07-09.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.13.0"),
     ],
     targets: [
         .target(name: "LighthouseGit"),
+        .target(name: "LighthouseTaskEngine", dependencies: ["LighthouseGit"]),
+        .target(name: "LighthouseAdapter", dependencies: ["LighthouseGit", "LighthouseTaskEngine"]),
+        // View-model layer: everything the app does that is testable without
+        // a UI — kept free of AppKit/SwiftUI imports on purpose.
+        .target(
+            name: "LighthouseAppCore",
+            dependencies: ["LighthouseGit", "LighthouseTaskEngine", "LighthouseAdapter"]),
+        // The macOS app: SwiftUI views, SwiftTerm embedding, wiring only.
+        .executableTarget(
+            name: "LighthouseApp",
+            dependencies: [
+                "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ],
+            // Vendored diff renderer (docs/diff-renderer.md) — fully offline.
+            resources: [.copy("Resources")]),
         // Test-harness only: generates throwaway git repos with known state.
         // Kept as a separate target so fixtures never ship in an app target.
         .target(name: "LighthouseFixtures"),
         .testTarget(
             name: "LighthouseGitTests",
-            dependencies: ["LighthouseGit", "LighthouseFixtures"],
-            // Command Line Tools-only machines (no Xcode, 2026-07): SwiftPM
-            // passes the CLT frameworks directory as -I, but Swift Testing
-            // ships there as Testing.framework, which needs -F — without it
-            // `import Testing` fails with "no such module". Harmless where
-            // the path doesn't exist (e.g. Xcode toolchains).
-            swiftSettings: [
-                .unsafeFlags(["-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"])
-            ],
-            linkerSettings: [
-                // Explicit because the shim imports Testing via -I (see
-                // Scripts/bootstrap-clt-swift-testing.sh), which records no
-                // framework autolink hint.
-                .linkedFramework("Testing"),
-                .unsafeFlags([
-                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
-                    // Testing.framework loads @rpath/lib_TestingInterop.dylib,
-                    // which CLT ships one directory over.
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib",
-                ])
-            ]
-        ),
+            dependencies: ["LighthouseGit", "LighthouseFixtures"]),
+        .testTarget(
+            name: "LighthouseTaskEngineTests",
+            dependencies: ["LighthouseTaskEngine", "LighthouseGit", "LighthouseFixtures"]),
+        .testTarget(
+            name: "LighthouseAdapterTests",
+            dependencies: [
+                "LighthouseAdapter", "LighthouseGit", "LighthouseTaskEngine", "LighthouseFixtures",
+            ]),
+        .testTarget(
+            name: "LighthouseAppCoreTests",
+            dependencies: [
+                "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
+                "LighthouseFixtures",
+            ]),
+        .testTarget(
+            name: "LighthouseAppTests",
+            dependencies: [
+                "LighthouseApp", "LighthouseAdapter", "LighthouseGit",
+                "LighthouseTaskEngine", "LighthouseFixtures",
+            ]),
     ]
 )
