@@ -25,6 +25,11 @@ struct ContentSearchOverlay: View {
     @State private var searching = false
     @State private var selected = 0
     @State private var searchTask: Task<Void, Never>?
+    /// Bumped on every scheduled search; only the run whose generation still
+    /// matches owns the UI state (results + the `searching` indicator), so a
+    /// superseded run can neither overwrite fresh results nor leave the spinner
+    /// stuck / stomp a newer run's spinner.
+    @State private var searchGeneration = 0
     @State private var popped = false
     @FocusState private var focus: Field?
 
@@ -265,17 +270,19 @@ struct ContentSearchOverlay: View {
     /// pause, so holding a key doesn't fire a grep per character.
     private func scheduleSearch() {
         searchTask?.cancel()
+        searchGeneration += 1
+        let generation = searchGeneration
         let pattern = query
         let scope = folder
         let regex = useRegex
         searchTask = Task {
             try? await Task.sleep(for: Self.debounce)
             if Task.isCancelled { return }
-            await runSearch(pattern: pattern, folder: scope, regex: regex)
+            await runSearch(pattern: pattern, folder: scope, regex: regex, generation: generation)
         }
     }
 
-    private func runSearch(pattern: String, folder: String, regex: Bool) async {
+    private func runSearch(pattern: String, folder: String, regex: Bool, generation: Int) async {
         guard !pattern.isEmpty else {
             matches = []; error = nil; searching = false
             return
@@ -284,16 +291,18 @@ struct ContentSearchOverlay: View {
         do {
             let found = try await workbench.contentSearch(
                 pattern: pattern, regex: regex, folder: folder.isEmpty ? nil : folder)
-            if Task.isCancelled { return }
+            guard generation == searchGeneration else { return }  // superseded
             matches = found
             error = nil
             selected = 0
         } catch {
-            if Task.isCancelled { return }
+            guard generation == searchGeneration else { return }
             matches = []
             self.error = Self.describe(error)
         }
-        searching = false
+        // Only the latest search clears the spinner; a superseded run returned
+        // above without touching it, and the latest run always reaches here.
+        if generation == searchGeneration { searching = false }
     }
 
     /// git's own reason (e.g. an unbalanced regex, a missing folder), trimmed to

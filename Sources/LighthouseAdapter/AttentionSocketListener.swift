@@ -128,7 +128,11 @@ public actor AttentionSocketListener {
         // This is thread-safe (a chmod of one path) — unlike a process-global
         // umask, which would race the whole test/app process's concurrent
         // directory creation and strip the execute bit off unrelated dirs.
-        chmod(directory.path, 0o700)
+        // Fail secure: if we cannot lock the parent to owner-only, do NOT bind
+        // the socket inside a potentially world-traversable directory.
+        guard chmod(directory.path, 0o700) == 0 else {
+            throw AttentionSocketError.systemCallFailed(call: "chmod", errno: errno)
+        }
         unlink(path) // stale socket from a previous run
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
