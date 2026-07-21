@@ -317,7 +317,11 @@ struct FocusTaskHeader: View {
                 ContextMeter(context: context)
             }
             navigatorToggle
-            mergeButton
+            // In-place tasks have no branch to merge — the session runs in the
+            // repo's own checkout, so a merge-back would be meaningless.
+            if !task.isInPlace {
+                mergeButton
+            }
         }
         .padding(.horizontal, 14)
         .frame(height: Theme.Metric.headerRow)

@@ -11,6 +11,10 @@ struct CreateTaskSheet: View {
     /// Ordered selection: position = walk order at creation and merge-back.
     @State private var selectedRepoIds: [UUID] = []
     @State private var creating = false
+    /// Where the session runs. Worktree (default) branches off base into an
+    /// isolated worktree; in-place runs in the repo's own checkout for
+    /// investigation — no worktree, no branch, nothing to merge back.
+    @State private var inPlace = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -19,11 +23,26 @@ struct CreateTaskSheet: View {
                 .onChange(of: name) {
                     if !branchEdited { branch = AppModel.branchSlug(from: name) }
                 }
-            TextField("Branch", text: $branch)
-                .onChange(of: branch) { _, new in
-                    branchEdited = new != AppModel.branchSlug(from: name)
-                }
-                .font(.system(.body, design: .monospaced))
+
+            Picker("Workspace", selection: $inPlace) {
+                Text("New worktree").tag(false)
+                Text("Current directory").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if inPlace {
+                Text("Runs the session in each repo's own checkout — no worktree, no branch. For investigating or learning a repo without changing it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                TextField("Branch", text: $branch)
+                    .onChange(of: branch) { _, new in
+                        branchEdited = new != AppModel.branchSlug(from: name)
+                    }
+                    .font(.system(.body, design: .monospaced))
+            }
 
             Text("Repos (selection order = creation order)")
                 .font(.caption)
@@ -49,24 +68,52 @@ struct CreateTaskSheet: View {
             }
             .frame(height: 160)
 
-            HStack {
+            HStack(spacing: 8) {
+                // Names exactly what's missing so the disabled button is never a
+                // dead end. Hidden once the form is complete (or while creating).
+                if !creating, !missingRequirements.isEmpty {
+                    Text("Add \(Self.humanList(missingRequirements)) to continue.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button(creating ? "Creating…" : "Create & Start Session") {
                     creating = true
                     Task {
                         await runtime.createTaskAndStartSession(
-                            name: name, branch: branch, repoIds: selectedRepoIds)
+                            name: name, branch: branch, repoIds: selectedRepoIds,
+                            inPlace: inPlace)
                         creating = false
                         dismiss()
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(creating || name.isEmpty || branch.isEmpty || selectedRepoIds.isEmpty)
+                .disabled(creating || !missingRequirements.isEmpty)
             }
         }
         .padding(20)
         .frame(width: 460)
+    }
+
+    /// What the form still needs before it can be submitted — drives both the
+    /// hint text and the button's disabled state, so they can never disagree.
+    private var missingRequirements: [String] {
+        var missing: [String] = []
+        if name.isEmpty { missing.append("a task name") }
+        if !inPlace && branch.isEmpty { missing.append("a branch name") }
+        if selectedRepoIds.isEmpty { missing.append("a repo") }
+        return missing
+    }
+
+    /// Joins fragments into natural English: "a", "a and b", "a, b, and c".
+    private static func humanList(_ items: [String]) -> String {
+        switch items.count {
+        case 0: return ""
+        case 1: return items[0]
+        case 2: return "\(items[0]) and \(items[1])"
+        default: return items.dropLast().joined(separator: ", ") + ", and " + items[items.count - 1]
+        }
     }
 }
 
@@ -88,7 +135,11 @@ struct RemoveTaskSheet: View {
             Text("Remove \(task.name)").font(.headline)
             if let hazards {
                 if hazards.isEmpty {
-                    Text("All workspaces are merged into their base branches with no uncommitted changes. Worktrees and branches will be removed.")
+                    if task.isInPlace {
+                        Text("This task ran in each repo's own checkout. Removing it leaves your repositories and branches untouched — only the task and its attention hooks are removed.")
+                    } else {
+                        Text("All workspaces are merged into their base branches with no uncommitted changes. Worktrees and branches will be removed.")
+                    }
                     removalButtons(mode: .refuseIfHazards, label: "Remove Task")
                 } else {
                     Label("This will PERMANENTLY DESTROY work:", systemImage: "exclamationmark.triangle.fill")

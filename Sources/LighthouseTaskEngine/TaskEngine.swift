@@ -30,10 +30,14 @@ public struct WorkspaceRemovalOutcome: Sendable, Equatable {
         case removed
         /// The directory was already gone; git's registration was cleaned up.
         case alreadyGone
+        /// In-place workspace: the repo's own checkout, deliberately untouched.
+        case leftInPlace
     }
     public enum BranchOutcome: Sendable, Equatable {
         case deleted
         case alreadyGone
+        /// In-place workspace: no branch was created, so none is deleted.
+        case leftInPlace
     }
 
     public let repoId: UUID
@@ -152,6 +156,55 @@ public actor TaskEngine {
             // No agent session exists yet (step 3): nothing needs attention.
             state: .done,
             workspaces: workspaces)
+    }
+
+    /// Creates an IN-PLACE task: no worktree, no branch, no env copy, no setup
+    /// script. Each workspace points at the registered repo's OWN checkout —
+    /// for investigation/learning sessions that read a repo without branching
+    /// off it. Nothing on disk is mutated, so there is nothing to roll back;
+    /// removal (see `removeTask`) leaves these directories and branches
+    /// untouched. The recorded `branch` is the primary repo's CURRENT branch,
+    /// purely for display honesty — it is never created or deleted.
+    public func createInPlaceTask(
+        name: String,
+        adapterKind: String,
+        repos: [RepoConfig]
+    ) async throws -> TaskRecord {
+        guard !repos.isEmpty else {
+            throw TaskCreationFailure(
+                repoPath: nil, cause: .noReposSelected, rollback: .notNeeded)
+        }
+        if let reason = Self.taskNameProblem(name) {
+            throw TaskCreationFailure(
+                repoPath: nil, cause: .invalidTaskName(name, reason: reason), rollback: .notNeeded)
+        }
+
+        var workspaces: [Workspace] = []
+        for repo in repos {
+            let repoURL = repo.pathURL
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: repo.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue,
+                  try await liftGit({ try await self.git.isInsideWorkTree(at: repoURL) })
+            else {
+                throw TaskCreationFailure(
+                    repoPath: repo.path, cause: .repoNotFound(path: repo.path),
+                    rollback: .notNeeded)
+            }
+            // In-place merges into nothing — mark merged so no merge-back UI or
+            // hazard treats it as pending work.
+            workspaces.append(Workspace(
+                repoId: repo.id, worktreePath: repo.path,
+                mergeState: .merged, isInPlace: true))
+        }
+
+        // Display-only: the current branch of the primary repo (nil under a
+        // detached HEAD → a readable placeholder). Never created or destroyed.
+        let primaryBranch = (try? await git.currentBranch(in: repos[0].pathURL)) ?? nil
+        return TaskRecord(
+            name: name, branch: primaryBranch ?? "(detached HEAD)",
+            adapterKind: adapterKind, sessionRef: nil,
+            state: .done, workspaces: workspaces)
     }
 
     /// One repo's share of creation. Every check that can fail runs BEFORE
@@ -366,6 +419,9 @@ public actor TaskEngine {
             guard let repo = repos.first(where: { $0.id == workspace.repoId }) else {
                 throw TaskEngineError.unknownRepo(repoId: workspace.repoId)
             }
+            // In-place: the repo's own checkout. Removal never deletes it or a
+            // branch, so removing the task loses nothing — no hazard to report.
+            if workspace.isInPlace { continue }
             let repoURL = repo.pathURL
 
             // Hazard 1: unmerged commits (only meaningful if the branch exists).
@@ -432,6 +488,19 @@ public actor TaskEngine {
         var outcomes: [WorkspaceRemovalOutcome] = []
         for workspace in task.workspaces {
             let repo = repos.first(where: { $0.id == workspace.repoId })!  // verified above
+
+            // In-place: the repo's own checkout and branch are the user's, not
+            // ours to remove. Record the fact and touch nothing on disk. (Our
+            // attention hooks in the repo's .claude/ are removed one layer up,
+            // by AppModel, via the adapter — the worktree path is never deleted
+            // here, so they would otherwise linger.)
+            if workspace.isInPlace {
+                outcomes.append(WorkspaceRemovalOutcome(
+                    repoId: repo.id, repoPath: repo.path, branch: task.branch,
+                    worktree: .leftInPlace, branchResult: .leftInPlace))
+                continue
+            }
+
             let repoURL = repo.pathURL
             let worktreeURL = workspace.worktreeURL
 

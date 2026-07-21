@@ -1073,10 +1073,16 @@ final class AppRuntime {
 
     // MARK: - Task + session flows
 
-    func createTaskAndStartSession(name: String, branch: String, repoIds: [UUID]) async {
+    /// `inPlace == false` (default) creates a worktree + branch per repo;
+    /// `inPlace == true` runs the session in each repo's own checkout, with no
+    /// worktree or branch, for investigation. `branch` is ignored when in-place.
+    func createTaskAndStartSession(
+        name: String, branch: String, repoIds: [UUID], inPlace: Bool = false
+    ) async {
         do {
-            let (task, plan) = try await model.createTask(
-                name: name, branch: branch, repoIds: repoIds)
+            let (task, plan) = inPlace
+                ? try await model.createInPlaceTask(name: name, repoIds: repoIds)
+                : try await model.createTask(name: name, branch: branch, repoIds: repoIds)
             await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
             startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
