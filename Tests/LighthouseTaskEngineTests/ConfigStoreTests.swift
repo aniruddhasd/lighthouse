@@ -42,7 +42,7 @@ final class ConfigStoreTests {
         #expect {
             _ = try self.store.load()
         } throws: { error in
-            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 4)
+            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 5)
         }
         // Never silently rewritten: byte-identical after the failed load.
         #expect(try Data(contentsOf: store.fileURL) == futureFile)
@@ -194,7 +194,7 @@ final class ConfigStoreTests {
     @Test func schemaVersionIsWrittenFromDayOne() throws {
         try store.save(.empty)
         let text = String(decoding: try Data(contentsOf: store.fileURL), as: UTF8.self)
-        #expect(text.contains(#""schemaVersion" : 4"#))
+        #expect(text.contains(#""schemaVersion" : 5"#))
     }
 
     // MARK: v3 → v4 (theme + start-view + beam preferences)
@@ -237,6 +237,41 @@ final class ConfigStoreTests {
         #expect(loaded.theme == "native")
         #expect(loaded.startView == "focus")
         #expect(loaded.showBeam == false)
+        #expect(loaded == config)
+    }
+
+    // MARK: v4 → v5 (terminal font size)
+
+    /// A real v4 file (written before the terminal font size existed) must load
+    /// and migrate: existing preferences preserved, the font size defaulted
+    /// rather than crashing or blanking.
+    @Test func v4FileMigratesToV5WithDefaultFontSize() throws {
+        let v4 = """
+        {"schemaVersion": 4, "worktreesRootOverride": null,
+         "hasCompletedSetup": true, "notificationsHintDismissed": false,
+         "theme": "native", "startView": "focus", "showBeam": false,
+         "repos": [], "tasks": []}
+        """
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(v4.utf8).write(to: store.fileURL)
+
+        let migrated = try store.load()
+        // Existing preferences survive.
+        #expect(migrated.theme == "native")
+        #expect(migrated.startView == "focus")
+        #expect(migrated.showBeam == false)
+        // The new field defaults.
+        #expect(migrated.terminalFontSize == LighthouseConfig.defaultTerminalFontSize)
+    }
+
+    /// A v5 file round-trips a non-default font size (fails if the field is
+    /// dropped or defaulted on the way through).
+    @Test func v5TerminalFontSizeRoundTrips() throws {
+        var config = sampleConfig()
+        config.terminalFontSize = 11
+        try store.save(config)
+        let loaded = try store.load()
+        #expect(loaded.terminalFontSize == 11)
         #expect(loaded == config)
     }
 }

@@ -25,6 +25,13 @@ public enum RepoRemovalError: Error, Sendable, Equatable {
     case unknownRepo(UUID)
 }
 
+extension Comparable {
+    /// Clamps the value into `range` (below → lowerBound, above → upperBound).
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 /// The app's observable core: config-backed repo registry and task list,
 /// per-task attention state, and the orchestration of TaskEngine + adapter
 /// for creation/resume/removal. Deliberately free of any UI import — every
@@ -51,6 +58,12 @@ public final class AppModel {
     public private(set) var theme: String = "beacon"
     public private(set) var startView: String = "harbor"
     public private(set) var showBeam: Bool = true
+    /// Terminal font point size (config schema v5), wired to every SwiftTerm
+    /// session and adjustable from Preferences. Kept in `terminalFontRange`.
+    public private(set) var terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize
+    /// Sane bounds for the terminal font size — the Preferences control and the
+    /// setter both clamp to this.
+    public static let terminalFontRange: ClosedRange<Double> = 9...24
     /// Injectable clock so ordering tests are deterministic.
     private let now: @Sendable () -> Date
     /// Debug-only tasks/repos (geometry + review probes): visible to the
@@ -111,6 +124,8 @@ public final class AppModel {
         theme = config.theme
         startView = config.startView
         showBeam = config.showBeam
+        // Clamp on load too: a hand-edited config can carry an out-of-range size.
+        terminalFontSize = config.terminalFontSize.clamped(to: Self.terminalFontRange)
         attention = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.state) })
         attentionSince = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
     }
@@ -162,6 +177,16 @@ public final class AppModel {
         try? persist()
     }
 
+    /// Persists the terminal font size (clamped to `terminalFontRange`). The
+    /// session layer applies it to every live terminal on change; best-effort,
+    /// no-op on a redundant set — mirrors `setShowBeam`.
+    public func setTerminalFontSize(_ value: Double) {
+        let clamped = value.clamped(to: Self.terminalFontRange)
+        guard terminalFontSize != clamped else { return }
+        terminalFontSize = clamped
+        try? persist()
+    }
+
     public func setWorktreesRootOverride(_ path: String?) throws {
         worktreesRootOverride = path
         try persist()
@@ -191,7 +216,8 @@ public final class AppModel {
             notificationsHintDismissed: notificationsHintDismissed,
             theme: theme,
             startView: startView,
-            showBeam: showBeam))
+            showBeam: showBeam,
+            terminalFontSize: terminalFontSize))
     }
 
     // MARK: - Repo registry
@@ -322,6 +348,57 @@ public final class AppModel {
         }
     }
 
+    /// In-place creation: the session runs in each selected repo's OWN checkout
+    /// (no worktree, no branch) — for investigation/learning. Attention hooks
+    /// ARE installed into the primary repo's `.claude/settings.local.json`
+    /// (merge semantics, git-excluded, reversed on removal) so the session still
+    /// drives the attention pipeline. Post-engine wiring failures roll back by
+    /// uninstalling those hooks — nothing on disk was branched or copied.
+    public func createInPlaceTask(
+        name: String, repoIds: [UUID]
+    ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
+        guard !repoIds.isEmpty else { throw TaskEngineError.noReposSelected }
+        let selected = try repoIds.map { id in
+            guard let repo = repos.first(where: { $0.id == id }) else {
+                throw TaskEngineError.unknownRepo(repoId: id)
+            }
+            return repo
+        }
+        var task = try await engine.createInPlaceTask(
+            name: name, adapterKind: adapter.kind, repos: selected)
+
+        do {
+            guard let primary = task.workspaces.first?.worktreeURL else {
+                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
+            }
+            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
+
+            let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
+            task.sessionRef = plan.sessionRef
+            tasks.append(task)
+            attention[task.id] = task.state
+            try persist()
+            return (task, plan)
+        } catch {
+            tasks.removeAll { $0.id == task.id }
+            attention.removeValue(forKey: task.id)
+            await removeInPlaceAttention(for: task)
+            throw error
+        }
+    }
+
+    /// Removes Lighthouse's attention hooks from every in-place workspace's real
+    /// repo `.claude/settings.local.json`. For worktree tasks the whole worktree
+    /// dir is deleted, taking the hooks with it — but an in-place repo is never
+    /// deleted, so its hooks must be uninstalled explicitly or they would
+    /// linger. Best-effort: a failure here must never block task removal.
+    private func removeInPlaceAttention(for task: TaskRecord) async {
+        for workspace in task.workspaces where workspace.isInPlace {
+            guard let repo = repos.first(where: { $0.id == workspace.repoId }) else { continue }
+            try? await adapter.removeWorkspaceAttention(from: repo.pathURL)
+        }
+    }
+
     /// Best-effort teardown of a task the engine created but whose post-engine
     /// wiring failed. Force-destroys regardless of hazards — the task was never
     /// live, so leaving its worktree/branch would only orphan on-disk debris a
@@ -364,6 +441,9 @@ public final class AppModel {
         _ task: TaskRecord, mode: TaskRemovalMode
     ) async throws -> TaskRemovalReport {
         let report = try await engine.removeTask(task, repos: repos, mode: mode)
+        // Worktree tasks lose their hooks when the worktree dir is deleted;
+        // in-place tasks keep their repo, so uninstall our hooks explicitly.
+        await removeInPlaceAttention(for: task)
         tasks.removeAll { $0.id == task.id }
         attention.removeValue(forKey: task.id)
         liveSessions.remove(task.id)

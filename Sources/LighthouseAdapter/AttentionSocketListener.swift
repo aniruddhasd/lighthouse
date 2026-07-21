@@ -123,6 +123,17 @@ public actor AttentionSocketListener {
         guard !core.isStarted else { throw AttentionSocketError.alreadyStarted }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Owner-only PARENT directory: no other user can traverse to the socket
+        // even in the brief window between bind and the explicit chmod below.
+        // This is thread-safe (a chmod of one path) — unlike a process-global
+        // umask, which would race the whole test/app process's concurrent
+        // directory creation and strip the execute bit off unrelated dirs.
+        // Fail secure: if we cannot lock the parent to owner-only, do NOT bind
+        // the socket inside a potentially world-traversable directory.
+        guard chmod(directory.path, 0o700) == 0 else {
+            let chmodErrno = errno  // capture before anything can perturb the global
+            throw AttentionSocketError.systemCallFailed(call: "chmod", errno: chmodErrno)
+        }
         unlink(path) // stale socket from a previous run
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -134,17 +145,11 @@ public actor AttentionSocketListener {
         withUnsafeMutableBytes(of: &address.sun_path) { raw in
             raw.copyBytes(from: Array(path.utf8))
         }
-        // Create the socket node owner-only FROM THE START: bind(2) honours the
-        // umask, so 0177 yields a 0600 node with no window between bind and the
-        // explicit chmod below where another process could connect. Restored
-        // immediately after bind (umask is process-global).
-        let previousUmask = umask(0o177)
         let bindResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        umask(previousUmask)
         guard bindResult == 0 else {
             let savedErrno = errno
             close(fd)

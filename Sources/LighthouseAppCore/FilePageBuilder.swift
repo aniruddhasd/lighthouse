@@ -49,8 +49,13 @@ public enum FilePageBuilder {
                 color: #999; background: rgba(128,128,128,0.08); user-select: none;
                 border-right: 1px solid rgba(128,128,128,0.25); }
             td.lh-line { padding: 0 10px; white-space: pre; }
+            /* ⌘F jump target highlight. */
+            tr.lh-hit td { background: rgba(255, 213, 0, 0.22); }
             #empty { color: #888; padding: 24px; text-align: center; }
-            @media (prefers-color-scheme: dark) { body { background:#1e1e1e; color:#ddd; } }
+            @media (prefers-color-scheme: dark) {
+                body { background:#1e1e1e; color:#ddd; }
+                tr.lh-hit td { background: rgba(255, 213, 0, 0.16); }
+            }
         </style>
         </head>
         <body>
@@ -74,6 +79,7 @@ public enum FilePageBuilder {
                 const body = document.createElement('tbody');
                 lines.forEach((line, i) => {
                     const row = document.createElement('tr');
+                    row.id = 'L' + (i + 1);       // ⌘F jump anchor (1-based)
                     const gutter = document.createElement('td');
                     gutter.className = 'lh-gutter';
                     gutter.textContent = String(i + 1);
@@ -86,6 +92,19 @@ public enum FilePageBuilder {
                 table.appendChild(body);
                 root.appendChild(table);
             }
+            // ⌘F content search installs this to scroll to + highlight one line.
+            // A no-op when the line is absent (empty file, out-of-range).
+            window.lighthouseScrollToLine = function (n) {
+                // Clear any prior highlight so repeated in-file jumps show only
+                // the current line.
+                document.querySelectorAll('tr.lh-hit').forEach(function (r) {
+                    r.classList.remove('lh-hit');
+                });
+                const row = document.getElementById('L' + n);
+                if (!row) { return; }
+                row.classList.add('lh-hit');
+                row.scrollIntoView({ block: 'center' });
+            };
             \(debugBlock)
         })();
         </script>

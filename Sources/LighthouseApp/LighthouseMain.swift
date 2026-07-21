@@ -24,6 +24,33 @@ struct LighthouseMain: App {
                     runtime.switcherPresented.toggle()
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                // ⌘P quick-open (Command, not Ctrl+P: Ctrl-P is a readline key
+                // the terminal owns). Only meaningful in Focus, where a task's
+                // file list exists.
+                Button("Find File…") {
+                    if runtime.nav.view == .focus { runtime.fileFinderPresented = true }
+                }
+                .keyboardShortcut("p", modifiers: .command)
+                .disabled(runtime.nav.view != .focus)
+                // Content search (git grep), Command-F/⇧⌘F not Ctrl-F (a readline
+                // key). Focus-only. ⌘F scopes to the open file, ⇧⌘F is
+                // repo/folder-wide — the VS Code split.
+                Button("Find in File…") {
+                    if runtime.nav.view == .focus {
+                        runtime.contentSearchScopeToFile = true
+                        runtime.contentSearchPresented = true
+                    }
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(runtime.nav.view != .focus)
+                Button("Find in Files…") {
+                    if runtime.nav.view == .focus {
+                        runtime.contentSearchScopeToFile = false
+                        runtime.contentSearchPresented = true
+                    }
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(runtime.nav.view != .focus)
             }
             // Cmd+T / Cmd+W for terminal tabs. Ctrl+T is deliberately NOT
             // used — it is a control byte that TUIs (Claude Code) intercept.

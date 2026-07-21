@@ -32,6 +32,22 @@ struct TerminalTab: Identifiable, Equatable {
 final class SessionRegistry {
     private(set) var controllers: [TabKey: TerminalController] = [:]
 
+    /// Current terminal font size, applied to new terminals at creation and to
+    /// every live terminal via `applyFontSize`. Seeded from the persisted
+    /// preference (`AppModel.terminalFontSize`) at launch.
+    private(set) var fontSize: CGFloat = TerminalFont.defaultSize
+
+    /// Sets the font size for future terminals AND re-fonts every live one, so
+    /// a Preferences change takes effect immediately without restarting a
+    /// session. SwiftTerm re-lays out on a font change.
+    func applyFontSize(_ size: CGFloat) {
+        fontSize = size
+        let font = TerminalFont.base(size: size)
+        for controller in controllers.values {
+            controller.terminalView.font = font
+        }
+    }
+
     /// Time to let the interactive shell initialise (rc files, ZLE) before
     /// typing the launch command — writing into the master before the line
     /// editor is up can drop or mangle the input. Real payloads confirm the
@@ -47,7 +63,7 @@ final class SessionRegistry {
         onExit: @escaping @MainActor (TabKey, Int32?) -> Void
     ) -> TerminalController {
         let key = TabKey(taskId: taskId, tabId: tabId)
-        let controller = controllers[key] ?? TerminalController(key: key)
+        let controller = controllers[key] ?? TerminalController(key: key, fontSize: fontSize)
         controller.onExit = onExit
         controllers[key] = controller
         controller.start(plan: plan, typingDelay: Self.commandTypingDelay)
@@ -122,7 +138,7 @@ final class TerminalController: NSObject {
     var onExit: (@MainActor (TabKey, Int32?) -> Void)?
     private var pendingCommand: String?
 
-    init(key: TabKey) {
+    init(key: TabKey, fontSize: CGFloat = TerminalFont.defaultSize) {
         self.key = key
         self.terminalView = LighthouseTerminalView(
             frame: NSRect(x: 0, y: 0, width: 640, height: 400))
@@ -130,9 +146,10 @@ final class TerminalController: NSObject {
         // JetBrains Mono (bundled) instead of SwiftTerm's default SF Mono;
         // SwiftTerm derives bold/italic from this base. Set before the view is
         // shown so the cell metrics are right from the first layout.
-        terminalView.font = TerminalFont.base
-        // Near-white default text on the near-black --termbg (SwiftTerm's
-        // default foreground is a dim grey); ANSI-colored output overrides it.
+        terminalView.font = TerminalFont.base(size: fontSize)
+        // Near-white default text on the dark-gray terminal background
+        // (SwiftTerm's default foreground is a dim grey; the gray bg keeps
+        // contrast comfortable, see TerminalFont); ANSI output overrides both.
         terminalView.nativeForegroundColor = TerminalFont.foreground
         terminalView.nativeBackgroundColor = TerminalFont.background
         terminalView.processDelegate = self

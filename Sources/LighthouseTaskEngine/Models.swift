@@ -46,19 +46,42 @@ public enum WorkspaceMergeState: String, Codable, Sendable, Equatable, CaseItera
     case conflicted
 }
 
-/// One repo's worktree within a task.
+/// One repo's worktree within a task — or, in in-place mode, the registered
+/// repo's OWN checkout (`isInPlace`), which Lighthouse must never destroy.
 public struct Workspace: Codable, Sendable, Equatable {
     public let repoId: UUID
     public var worktreePath: String
     public var mergeState: WorkspaceMergeState
+    /// True when this workspace IS the registered repo's own checkout
+    /// (`worktreePath == repo.path`) rather than a Lighthouse-created worktree —
+    /// investigation mode. When true, removal never deletes the directory or a
+    /// branch, and there is no merge-back. Absent in pre-2026-07-21 configs, so
+    /// it decodes to `false` (the historical all-worktree behaviour); the key is
+    /// nested inside TaskRecord and both-way tolerant (older builds ignore it on
+    /// read), so it needs no top-level config schema bump.
+    public var isInPlace: Bool
 
-    public init(repoId: UUID, worktreePath: String, mergeState: WorkspaceMergeState) {
+    public init(
+        repoId: UUID, worktreePath: String, mergeState: WorkspaceMergeState,
+        isInPlace: Bool = false
+    ) {
         self.repoId = repoId
         self.worktreePath = worktreePath
         self.mergeState = mergeState
+        self.isInPlace = isInPlace
     }
 
     public var worktreeURL: URL { URL(fileURLWithPath: worktreePath, isDirectory: true) }
+
+    /// Custom decode so a legacy workspace (no `isInPlace` key) loads as a
+    /// worktree — the only safe default for the removal path.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        repoId = try c.decode(UUID.self, forKey: .repoId)
+        worktreePath = try c.decode(String.self, forKey: .worktreePath)
+        mergeState = try c.decode(WorkspaceMergeState.self, forKey: .mergeState)
+        isInPlace = try c.decodeIfPresent(Bool.self, forKey: .isInPlace) ?? false
+    }
 }
 
 /// The unit of intent: a name, a branch, one workspace per repo it touches.
@@ -86,6 +109,13 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         self.sessionRef = sessionRef
         self.state = state
         self.workspaces = workspaces
+    }
+
+    /// True when every workspace runs in-place (investigation mode). A task is
+    /// created all-in-place or all-worktree — never mixed — so the UI keys its
+    /// merge/branch affordances off this. An empty task is not in-place.
+    public var isInPlace: Bool {
+        !workspaces.isEmpty && workspaces.allSatisfy(\.isInPlace)
     }
 }
 

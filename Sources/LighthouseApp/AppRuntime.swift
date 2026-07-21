@@ -33,6 +33,17 @@ final class AppRuntime {
 
     var selectedTaskId: UUID?
     var switcherPresented = false
+    /// Drives the ⌘P file-finder overlay (quick-open). On the runtime so the
+    /// global File-menu command can toggle it; the overlay itself is mounted in
+    /// Focus, where the active workbench (and thus the repo's file list) lives.
+    var fileFinderPresented = false
+    /// Drives the content-search overlay (git grep). Same Focus-only mounting
+    /// as the file finder.
+    var contentSearchPresented = false
+    /// Whether the content search opens scoped to the current file (⌘F, "find in
+    /// file") or repo/folder-wide (⇧⌘F, "find in files"). Set by the command
+    /// before presenting; read by the overlay on appear.
+    var contentSearchScopeToFile = false
     /// The task the user is confirming removal of, if any — drives the
     /// RemoveTaskSheet. On the runtime (not a view's @State) so any task
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading
@@ -81,6 +92,10 @@ final class AppRuntime {
         } catch {
             lastError = "Could not load config: \(error)"
         }
+        // Seed the terminal font size from persisted config so the first session
+        // opens at the chosen size (subsequent changes go through
+        // setTerminalFontSize, which also re-fonts live terminals).
+        registry.applyFontSize(CGFloat(model.terminalFontSize))
         // Seed the theme from persisted config (unknown value fails safe to
         // Beacon); each flip persists back through AppModel.
         let loadedModel = model
@@ -1069,10 +1084,16 @@ final class AppRuntime {
 
     // MARK: - Task + session flows
 
-    func createTaskAndStartSession(name: String, branch: String, repoIds: [UUID]) async {
+    /// `inPlace == false` (default) creates a worktree + branch per repo;
+    /// `inPlace == true` runs the session in each repo's own checkout, with no
+    /// worktree or branch, for investigation. `branch` is ignored when in-place.
+    func createTaskAndStartSession(
+        name: String, branch: String, repoIds: [UUID], inPlace: Bool = false
+    ) async {
         do {
-            let (task, plan) = try await model.createTask(
-                name: name, branch: branch, repoIds: repoIds)
+            let (task, plan) = inPlace
+                ? try await model.createInPlaceTask(name: name, repoIds: repoIds)
+                : try await model.createTask(name: name, branch: branch, repoIds: repoIds)
             await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
             startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
@@ -1106,6 +1127,13 @@ final class AppRuntime {
         } catch {
             lastError = String(describing: error)
         }
+    }
+
+    /// Preferences → terminal font size: persist it AND re-font every live
+    /// terminal immediately (the model clamps to its allowed range).
+    func setTerminalFontSize(_ size: Double) {
+        model.setTerminalFontSize(size)
+        registry.applyFontSize(CGFloat(model.terminalFontSize))
     }
 
     private func startAgentSession(taskId: UUID, plan: LaunchPlan) {

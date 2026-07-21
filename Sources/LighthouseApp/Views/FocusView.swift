@@ -213,6 +213,21 @@ struct FocusCenter: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
+        // ⌘P quick-open, over the whole center stage. Mounted here (not globally)
+        // so it has the live workbench — the file list and the viewer it opens
+        // into both belong to this task.
+        .overlay {
+            if runtime.fileFinderPresented, let workbench {
+                FileFinderOverlay(workbench: workbench)
+            }
+        }
+        // ⌘F content search, over the same center stage and live workbench.
+        .overlay {
+            if runtime.contentSearchPresented, let workbench {
+                ContentSearchOverlay(
+                    workbench: workbench, scopeToFile: runtime.contentSearchScopeToFile)
+            }
+        }
         .onAppear {
             guard workbench == nil else { return }
             ReviewDebug.stage("appear task=\(task.name)")
@@ -317,7 +332,11 @@ struct FocusTaskHeader: View {
                 ContextMeter(context: context)
             }
             navigatorToggle
-            mergeButton
+            // In-place tasks have no branch to merge — the session runs in the
+            // repo's own checkout, so a merge-back would be meaningless.
+            if !task.isInPlace {
+                mergeButton
+            }
         }
         .padding(.horizontal, 14)
         .frame(height: Theme.Metric.headerRow)

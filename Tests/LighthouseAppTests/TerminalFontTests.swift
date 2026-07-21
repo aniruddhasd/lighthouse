@@ -11,15 +11,24 @@ struct TerminalFontTests {
     /// app. If registration had failed, `base` would be the SF Mono fallback
     /// and the family name would differ.
     @Test func bundledFontRegistersAndResolvesToJetBrainsMono() {
-        let font = TerminalFont.base
+        let font = TerminalFont.base()
         #expect(font.familyName == TerminalFont.familyName)
-        #expect(font.pointSize == TerminalFont.size)
+        #expect(font.pointSize == TerminalFont.defaultSize)
     }
 
-    /// The default text color is near-white, not SwiftTerm's dim grey.
+    /// A requested size flows through to the resolved font — proving the
+    /// Preferences font-size control actually changes the terminal typeface.
+    @Test func baseHonorsRequestedSize() {
+        #expect(TerminalFont.base(size: 11).pointSize == 11)
+        #expect(TerminalFont.base(size: 18).pointSize == 18)
+    }
+
+    /// The default text color is a soft near-white (Ghostty-matched), still well
+    /// clear of SwiftTerm's dim grey default. 0.8 sits below #d0d2d5's 0.835 and
+    /// comfortably above the ~0.5 dim grey it replaces.
     @Test func defaultForegroundIsNearWhite() {
         let fg = TerminalFont.foreground.usingColorSpace(.sRGB)
-        #expect((fg?.brightnessComponent ?? 0) > 0.85)
+        #expect((fg?.brightnessComponent ?? 0) > 0.8)
     }
 
     /// A freshly-created terminal actually adopts the bundled font AND the
@@ -29,6 +38,6 @@ struct TerminalFontTests {
         let controller = TerminalController(key: TabKey(taskId: UUID(), tabId: UUID()))
         #expect(controller.terminalView.font.familyName == TerminalFont.familyName)
         let fg = controller.terminalView.nativeForegroundColor.usingColorSpace(.sRGB)
-        #expect((fg?.brightnessComponent ?? 0) > 0.85)
+        #expect((fg?.brightnessComponent ?? 0) > 0.8)
     }
 }
