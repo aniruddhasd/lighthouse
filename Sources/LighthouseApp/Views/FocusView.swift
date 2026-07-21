@@ -213,6 +213,14 @@ struct FocusCenter: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
+        // ⌘P quick-open, over the whole center stage. Mounted here (not globally)
+        // so it has the live workbench — the file list and the viewer it opens
+        // into both belong to this task.
+        .overlay {
+            if runtime.fileFinderPresented, let workbench {
+                FileFinderOverlay(workbench: workbench)
+            }
+        }
         .onAppear {
             guard workbench == nil else { return }
             ReviewDebug.stage("appear task=\(task.name)")

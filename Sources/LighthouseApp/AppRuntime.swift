@@ -33,6 +33,10 @@ final class AppRuntime {
 
     var selectedTaskId: UUID?
     var switcherPresented = false
+    /// Drives the ⌘P file-finder overlay (quick-open). On the runtime so the
+    /// global File-menu command can toggle it; the overlay itself is mounted in
+    /// Focus, where the active workbench (and thus the repo's file list) lives.
+    var fileFinderPresented = false
     /// The task the user is confirming removal of, if any — drives the
     /// RemoveTaskSheet. On the runtime (not a view's @State) so any task
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading

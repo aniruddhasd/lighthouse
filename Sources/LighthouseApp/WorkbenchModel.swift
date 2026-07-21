@@ -204,6 +204,14 @@ final class WorkbenchModel {
         }
     }
 
+    /// Flat, tracked-plus-untracked path list for the ⌘P finder — fetched fresh
+    /// each open (cheap `git ls-files`) so a just-created file is findable. An
+    /// I/O fault yields an empty list, never a crash.
+    func fileFinderPaths() async -> [String] {
+        guard let url = review.selectedWorktreeURL else { return [] }
+        return (try? await git.listFiles(worktree: url)) ?? []
+    }
+
     func loadFiles() async {
         guard let url = review.selectedWorktreeURL else { return }
         filesLoaded = true

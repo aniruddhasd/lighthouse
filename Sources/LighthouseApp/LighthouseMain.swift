@@ -24,6 +24,14 @@ struct LighthouseMain: App {
                     runtime.switcherPresented.toggle()
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                // ⌘P quick-open (Command, not Ctrl+P: Ctrl-P is a readline key
+                // the terminal owns). Only meaningful in Focus, where a task's
+                // file list exists.
+                Button("Find File…") {
+                    if runtime.nav.view == .focus { runtime.fileFinderPresented = true }
+                }
+                .keyboardShortcut("p", modifiers: .command)
+                .disabled(runtime.nav.view != .focus)
             }
             // Cmd+T / Cmd+W for terminal tabs. Ctrl+T is deliberately NOT
             // used — it is a control byte that TUIs (Claude Code) intercept.
