@@ -221,6 +221,13 @@ struct FocusCenter: View {
                 FileFinderOverlay(workbench: workbench)
             }
         }
+        // ⌘F content search, over the same center stage and live workbench.
+        .overlay {
+            if runtime.contentSearchPresented, let workbench {
+                ContentSearchOverlay(
+                    workbench: workbench, scopeToFile: runtime.contentSearchScopeToFile)
+            }
+        }
         .onAppear {
             guard workbench == nil else { return }
             ReviewDebug.stage("appear task=\(task.name)")

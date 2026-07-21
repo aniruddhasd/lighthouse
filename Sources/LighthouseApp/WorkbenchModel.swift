@@ -70,8 +70,52 @@ final class ContentViewerModel {
             hasContent = true
             renderError = nil
             if let file = request.scrollToFile { scrollTo(file: file, in: webView) }
+            if let line = request.scrollToLine { scrollTo(line: line, in: webView) }
+            // Hand keyboard focus to the viewer so arrow keys / page-up-down
+            // scroll the freshly opened content without a click first — the
+            // ⌘P/⌘F flows dismiss their palette and would otherwise leave focus
+            // nowhere. Deferred one runloop so the palette has torn down and the
+            // web view is in the window's responder chain.
+            DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
         } catch {
             renderError = String(describing: error)
+        }
+    }
+
+    /// The file page installs `window.lighthouseScrollToLine` at the end of its
+    /// bootstrap; poll briefly for it (same race as the diff bridge) before
+    /// asking it to scroll to and highlight the ⌘F target line.
+    private func scrollTo(line: Int, in webView: WKWebView) {
+        Task { @MainActor in
+            for _ in 0..<40 {
+                let ready = await Self.functionReady("lighthouseScrollToLine", in: webView)
+                if ready {
+                    webView.evaluateJavaScript(
+                        "window.lighthouseScrollToLine(\(line))", completionHandler: nil)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    /// Scroll the ALREADY-loaded file page to `line` without reloading — used by
+    /// repeated in-file ⌘F jumps, where reloading the same page would race the
+    /// scroll bridge (the outgoing page answers the poll, then the reload snaps
+    /// back to the top). The bridge is already installed, so this lands cleanly.
+    func scrollToLine(_ line: Int) {
+        guard let webView else { return }
+        scrollTo(line: line, in: webView)
+        // Same focus hand-off as a full load, so arrow keys scroll the file
+        // immediately after an in-file ⌘F jump without a click first.
+        DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
+    }
+
+    private static func functionReady(_ name: String, in webView: WKWebView) async -> Bool {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript(
+                "typeof window.\(name) === 'function'"
+            ) { value, _ in continuation.resume(returning: (value as? Bool) ?? false) }
         }
     }
 
@@ -133,6 +177,11 @@ final class WorkbenchModel {
     /// The path/label of the current viewer selection, for the viewer header
     /// (spec §5.2). Real (the selected path / short hash), never fabricated.
     private(set) var viewerTitle: String?
+
+    /// Repo-relative path of the file currently shown in the viewer, or nil when
+    /// the viewer holds something that is not a single file (a commit diff, or
+    /// nothing yet). Drives ⌘F's in-file search scope.
+    private(set) var currentFilePath: String?
 
     // Files surface (browser tree, lazy).
     private(set) var files: [FileTreeNode] = []
@@ -212,6 +261,16 @@ final class WorkbenchModel {
         return (try? await git.listFiles(worktree: url)) ?? []
     }
 
+    /// ⌘F content search over the active worktree (tracked files). Throws on a
+    /// bad pattern / missing folder so the overlay can show git's reason; an
+    /// empty pattern or no worktree yields no matches.
+    func contentSearch(pattern: String, regex: Bool, folder: String?) async throws -> [GrepMatch] {
+        guard let url = review.selectedWorktreeURL else { return [] }
+        return try await git.grep(
+            worktree: url, pattern: pattern, regex: regex,
+            caseSensitive: false, folder: folder)
+    }
+
     func loadFiles() async {
         guard let url = review.selectedWorktreeURL else { return }
         filesLoaded = true
@@ -246,22 +305,34 @@ final class WorkbenchModel {
         guard let patch = review.latestPatch else { return }
         viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
         viewerTitle = path
+        currentFilePath = path
         bodyState.activateViewer()
     }
 
     /// Files: render the picked file (binary/too-large → safe placeholders).
-    func selectFile(_ path: String) async {
+    /// `line`, when set (the ⌘F content-search jump), scrolls to and highlights
+    /// that 1-based line once the page loads.
+    func selectFile(_ path: String, line: Int? = nil) async {
         guard let url = review.selectedWorktreeURL else { return }
+        // Already showing this file (repeated in-file ⌘F jump): just scroll —
+        // reloading the identical page races the scroll bridge back to the top.
+        if path == currentFilePath, let line {
+            viewer.scrollToLine(line)
+            bodyState.activateViewer()
+            return
+        }
         do {
             let contents = try await git.fileContents(worktree: url, relativePath: path)
-            viewer.apply(NavigatorPresenter.fileSelection(contents: contents, filename: path))
+            viewer.apply(NavigatorPresenter.fileSelection(
+                contents: contents, filename: path, scrollToLine: line))
         } catch {
             // A read fault (traversal, missing) becomes an escaped message page,
             // never a crash.
             viewer.apply(.file(html: FilePageBuilder.page(
-                content: "Could not open \(path): \(error)", filename: path)))
+                content: "Could not open \(path): \(error)", filename: path), scrollToLine: nil))
         }
         viewerTitle = path
+        currentFilePath = path
         bodyState.activateViewer()
     }
 
@@ -274,9 +345,10 @@ final class WorkbenchModel {
         } catch {
             viewer.apply(.file(html: FilePageBuilder.page(
                 content: "Could not load commit \(commit.shortHash): \(error)",
-                filename: commit.shortHash)))
+                filename: commit.shortHash), scrollToLine: nil))
         }
         viewerTitle = commit.shortHash
+        currentFilePath = nil  // a commit diff is not a single file
         bodyState.activateViewer()
     }
 }

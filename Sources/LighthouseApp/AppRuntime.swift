@@ -37,6 +37,13 @@ final class AppRuntime {
     /// global File-menu command can toggle it; the overlay itself is mounted in
     /// Focus, where the active workbench (and thus the repo's file list) lives.
     var fileFinderPresented = false
+    /// Drives the content-search overlay (git grep). Same Focus-only mounting
+    /// as the file finder.
+    var contentSearchPresented = false
+    /// Whether the content search opens scoped to the current file (⌘F, "find in
+    /// file") or repo/folder-wide (⇧⌘F, "find in files"). Set by the command
+    /// before presenting; read by the overlay on appear.
+    var contentSearchScopeToFile = false
     /// The task the user is confirming removal of, if any — drives the
     /// RemoveTaskSheet. On the runtime (not a view's @State) so any task
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading

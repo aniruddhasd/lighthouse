@@ -435,6 +435,55 @@ public actor GitClient {
             .map { String(decoding: $0, as: UTF8.self) }
     }
 
+    /// `git grep` for the ⌘F content search. `-I` skips binary files, `-z -n`
+    /// gives the `path\0line\0text\n` records parsed below, `--no-color` keeps
+    /// the text clean. `regex` picks extended-regex (`-E`) vs a literal string
+    /// (`--fixed-strings`); `caseSensitive == false` adds `-i`. The pattern
+    /// rides as `-e <pattern>` (never positional, so a leading `-` is data, not
+    /// an option) and `--end-of-options`/`--` fence off the optional folder
+    /// pathspec. Exit 1 is git grep's "no matches" — an empty result, not an
+    /// error; a bad pattern (unbalanced regex) or a missing folder exits >1 and
+    /// surfaces as `.commandFailed` with git's own message.
+    public func grep(
+        worktree: URL, pattern: String, regex: Bool, caseSensitive: Bool,
+        folder: String? = nil, limit: Int = 500
+    ) async throws -> [GrepMatch] {
+        guard !pattern.isEmpty else { return [] }
+        var arguments = ["grep", "--no-color", "-n", "-I", "-z"]
+        arguments.append(regex ? "-E" : "--fixed-strings")
+        if !caseSensitive { arguments.append("-i") }
+        arguments.append(contentsOf: ["-e", pattern, "--end-of-options", "--"])
+        if let folder, !folder.isEmpty { arguments.append(folder) }
+
+        let result = try await run(arguments, in: worktree)
+        switch result.exitCode {
+        case 0: break
+        case 1: return []  // git grep: no matches
+        default: throw classify(result, arguments: arguments, in: worktree)
+        }
+        return Self.parseGrep(result.stdout, limit: limit)
+    }
+
+    /// Parses `git grep -z -n` output: newline-separated records, each
+    /// `path\0lineNumber\0lineText`. maxSplits keeps any (improbable) NUL in the
+    /// text intact; a record that is malformed or lacks a numeric line is
+    /// skipped rather than fabricated.
+    static func parseGrep(_ data: Data, limit: Int) -> [GrepMatch] {
+        var matches: [GrepMatch] = []
+        for record in data.split(separator: UInt8(0x0A), omittingEmptySubsequences: true) {
+            let fields = record.split(
+                separator: UInt8(0), maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3,
+                  let line = Int(String(decoding: fields[1], as: UTF8.self)) else { continue }
+            matches.append(GrepMatch(
+                path: String(decoding: fields[0], as: UTF8.self),
+                line: line,
+                text: String(decoding: fields[2], as: UTF8.self)))
+            if matches.count >= limit { break }
+        }
+        return matches
+    }
+
     /// Reads a repo file for the content viewer. This is a FILESYSTEM read,
     /// not a git call, so it carries its own hard boundary: the worktree root
     /// and the resolved target are both canonicalized with realpath(3), then

@@ -35,7 +35,7 @@ struct NavigatorPresenterTests {
 
     @Test func binaryFileMapsToPlaceholderNotContentAndNeverThrows() {
         let request = NavigatorPresenter.fileSelection(contents: .binary, filename: "blob.bin")
-        guard case .file(let html) = request else { Issue.record("expected .file"); return }
+        guard case .file(let html, _) = request else { Issue.record("expected .file"); return }
         // The placeholder message is present (as base64, per the escaped renderer).
         #expect(html.contains(Data("Binary file — not shown.".utf8).base64EncodedString()))
         #expect(request.scrollToFile == nil)
@@ -44,7 +44,7 @@ struct NavigatorPresenterTests {
     @Test func tooLargeFileMapsToSizeMessagePlaceholder() {
         let request = NavigatorPresenter.fileSelection(
             contents: .tooLarge(bytes: 5_242_880), filename: "huge.bin")
-        guard case .file(let html) = request else { Issue.record("expected .file"); return }
+        guard case .file(let html, _) = request else { Issue.record("expected .file"); return }
         #expect(html.contains(Data("File is too large to display (5242880 bytes).".utf8)
             .base64EncodedString()))
     }

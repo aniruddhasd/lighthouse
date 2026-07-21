@@ -45,13 +45,15 @@ public enum ViewerRequest: Equatable, Sendable {
     /// A rendered diff page (diff2html). `scrollToFile`, when set, is the
     /// repo-relative path the viewer scrolls to after the page loads.
     case diff(html: String, scrollToFile: String?)
-    /// A rendered read-only file page.
-    case file(html: String)
+    /// A rendered read-only file page. `scrollToLine`, when set, is the 1-based
+    /// line the viewer scrolls to and highlights after the page loads (the ⌘F
+    /// content-search jump).
+    case file(html: String, scrollToLine: Int?)
 
     public var html: String {
         switch self {
         case .diff(let html, _): return html
-        case .file(let html): return html
+        case .file(let html, _): return html
         }
     }
 
@@ -59,6 +61,13 @@ public enum ViewerRequest: Equatable, Sendable {
         switch self {
         case .diff(_, let file): return file
         case .file: return nil
+        }
+    }
+
+    public var scrollToLine: Int? {
+        switch self {
+        case .diff: return nil
+        case .file(_, let line): return line
         }
     }
 }
@@ -85,8 +94,10 @@ public enum NavigatorPresenter {
     /// placeholders (never a throw, never raw content — the placeholder message
     /// is carried through the SAME escaped renderer as real file content, so it
     /// cannot itself become an injection vector).
-    public static func fileSelection(contents: FileContents, filename: String) -> ViewerRequest {
-        .file(html: filePage(for: contents, filename: filename))
+    public static func fileSelection(
+        contents: FileContents, filename: String, scrollToLine: Int? = nil
+    ) -> ViewerRequest {
+        .file(html: filePage(for: contents, filename: filename), scrollToLine: scrollToLine)
     }
 
     /// The file → HTML step in isolation (the piece worth testing directly:

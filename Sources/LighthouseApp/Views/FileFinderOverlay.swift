@@ -90,6 +90,8 @@ struct FileFinderOverlay: View {
                 // keeps filtering; .handled stops the caret from jumping instead.
                 .onKeyPress(.downArrow) { move(1, count: results.count); return .handled }
                 .onKeyPress(.upArrow) { move(-1, count: results.count); return .handled }
+                // Swallow ⇥ so it can't move focus into the terminal behind us.
+                .onKeyPress(keys: [.tab]) { _ in .handled }
             Keycap(text: "esc")
         }
         .padding(.horizontal, 16)
