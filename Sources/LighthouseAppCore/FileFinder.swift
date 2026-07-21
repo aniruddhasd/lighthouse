@@ -36,8 +36,15 @@ public enum FileFinder {
     /// full path. A basename hit is lifted above every path-only hit by a fixed
     /// offset larger than any achievable `FuzzyMatcher` score for these lengths.
     static func score(query: String, path: String) -> Int? {
-        let basename = String(path.split(separator: "/").last ?? Substring(path))
-        if let base = FuzzyMatcher.score(query: query, candidate: basename) {
+        // Slice the basename off the last "/" rather than split(separator:),
+        // which would allocate a [Substring] for every path on every keystroke.
+        let basename: Substring
+        if let slash = path.lastIndex(of: "/") {
+            basename = path[path.index(after: slash)...]
+        } else {
+            basename = Substring(path)
+        }
+        if let base = FuzzyMatcher.score(query: query, candidate: String(basename)) {
             return base + basenameBonus
         }
         return FuzzyMatcher.score(query: query, candidate: path)

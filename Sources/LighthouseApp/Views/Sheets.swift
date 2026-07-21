@@ -72,7 +72,7 @@ struct CreateTaskSheet: View {
                 // Names exactly what's missing so the disabled button is never a
                 // dead end. Hidden once the form is complete (or while creating).
                 if !creating, !missingRequirements.isEmpty {
-                    Text("Add \(Self.humanList(missingRequirements)) to continue.")
+                    Text("Add \(ListFormatter.localizedString(byJoining: missingRequirements)) to continue.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -104,16 +104,6 @@ struct CreateTaskSheet: View {
         if !inPlace && branch.isEmpty { missing.append("a branch name") }
         if selectedRepoIds.isEmpty { missing.append("a repo") }
         return missing
-    }
-
-    /// Joins fragments into natural English: "a", "a and b", "a, b, and c".
-    private static func humanList(_ items: [String]) -> String {
-        switch items.count {
-        case 0: return ""
-        case 1: return items[0]
-        case 2: return "\(items[0]) and \(items[1])"
-        default: return items.dropLast().joined(separator: ", ") + ", and " + items[items.count - 1]
-        }
     }
 }
 

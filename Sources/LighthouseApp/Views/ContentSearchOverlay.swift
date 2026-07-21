@@ -270,6 +270,10 @@ struct ContentSearchOverlay: View {
     /// pause, so holding a key doesn't fire a grep per character.
     private func scheduleSearch() {
         searchTask?.cancel()
+        // Clear the spinner at schedule time (we're debouncing, not yet
+        // grepping); the debounced run flips it back on. Belt-and-braces with
+        // the generation guard so the indicator can never linger.
+        searching = false
         searchGeneration += 1
         let generation = searchGeneration
         let pattern = query

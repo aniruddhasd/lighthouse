@@ -131,7 +131,8 @@ public actor AttentionSocketListener {
         // Fail secure: if we cannot lock the parent to owner-only, do NOT bind
         // the socket inside a potentially world-traversable directory.
         guard chmod(directory.path, 0o700) == 0 else {
-            throw AttentionSocketError.systemCallFailed(call: "chmod", errno: errno)
+            let chmodErrno = errno  // capture before anything can perturb the global
+            throw AttentionSocketError.systemCallFailed(call: "chmod", errno: chmodErrno)
         }
         unlink(path) // stale socket from a previous run
 
