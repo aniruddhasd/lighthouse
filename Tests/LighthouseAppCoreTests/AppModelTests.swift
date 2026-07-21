@@ -512,4 +512,97 @@ final class AppModelTests {
         #expect(filtered.map(\.id) == [beta.id, alpha.id])
         #expect(model.switcherEntries(query: "zzz").isEmpty)
     }
+
+    // MARK: - Clone & register (spec option D) — failures first
+
+    @Test func cloneWithEmptyURLRejectedBeforeCloning() async throws {
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: "   ", destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .invalidRemoteURL("   ")
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneWithOptionLookalikeURLRejected() async throws {
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: "--upload-pack=/tmp/pwn", destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .invalidRemoteURL("--upload-pack=/tmp/pwn")
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneIntoExistingDestinationRefused() async throws {
+        let source = try fixtures.cleanRepo()
+        // A folder already occupying the derived destination name.
+        let occupied = fixtures.root.appendingPathComponent(
+            source.path.lastPathComponent, isDirectory: true)
+        try FileManager.default.createDirectory(at: occupied, withIntermediateDirectories: true)
+
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: source.path.path, destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .destinationExists(path: occupied.path)
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneIntoMissingParentRejectedBeforeCloning() async throws {
+        let source = try fixtures.cleanRepo()
+        let ghostParent = fixtures.root.appendingPathComponent("no-such-parent")
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: source.path.path, destinationParent: ghostParent)
+        } throws: { error in
+            error as? RepoRegistrationError == .pathDoesNotExist(ghostParent.path)
+        }
+    }
+
+    // MARK: - Clone & register — happy path
+
+    @Test func cloneAndRegisterClonesThenRegisters() async throws {
+        let source = try fixtures.cleanRepo()
+        let parent = fixtures.root.appendingPathComponent("clones", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let registered = try await model.cloneAndRegister(
+            remoteURL: source.path.path, destinationParent: parent)
+
+        // Registered against the freshly-cloned working tree, base auto-detected.
+        let expectedPath = parent.appendingPathComponent(source.path.lastPathComponent)
+            .resolvingSymlinksInPath().path
+        #expect(registered.path == expectedPath)
+        #expect(registered.baseBranch == "main")
+        #expect(model.repos.map(\.id) == [registered.id])
+        // Survives a reload — it is an ordinary registration.
+        #expect(try ConfigStore(directory: storeDirectory).load().repos.count == 1)
+    }
+
+    @Test func cloneAndRegisterRespectsFolderNameOverride() async throws {
+        let source = try fixtures.cleanRepo()
+        let parent = fixtures.root.appendingPathComponent("clones2", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let registered = try await model.cloneAndRegister(
+            remoteURL: source.path.path, destinationParent: parent, folderName: "renamed")
+
+        #expect(registered.path.hasSuffix("/renamed"))
+        #expect(FileManager.default.fileExists(atPath: registered.path))
+    }
+
+    // MARK: - repoName derivation
+
+    @Test func repoNameStripsGitSuffixAcrossURLShapes() {
+        #expect(AppModel.repoName(fromURL: "git@github.com:org/repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo/") == "repo")
+        #expect(AppModel.repoName(fromURL: "git@host:repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "") == nil)
+        #expect(AppModel.repoName(fromURL: "/") == nil)
+    }
 }

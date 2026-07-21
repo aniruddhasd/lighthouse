@@ -1,5 +1,6 @@
 import SwiftUI
 import LighthouseAppCore
+import LighthouseGit
 import LighthouseTaskEngine
 
 struct CreateTaskSheet: View {
@@ -193,60 +194,150 @@ struct RemoveTaskSheet: View {
 struct RegisterRepoSheet: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.dismiss) private var dismiss
+
+    /// Register an existing local checkout, or clone a remote for keeps into a
+    /// directory the user chooses (spec option D). Clone mode is a convenience
+    /// over the same registration — Lighthouse never owns the clone.
+    private enum Mode: Hashable { case localClone, cloneFromURL }
+    @State private var mode: Mode = .localClone
+
     @State private var path = ""
     @State private var baseBranch = "main"
     @State private var setupScript = ""
     @State private var envCopyList = ""
     @State private var working = false
 
+    // Clone-from-URL mode.
+    @State private var remoteURL = ""
+    @State private var destinationParent: URL?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Register Repo").font(.headline)
-            HStack {
-                TextField("Path to local clone", text: $path)
-                Button("Choose…") {
-                    let panel = NSOpenPanel()
-                    panel.canChooseDirectories = true
-                    panel.canChooseFiles = false
-                    if panel.runModal() == .OK, let url = panel.url {
-                        path = url.path
-                        // Auto-detect the base branch from the clone's HEAD.
-                        Task {
-                            baseBranch = await runtime.model.suggestBaseBranch(at: url)
-                        }
-                    }
-                }
+
+            Picker("Source", selection: $mode) {
+                Text("Local clone").tag(Mode.localClone)
+                Text("Clone from URL").tag(Mode.cloneFromURL)
             }
-            TextField("Base branch (auto-detected)", text: $baseBranch)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch mode {
+            case .localClone: localCloneFields
+            case .cloneFromURL: cloneFromURLFields
+            }
+
             DisclosureGroup("Advanced (optional)") {
                 TextField("Setup script (relative to repo)", text: $setupScript)
                 TextField("Env files to copy (comma-separated)", text: $envCopyList)
             }
+
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button(working ? "Checking…" : "Register") {
-                    working = true
-                    Task {
-                        do {
-                            _ = try await runtime.model.registerRepo(
-                                path: URL(fileURLWithPath: path, isDirectory: true),
-                                baseBranch: baseBranch,
-                                setupScript: setupScript.isEmpty ? nil : setupScript,
-                                envCopyList: envEntries)
-                            dismiss()
-                        } catch {
-                            runtime.lastError = describeRegistration(error)
-                        }
-                        working = false
-                    }
+                switch mode {
+                case .localClone: registerButton
+                case .cloneFromURL: cloneButton
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(working || path.isEmpty || baseBranch.isEmpty)
             }
         }
         .padding(20)
         .frame(width: 460)
+    }
+
+    @ViewBuilder private var localCloneFields: some View {
+        HStack {
+            TextField("Path to local clone", text: $path)
+            Button("Choose…") {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                if panel.runModal() == .OK, let url = panel.url {
+                    path = url.path
+                    // Auto-detect the base branch from the clone's HEAD.
+                    Task { baseBranch = await runtime.model.suggestBaseBranch(at: url) }
+                }
+            }
+        }
+        TextField("Base branch (auto-detected)", text: $baseBranch)
+    }
+
+    @ViewBuilder private var cloneFromURLFields: some View {
+        TextField("Remote URL (git@… or https://…)", text: $remoteURL)
+            .font(.system(.body, design: .monospaced))
+        HStack {
+            TextField("Destination folder", text: .constant(destinationParent?.path ?? ""))
+                .disabled(true)
+            Button("Choose parent…") {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                if panel.runModal() == .OK { destinationParent = panel.url }
+            }
+        }
+        // The exact directory the clone will land in — no surprises.
+        if let resolved = resolvedDestination {
+            Text("Clones into \(resolved)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        } else {
+            Text("The base branch is auto-detected from the clone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var registerButton: some View {
+        Button(working ? "Checking…" : "Register") {
+            working = true
+            Task {
+                do {
+                    _ = try await runtime.model.registerRepo(
+                        path: URL(fileURLWithPath: path, isDirectory: true),
+                        baseBranch: baseBranch,
+                        setupScript: setupScript.isEmpty ? nil : setupScript,
+                        envCopyList: envEntries)
+                    dismiss()
+                } catch {
+                    runtime.lastError = describeRegistration(error)
+                }
+                working = false
+            }
+        }
+        .keyboardShortcut(.defaultAction)
+        .disabled(working || path.isEmpty || baseBranch.isEmpty)
+    }
+
+    @ViewBuilder private var cloneButton: some View {
+        Button(working ? "Cloning…" : "Clone & Register") {
+            guard let parent = destinationParent else { return }
+            working = true
+            Task {
+                do {
+                    _ = try await runtime.model.cloneAndRegister(
+                        remoteURL: remoteURL,
+                        destinationParent: parent,
+                        setupScript: setupScript.isEmpty ? nil : setupScript,
+                        envCopyList: envEntries)
+                    dismiss()
+                } catch {
+                    runtime.lastError = describeRegistration(error)
+                }
+                working = false
+            }
+        }
+        .keyboardShortcut(.defaultAction)
+        .disabled(working || remoteURL.isEmpty || destinationParent == nil)
+    }
+
+    /// The full path the clone will occupy, once a URL and parent are both
+    /// known — mirrors `AppModel.cloneAndRegister`'s naming so the preview never
+    /// disagrees with where the clone actually lands.
+    private var resolvedDestination: String? {
+        guard let parent = destinationParent,
+              let name = AppModel.repoName(fromURL: remoteURL) else { return nil }
+        return parent.appendingPathComponent(name, isDirectory: true).path
     }
 
     private var envEntries: [String]? {
@@ -257,6 +348,16 @@ struct RegisterRepoSheet: View {
     }
 
     private func describeRegistration(_ error: any Error) -> String {
+        if let clone = error as? RepoCloneError {
+            switch clone {
+            case .launchFailed(let reason):
+                return "Could not launch git to clone: \(reason)"
+            case .cloneFailed(let stderr):
+                // git's own words — likely auth (try SSH or cache a credential)
+                // or a bad URL. Reported verbatim rather than paraphrased.
+                return "Clone failed:\n\(stderr)"
+            }
+        }
         guard let error = error as? RepoRegistrationError else {
             return String(describing: error)
         }
@@ -273,6 +374,10 @@ struct RegisterRepoSheet: View {
             return "'\(baseBranch)' is not a valid git branch name."
         case .baseBranchMissing(let path, let baseBranch):
             return "Branch '\(baseBranch)' does not exist in \(path)."
+        case .invalidRemoteURL(let url):
+            return "'\(url)' is not a usable git remote URL."
+        case .destinationExists(let path):
+            return "\(path) already exists — choose a different folder or remove it first."
         }
     }
 }

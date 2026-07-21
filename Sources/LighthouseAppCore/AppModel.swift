@@ -17,6 +17,12 @@ public enum RepoRegistrationError: Error, Sendable, Equatable {
     /// `--end-of-options` guard in every GitClient invocation.
     case invalidBaseBranchName(String)
     case baseBranchMissing(path: String, baseBranch: String)
+    /// The remote URL is empty, option-lookalike (leading `-`), or yields no
+    /// usable folder name. Rejected before any clone runs.
+    case invalidRemoteURL(String)
+    /// The clone's target directory already exists — refuse rather than clone
+    /// into or over it. The caller decides whether to register it as-is.
+    case destinationExists(path: String)
 }
 
 public enum RepoRemovalError: Error, Sendable, Equatable {
@@ -78,6 +84,7 @@ public final class AppModel {
     private let store: ConfigStore
     private let engine: TaskEngine
     private let git: GitClient
+    private let cloner: RepoCloner
     private let adapter: any AgentAdapter
     private let socketPath: URL
     private let loginShell: String
@@ -87,6 +94,7 @@ public final class AppModel {
         socketPath: URL,
         adapter: any AgentAdapter,
         git: GitClient = GitClient(),
+        cloner: RepoCloner = RepoCloner(),
         loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -94,6 +102,7 @@ public final class AppModel {
         self.socketPath = socketPath
         self.adapter = adapter
         self.git = git
+        self.cloner = cloner
         self.engine = TaskEngine(git: git)
         self.loginShell = loginShell
         self.now = now
@@ -264,6 +273,74 @@ public final class AppModel {
         repos.append(repo)
         try persist()
         return repo
+    }
+
+    /// Clones `remoteURL` into `destinationParent/<name>` and registers the
+    /// result — the "download for keeps" path (spec option D). Lighthouse does
+    /// NOT own the clone: it lands in a directory the user chose and removal
+    /// never deletes it, exactly as if they had cloned it by hand. After the
+    /// clone this is byte-for-byte the normal `registerRepo` flow, so every
+    /// downstream guard (git root, base branch exists, not already registered)
+    /// still applies.
+    ///
+    /// All cheap pre-flight (URL, folder name, parent, destination) runs BEFORE
+    /// the expensive clone, so a bad request fails instantly. `folderName`
+    /// overrides the name derived from the URL; the base branch is auto-detected
+    /// from the fresh clone.
+    @discardableResult
+    public func cloneAndRegister(
+        remoteURL: String,
+        destinationParent: URL,
+        folderName: String? = nil,
+        setupScript: String? = nil,
+        envCopyList: [String]? = nil
+    ) async throws -> RepoConfig {
+        let url = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A leading `-` would ride into git's option parser; `--` fences it in
+        // RepoCloner, but rejecting it here keeps a nonsense URL out entirely.
+        guard !url.isEmpty, !url.hasPrefix("-") else {
+            throw RepoRegistrationError.invalidRemoteURL(remoteURL)
+        }
+        let requested = folderName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let name = (requested?.isEmpty == false ? requested : Self.repoName(fromURL: url)),
+              // No path separators or dot-segments: the name is a single
+              // component appended to a directory the user chose — never a way
+              // to escape it.
+              !name.contains("/"), name != ".", name != ".." else {
+            throw RepoRegistrationError.invalidRemoteURL(remoteURL)
+        }
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: destinationParent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw RepoRegistrationError.pathDoesNotExist(destinationParent.path)
+        }
+        let destination = destinationParent.appendingPathComponent(name, isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw RepoRegistrationError.destinationExists(path: destination.path)
+        }
+
+        try await cloner.clone(url: url, into: destination)
+        let baseBranch = await suggestBaseBranch(at: destination)
+        return try await registerRepo(
+            path: destination, baseBranch: baseBranch,
+            setupScript: setupScript, envCopyList: envCopyList)
+    }
+
+    /// The folder name a clone URL lands in: the last path component with any
+    /// trailing `.git` and slashes stripped. Handles both scp-style
+    /// (`git@host:org/repo.git`) and URL-style (`https://host/org/repo.git`)
+    /// remotes; returns nil when nothing usable remains.
+    public static func repoName(fromURL url: String) -> String? {
+        var s = Substring(url)
+        while s.hasSuffix("/") { s = s.dropLast() }
+        if let slash = s.lastIndex(of: "/") {
+            s = s[s.index(after: slash)...]
+        } else if let colon = s.lastIndex(of: ":") {
+            s = s[s.index(after: colon)...]
+        }
+        if s.hasSuffix(".git") { s = s.dropLast(4) }
+        return s.isEmpty ? nil : String(s)
     }
 
     /// Suggests a base branch for a not-yet-registered clone: its current
