@@ -443,13 +443,15 @@ public actor GitClient {
     /// an option) and `--end-of-options`/`--` fence off the optional folder
     /// pathspec. Exit 1 is git grep's "no matches" — an empty result, not an
     /// error; a bad pattern (unbalanced regex) or a missing folder exits >1 and
-    /// surfaces as `.commandFailed` with git's own message.
+    /// surfaces as `.commandFailed` with git's own message. `-m <limit>` caps
+    /// matches PER FILE so one match-dense file can't flood stdout before the
+    /// total is capped in `parseGrep`.
     public func grep(
         worktree: URL, pattern: String, regex: Bool, caseSensitive: Bool,
         folder: String? = nil, limit: Int = 500
     ) async throws -> [GrepMatch] {
         guard !pattern.isEmpty else { return [] }
-        var arguments = ["grep", "--no-color", "-n", "-I", "-z"]
+        var arguments = ["grep", "--no-color", "-n", "-I", "-z", "-m", String(limit)]
         arguments.append(regex ? "-E" : "--fixed-strings")
         if !caseSensitive { arguments.append("-i") }
         arguments.append(contentsOf: ["-e", pattern, "--end-of-options", "--"])
@@ -468,6 +470,11 @@ public actor GitClient {
     /// `path\0lineNumber\0lineText`. maxSplits keeps any (improbable) NUL in the
     /// text intact; a record that is malformed or lacks a numeric line is
     /// skipped rather than fabricated.
+    ///
+    /// Caveat: `git grep -z` NUL-terminates only the FILENAME, not the record —
+    /// the record separator stays newline. git grep has no full-NUL mode, so a
+    /// tracked file whose NAME contains a literal newline (vanishingly rare)
+    /// would split mid-path here; such a record is dropped, never mis-attributed.
     static func parseGrep(_ data: Data, limit: Int) -> [GrepMatch] {
         var matches: [GrepMatch] = []
         for record in data.split(separator: UInt8(0x0A), omittingEmptySubsequences: true) {
