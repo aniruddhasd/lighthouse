@@ -47,6 +47,10 @@ final class ReviewPaneModel {
 
     private var watcher: FileSystemWatcher?
     private var refresher: DiffRefresher?
+    /// Whether the review surface is currently on screen. Remembered (not just
+    /// pushed to the refresher) so a refresher recreated by a repo switch
+    /// (`restartForSelection`) is born at the right cadence, not the default.
+    private var isForeground = false
     /// The most recent refresh task — awaitable by tests so assertions don't
     /// poll on wall-clock (which flakes under parallel-suite contention).
     private(set) var lastRefreshTask: Task<Void, Never>?
@@ -93,7 +97,13 @@ final class ReviewPaneModel {
     func start() {
         guard let workspace = selectedWorkspace else { return }
         if refresher == nil {
-            let refresher = DiffRefresher { [weak self] in await self?.regenerate() }
+            // Born at the remembered cadence so a repo switch while the
+            // navigator is closed stays on the slow background debounce.
+            let interval = isForeground
+                ? DiffRefresher.defaultDebounce : DiffRefresher.backgroundDebounce
+            let refresher = DiffRefresher(interval: interval) {
+                [weak self] in await self?.regenerate()
+            }
             self.refresher = refresher
         }
         let refresher = self.refresher!
@@ -115,6 +125,22 @@ final class ReviewPaneModel {
             }
         }
         lastRefreshTask = Task { await refresher.refreshNow() }
+    }
+
+    /// Switches the refresh cadence to match whether the review surface is
+    /// actually on screen. Hidden → slow (background) debounce, so the diff
+    /// pipeline stops stealing main-thread cycles from terminal drawing while
+    /// the user types heads-down. Visible → fast debounce AND an immediate
+    /// refresh, so a just-revealed tree is current rather than up to a
+    /// background-interval stale. No-op before `start()` creates the refresher;
+    /// `start()` re-applies the current visibility itself.
+    func setForeground(_ foreground: Bool) {
+        isForeground = foreground
+        let refresher = self.refresher
+        let interval = foreground
+            ? DiffRefresher.defaultDebounce : DiffRefresher.backgroundDebounce
+        Task { await refresher?.setInterval(interval) }
+        if foreground { refreshNow() }
     }
 
     /// Manual refresh (header button / Cmd+R) — belt-and-braces for any

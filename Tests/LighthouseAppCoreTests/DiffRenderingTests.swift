@@ -252,6 +252,25 @@ struct DiffRefresherTests {
         await refresher.refreshNow()
         #expect(counter.count == 1) // did not wait 5s
     }
+
+    @Test func setIntervalChangesDebounceForNextBurst() async throws {
+        let counter = Counter()
+        // A 5 s default would never fire inside the assertion window; the
+        // shortened interval must take effect for the burst that follows it.
+        let refresher = DiffRefresher(interval: .seconds(5)) {
+            counter.increment()
+        }
+        await refresher.setInterval(.milliseconds(50))
+        await refresher.noteChange()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(counter.count == 1, "shortened interval never fired: \(counter.count)")
+    }
+
+    @Test func backgroundDebounceIsSlowerThanForeground() {
+        // The whole point of the background cadence: fewer main-thread refreshes
+        // while the review surface is hidden.
+        #expect(DiffRefresher.backgroundDebounce > DiffRefresher.defaultDebounce)
+    }
 }
 
 @Suite("ConflictPageBuilder security")

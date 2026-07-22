@@ -168,8 +168,16 @@ final class WorkbenchModel {
     var navigatorMode: NavigatorMode = .changes
     /// Per-task navigator visibility (UI-only; not persisted). The navigator is
     /// now an on-demand overlay (spec §5.2), so it starts CLOSED — the terminal
-    /// is the full-bleed hero until the user opens it (◨ / ⌘\).
-    var navigatorVisible = false
+    /// is the full-bleed hero until the user opens it (◨ / ⌘\). Its transitions
+    /// also drive the live-diff refresh cadence: while it's closed nobody is
+    /// watching the changed-file tree, so the diff pipeline runs on the slow
+    /// background debounce and stops competing with terminal drawing.
+    var navigatorVisible = false {
+        didSet {
+            guard oldValue != navigatorVisible else { return }
+            review.setForeground(navigatorVisible)
+        }
+    }
 
     /// The pane the body actually shows — the ZStack renders exactly this.
     var effectiveBody: FocusBody { bodyState.effective }
@@ -207,7 +215,13 @@ final class WorkbenchModel {
 
     // MARK: Lifecycle (delegates to the live-diff engine)
 
-    func start() { review.start() }
+    func start() {
+        review.start()
+        // Match cadence to current visibility — the navigator starts closed, so
+        // the initial (one-shot) populate still runs, then bursts go slow until
+        // it's opened.
+        review.setForeground(navigatorVisible)
+    }
     func stop() { review.stop() }
 
     // MARK: Center body (spec §3.4 — rules live in FocusBodyState)
