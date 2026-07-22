@@ -155,13 +155,34 @@ final class TerminalController: NSObject {
         terminalView.processDelegate = self
     }
 
-    func start(plan: LaunchPlan, typingDelay: Duration) {
-        guard !isRunning else { return }
-        var environment = ProcessInfo.processInfo.environment
-        for (key, value) in plan.environment { environment[key] = value }
+    /// Builds the environment for a spawned session shell: Lighthouse's own
+    /// environment, plus per-plan overrides, plus terminal defaults — with the
+    /// child-session marker stripped. Pure so the transcript rule is unit-tested.
+    ///
+    /// Lighthouse is a session ORCHESTRATOR: the `claude` each terminal runs is
+    /// a genuine top-level session that must save its own transcript. But if
+    /// Lighthouse was itself launched from within a Claude Code session, its
+    /// environment carries `CLAUDE_CODE_CHILD_SESSION=1`, and a nested `claude`
+    /// reads that as "I'm a child" and silently turns transcript saving OFF.
+    /// Since we copy the whole parent environment into every spawned shell, that
+    /// marker would leak into all sessions — so drop it here. Spawned sessions
+    /// are never sub-sessions of whatever launched the app.
+    static func sessionEnvironment(
+        base: [String: String], overrides: [String: String]
+    ) -> [String: String] {
+        var environment = base
+        for (key, value) in overrides { environment[key] = value }
+        environment["CLAUDE_CODE_CHILD_SESSION"] = nil
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         if environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
+        return environment
+    }
+
+    func start(plan: LaunchPlan, typingDelay: Duration) {
+        guard !isRunning else { return }
+        let environment = Self.sessionEnvironment(
+            base: ProcessInfo.processInfo.environment, overrides: plan.environment)
 
         isRunning = true
         terminalView.startProcess(
