@@ -244,6 +244,11 @@ struct FocusCenter: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { workbench?.start() } else { workbench?.stop() }
         }
+        // A workspace added to this task (add-repo-to-task) appends to the live
+        // task; re-sync the snapshot-holding workbench so the new repo shows up.
+        .onChange(of: task.workspaces.count) {
+            workbench?.syncTask(task, repos: runtime.model.repos)
+        }
     }
 
     @ViewBuilder

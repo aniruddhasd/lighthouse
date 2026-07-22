@@ -60,6 +60,7 @@ struct ContentView: View {
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $runtime.registerRepoPresented) { RegisterRepoSheet() }
         .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
+        .sheet(item: $runtime.taskPendingAddWorkspace) { task in AddToTaskSheet(task: task) }
         .sheet(isPresented: Binding(
             get: { runtime.setupPresented },
             set: { runtime.setupPresented = $0 })) { SetupView() }

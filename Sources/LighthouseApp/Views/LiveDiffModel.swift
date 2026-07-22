@@ -15,8 +15,11 @@ import LighthouseTaskEngine
 /// everything stops when the workbench disappears.
 @MainActor @Observable
 final class ReviewPaneModel {
-    let task: TaskRecord
-    private let repos: [RepoConfig]
+    /// Snapshotted at creation; `syncWorkspaces` re-reads them after an
+    /// "add repo to task" so the picker and diffs pick up the new workspace
+    /// without tearing down the whole workbench.
+    private(set) var task: TaskRecord
+    private(set) var repos: [RepoConfig]
     private let service: LiveDiffService
 
     var selectedWorkspaceIndex = 0 {
@@ -148,6 +151,16 @@ final class ReviewPaneModel {
     func refreshNow() {
         guard let refresher else { start(); return }
         lastRefreshTask = Task { await refresher.refreshNow() }
+    }
+
+    /// Re-reads the task/repos after a workspace was added elsewhere
+    /// (add-repo-to-task). The addition APPENDS, so the current selection index
+    /// still points at the same workspace and its watcher is unchanged — only
+    /// the repo picker gains the new entry. Selecting it later sets up its own
+    /// watcher via `restartForSelection`.
+    func syncWorkspaces(task: TaskRecord, repos: [RepoConfig]) {
+        self.task = task
+        self.repos = repos
     }
 
     /// Test hook: await the most recent refresh to completion.

@@ -381,3 +381,148 @@ struct RegisterRepoSheet: View {
         }
     }
 }
+
+/// Adds a repo/worktree to an ALREADY-running task so Lighthouse tracks it from
+/// now on — three modes matching the engine: a fresh worktree, a registered
+/// repo's current checkout (tracked in-place), or an existing worktree the agent
+/// created (adopted). The task's running session is untouched; this only extends
+/// what the review pane, merge, and removal cover.
+struct AddToTaskSheet: View {
+    @Environment(AppRuntime.self) private var runtime
+    @Environment(\.dismiss) private var dismiss
+    let task: TaskRecord
+
+    private enum Mode: Hashable { case newWorktree, trackInPlace, adopt }
+    @State private var mode: Mode = .newWorktree
+    @State private var selectedRepoId: UUID?
+    @State private var branch = ""
+    @State private var adoptDir: URL?
+    @State private var working = false
+
+    /// Re-fetched live so the addable list reflects a workspace added moments
+    /// ago (the passed-in `task` is a snapshot from when the sheet opened).
+    private var liveTask: TaskRecord {
+        runtime.model.tasks.first(where: { $0.id == task.id }) ?? task
+    }
+    private var addableRepos: [RepoConfig] { runtime.model.reposAddableTo(liveTask) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add to “\(task.name)”").font(.headline)
+
+            Picker("Mode", selection: $mode) {
+                Text("New worktree").tag(Mode.newWorktree)
+                Text("Track current dir").tag(Mode.trackInPlace)
+                Text("Adopt a worktree").tag(Mode.adopt)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch mode {
+            case .newWorktree, .trackInPlace: repoFields
+            case .adopt: adoptFields
+            }
+
+            Text(modeHelp)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                if !working, !missingRequirements.isEmpty {
+                    Text("Add \(ListFormatter.localizedString(byJoining: missingRequirements)) to continue.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(working ? "Adding…" : "Add") { add() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(working || !missingRequirements.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear { if branch.isEmpty { branch = task.branch } }
+    }
+
+    @ViewBuilder private var repoFields: some View {
+        if addableRepos.isEmpty {
+            Text("Every registered repo is already tracked by this task.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Picker("Repo", selection: $selectedRepoId) {
+                Text("Choose a repo…").tag(UUID?.none)
+                ForEach(addableRepos) { repo in
+                    Text(repo.pathURL.lastPathComponent).tag(UUID?.some(repo.id))
+                }
+            }
+            .labelsHidden()
+        }
+        if mode == .newWorktree {
+            TextField("Branch", text: $branch)
+                .font(.system(.body, design: .monospaced))
+        }
+    }
+
+    @ViewBuilder private var adoptFields: some View {
+        HStack {
+            TextField("Worktree directory", text: .constant(adoptDir?.path ?? ""))
+                .disabled(true)
+            Button("Choose…") {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                if panel.runModal() == .OK { adoptDir = panel.url }
+            }
+        }
+    }
+
+    private var modeHelp: String {
+        switch mode {
+        case .newWorktree:
+            return "Creates a fresh worktree on this branch, cut from the repo's base — for also working on another repo in this task. Merges back like the rest."
+        case .trackInPlace:
+            return "Tracks the repo's current checkout as-is — whatever the agent already changed there. Reviewed, but never merged back or deleted on removal."
+        case .adopt:
+            return "Adopts an existing worktree the agent created. Matched to a registered repo and tracked — never merged back or deleted."
+        }
+    }
+
+    private var missingRequirements: [String] {
+        switch mode {
+        case .newWorktree:
+            var missing: [String] = []
+            if selectedRepoId == nil { missing.append("a repo") }
+            if branch.isEmpty { missing.append("a branch name") }
+            return missing
+        case .trackInPlace:
+            return selectedRepoId == nil ? ["a repo"] : []
+        case .adopt:
+            return adoptDir == nil ? ["a directory"] : []
+        }
+    }
+
+    private func add() {
+        working = true
+        Task {
+            do {
+                switch mode {
+                case .newWorktree:
+                    _ = try await runtime.model.addWorktree(
+                        toTask: task.id, repoId: selectedRepoId!, branch: branch)
+                case .trackInPlace:
+                    _ = try await runtime.model.trackInPlace(
+                        toTask: task.id, repoId: selectedRepoId!)
+                case .adopt:
+                    _ = try await runtime.model.adoptWorktree(
+                        toTask: task.id, directory: adoptDir!)
+                }
+                dismiss()
+            } catch let error as TaskEngineError {
+                runtime.lastError = FailureDescriber.describe(error)
+            } catch {
+                runtime.lastError = String(describing: error)
+            }
+            working = false
+        }
+    }
+}

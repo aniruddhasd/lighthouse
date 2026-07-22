@@ -111,9 +111,13 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         self.workspaces = workspaces
     }
 
-    /// True when every workspace runs in-place (investigation mode). A task is
-    /// created all-in-place or all-worktree — never mixed — so the UI keys its
-    /// merge/branch affordances off this. An empty task is not in-place.
+    /// True when EVERY workspace runs in-place (investigation mode) — the UI
+    /// keys its merge/branch affordances off this. A task is created either
+    /// all-in-place or all-worktree, but a later "add repo to task" can mix
+    /// tracked (in-place/adopted) workspaces into a worktree task; that is safe
+    /// because merge-back and removal both test `isInPlace` PER WORKSPACE, so a
+    /// mixed task merges/removes its worktree workspaces and leaves the tracked
+    /// ones untouched. An empty task is not in-place.
     public var isInPlace: Bool {
         !workspaces.isEmpty && workspaces.allSatisfy(\.isInPlace)
     }

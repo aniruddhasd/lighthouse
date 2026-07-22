@@ -224,6 +224,13 @@ final class WorkbenchModel {
     }
     func stop() { review.stop() }
 
+    /// Re-syncs the review pane after a workspace was added to this task while
+    /// the workbench is live (add-repo-to-task), so the new repo appears in the
+    /// picker without recreating the workbench.
+    func syncTask(_ task: TaskRecord, repos: [RepoConfig]) {
+        review.syncWorkspaces(task: task, repos: repos)
+    }
+
     // MARK: Center body (spec §3.4 — rules live in FocusBodyState)
 
     /// The Terminal/Summary segmented control. Switching mode clears any active

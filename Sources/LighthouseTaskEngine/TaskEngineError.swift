@@ -17,10 +17,20 @@ public enum TaskEngineError: Error, Sendable {
     case taskHasNoWorkspaces(taskId: UUID)
     /// A workspace references a repo id absent from the provided configs.
     case unknownRepo(repoId: UUID)
+    /// An operation named a task id that is not in the task list.
+    case unknownTask(taskId: UUID)
     case baseBranchMissing(repoPath: String, baseBranch: String)
     /// The task branch already exists in this repo. Detected BEFORE any
     /// mutation of that repo, so rollback never touches it (guardrail 6).
     case branchAlreadyExists(repoPath: String, branch: String)
+    /// A repo already has a workspace in this task — one workspace per repo per
+    /// task, so it can't be added a second time.
+    case repoAlreadyInTask(repoId: UUID)
+    /// Adopt-a-worktree: the chosen directory is not a git work tree at all.
+    case notAGitWorktree(path: String)
+    /// Adopt-a-worktree: the directory is a work tree, but not one belonging to
+    /// any registered repo (register its repo first, then adopt).
+    case notAWorktreeOfRegisteredRepo(path: String)
     case worktreeDestinationOccupied(path: String)
     /// The destination's nearest existing ancestor is not writable —
     /// detected pre-mutation so creation fails before touching anything.

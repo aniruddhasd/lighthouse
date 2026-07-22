@@ -207,6 +207,92 @@ public actor TaskEngine {
             state: .done, workspaces: workspaces)
     }
 
+    // MARK: - Adding a workspace to an already-created task
+
+    /// Adds ONE new worktree (on `branch`, cut from `repo`'s base) to an
+    /// existing task and returns its `Workspace` — the "also work on repo B in
+    /// this task" case. Reuses the same per-repo provisioning and rollback as
+    /// creation: a failure after `worktree add` is undone. The caller appends
+    /// the returned workspace and persists.
+    public func addWorktreeWorkspace(
+        to task: TaskRecord, repo: RepoConfig, branch: String,
+        worktreesRootOverride: URL? = nil
+    ) async throws -> Workspace {
+        guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+            throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+        }
+        guard try await liftGit({ try await self.git.isValidBranchName(branch) }) else {
+            throw TaskEngineError.invalidBranchName(branch)
+        }
+        let destination = Self.worktreeDestination(
+            for: repo, taskName: task.name, worktreesRootOverride: worktreesRootOverride)
+        var created: [CreatedArtifact] = []
+        var createdParents: [URL] = []
+        do {
+            return try await createWorkspace(
+                for: repo, branch: branch, at: destination,
+                recordingArtifactsIn: &created, recordingCreatedParentsIn: &createdParents)
+        } catch {
+            _ = await rollBack(created, createdParents: createdParents)
+            throw error
+        }
+    }
+
+    /// Tracks a registered repo's OWN checkout as an in-place workspace of an
+    /// existing task — captures whatever the agent already changed there. Never
+    /// merged back or destroyed on removal (`isInPlace`). Nothing on disk is
+    /// mutated. The caller appends the returned workspace and persists.
+    public func inPlaceWorkspace(
+        for repo: RepoConfig, addingTo task: TaskRecord
+    ) async throws -> Workspace {
+        guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+            throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+        }
+        let repoURL = repo.pathURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: repo.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              try await liftGit({ try await self.git.isInsideWorkTree(at: repoURL) })
+        else {
+            throw TaskEngineError.repoNotFound(path: repo.path)
+        }
+        return Workspace(
+            repoId: repo.id, worktreePath: repo.path, mergeState: .merged, isInPlace: true)
+    }
+
+    /// Adopts an EXISTING work tree Lighthouse did not create (e.g. one the agent
+    /// spun up with `git worktree add`) as a tracked workspace. The directory is
+    /// matched to a registered repo by appearing in that repo's `worktree list`;
+    /// tracked only — never merged back or destroyed (`isInPlace`, since
+    /// Lighthouse does not own it). The caller appends and persists.
+    public func adoptWorktreeWorkspace(
+        at directory: URL, addingTo task: TaskRecord, repos: [RepoConfig]
+    ) async throws -> Workspace {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              try await liftGit({ try await self.git.isInsideWorkTree(at: directory) })
+        else {
+            throw TaskEngineError.notAGitWorktree(path: directory.path)
+        }
+        let canonical = directory.resolvingSymlinksInPath().path
+        for repo in repos {
+            let worktrees = (try? await liftGit({
+                try await self.git.listWorktrees(in: repo.pathURL)
+            })) ?? []
+            let owns = worktrees.contains {
+                URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == canonical
+            }
+            guard owns else { continue }
+            guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+                throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+            }
+            return Workspace(
+                repoId: repo.id, worktreePath: canonical, mergeState: .merged, isInPlace: true)
+        }
+        throw TaskEngineError.notAWorktreeOfRegisteredRepo(path: directory.path)
+    }
+
     /// One repo's share of creation. Every check that can fail runs BEFORE
     /// the single mutation point (`addWorktree`); the artifact is recorded
     /// the moment the mutation lands, so later failures (env copy, setup

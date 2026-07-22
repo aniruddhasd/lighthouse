@@ -9,6 +9,7 @@ import LighthouseGit
 /// for the whole time this is on screen, regardless of the active segment.
 struct NavigatorView: View {
     @Environment(\.theme) private var theme
+    @Environment(AppRuntime.self) private var runtime
     @Bindable var workbench: WorkbenchModel
 
     var body: some View {
@@ -42,6 +43,13 @@ struct NavigatorView: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .fixedSize()
+            // Add another repo / worktree to this task (tracked from now on).
+            Button { runtime.taskPendingAddWorkspace = workbench.task } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(theme.dim)
+            }
+            .buttonStyle(.plain)
+            .help("Add a repo or worktree to this task")
             if workbench.navigatorMode == .changes {
                 Text("diff vs base")
                     .font(LHFont.mono(11))

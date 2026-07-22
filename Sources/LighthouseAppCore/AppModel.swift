@@ -464,6 +464,73 @@ public final class AppModel {
         }
     }
 
+    // MARK: - Adding workspaces to an already-running task
+
+    /// Adds a NEW worktree (on `branch`, cut from the repo's base) to an existing
+    /// task so it also tracks that repo — "now also work on repo B here". The
+    /// task's already-running session is untouched; this only extends what
+    /// Lighthouse tracks (review pane, merge, removal).
+    @discardableResult
+    public func addWorktree(
+        toTask taskId: UUID, repoId: UUID, branch: String
+    ) async throws -> Workspace {
+        let (index, task, repo) = try locate(taskId: taskId, repoId: repoId)
+        let workspace = try await engine.addWorktreeWorkspace(
+            to: task, repo: repo, branch: branch,
+            worktreesRootOverride: worktreesRootOverride.map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            })
+        try appendWorkspace(workspace, toTaskAt: index)
+        return workspace
+    }
+
+    /// Tracks a registered repo's CURRENT checkout in-place — captures whatever
+    /// the agent already changed there. Tracked only: never merged back, never
+    /// destroyed on removal.
+    @discardableResult
+    public func trackInPlace(toTask taskId: UUID, repoId: UUID) async throws -> Workspace {
+        let (index, task, repo) = try locate(taskId: taskId, repoId: repoId)
+        let workspace = try await engine.inPlaceWorkspace(for: repo, addingTo: task)
+        try appendWorkspace(workspace, toTaskAt: index)
+        return workspace
+    }
+
+    /// Adopts an existing worktree the agent created (matched to a registered
+    /// repo by its `worktree list`) as a tracked workspace of the task.
+    @discardableResult
+    public func adoptWorktree(toTask taskId: UUID, directory: URL) async throws -> Workspace {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else {
+            throw TaskEngineError.unknownTask(taskId: taskId)
+        }
+        let workspace = try await engine.adoptWorktreeWorkspace(
+            at: directory, addingTo: tasks[index], repos: repos)
+        try appendWorkspace(workspace, toTaskAt: index)
+        return workspace
+    }
+
+    /// Registered repos NOT already tracked by `task` — the candidates a
+    /// worktree/in-place add can choose from.
+    public func reposAddableTo(_ task: TaskRecord) -> [RepoConfig] {
+        repos.filter { repo in !task.workspaces.contains { $0.repoId == repo.id } }
+    }
+
+    private func locate(
+        taskId: UUID, repoId: UUID
+    ) throws -> (index: Int, task: TaskRecord, repo: RepoConfig) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else {
+            throw TaskEngineError.unknownTask(taskId: taskId)
+        }
+        guard let repo = repos.first(where: { $0.id == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        return (index, tasks[index], repo)
+    }
+
+    private func appendWorkspace(_ workspace: Workspace, toTaskAt index: Int) throws {
+        tasks[index].workspaces.append(workspace)
+        try persist()
+    }
+
     /// Removes Lighthouse's attention hooks from every in-place workspace's real
     /// repo `.claude/settings.local.json`. For worktree tasks the whole worktree
     /// dir is deleted, taking the hooks with it — but an in-place repo is never

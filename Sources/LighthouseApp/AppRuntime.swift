@@ -49,6 +49,10 @@ final class AppRuntime {
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading
     /// a binding down; the old sidebar that owned this trigger was retired.
     var taskPendingRemoval: TaskRecord?
+    /// Drives the "add a repo/worktree to this task" sheet. Item-based so the
+    /// navigator's + button (and any future entry point) can open it for a
+    /// specific task without threading a binding down.
+    var taskPendingAddWorkspace: TaskRecord?
     /// Drives the Register-Repo sheet. On the runtime (like `switcherPresented`)
     /// so the File menu command AND the Harbor "Add repo" controls can all open
     /// it — the sidebar that used to own this trigger was retired.

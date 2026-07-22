@@ -53,6 +53,14 @@ public enum FailureDescriber {
             return "This task has no workspaces — its configuration is incomplete."
         case .unknownRepo(let id):
             return "A workspace references an unregistered repo (\(id))."
+        case .unknownTask(let id):
+            return "That task no longer exists (\(id))."
+        case .repoAlreadyInTask:
+            return "That repo is already part of this task."
+        case .notAGitWorktree(let path):
+            return "\(path) is not a git work tree."
+        case .notAWorktreeOfRegisteredRepo(let path):
+            return "\(path) is not a worktree of any registered repo — register its repo first."
         case .baseBranchMissing(let repoPath, let baseBranch):
             return "Base branch '\(baseBranch)' does not exist in \(repoPath)."
         case .branchAlreadyExists(let repoPath, let branch):
