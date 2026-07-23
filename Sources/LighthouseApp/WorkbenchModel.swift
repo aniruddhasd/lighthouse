@@ -111,6 +111,17 @@ final class ContentViewerModel {
         DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
     }
 
+    /// Scroll the ALREADY-loaded changes diff to `path` without reloading — used
+    /// when a second changed file is picked from the tree. The whole diff is one
+    /// page, so reloading it to show a different file both wastes work and races
+    /// the scroll bridge back to the first file (the "clicking a file jumps to
+    /// the top" bug). Same no-reload fix as `scrollToLine`.
+    func scrollToFile(_ path: String) {
+        guard let webView else { return }
+        scrollTo(file: path, in: webView)
+        DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
+    }
+
     private static func functionReady(_ name: String, in webView: WKWebView) async -> Bool {
         await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(
@@ -320,11 +331,24 @@ final class WorkbenchModel {
     // MARK: Selection → center viewer (async I/O here, pure mapping in the
     // presenter). Each selection promotes the viewer into the center stage.
 
-    /// Changes: render the whole live diff and scroll to the picked file.
+    /// The changes-diff patch currently rendered in the viewer, if any. When the
+    /// next file pick is within this same diff, we scroll rather than reload —
+    /// the whole diff is one page (see `scrollToFile`). Cleared whenever the
+    /// viewer loads something else (a file page, a commit diff).
+    private var shownChangesPatch: String?
+
+    /// Changes: render the whole live diff and scroll to the picked file. If the
+    /// diff for the current patch is already showing, just scroll to the file —
+    /// no reload — so picking files doesn't snap back to the top.
     func selectChangedFile(_ path: String) async {
         await review.awaitRefresh()
         guard let patch = review.latestPatch else { return }
-        viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
+        if shownChangesPatch == patch {
+            viewer.scrollToFile(path)
+        } else {
+            viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
+            shownChangesPatch = patch
+        }
         viewerTitle = path
         currentFilePath = path
         bodyState.activateViewer()
@@ -354,6 +378,7 @@ final class WorkbenchModel {
         }
         viewerTitle = path
         currentFilePath = path
+        shownChangesPatch = nil  // the viewer now holds a file, not the diff
         bodyState.activateViewer()
     }
 
@@ -370,6 +395,7 @@ final class WorkbenchModel {
         }
         viewerTitle = commit.shortHash
         currentFilePath = nil  // a commit diff is not a single file
+        shownChangesPatch = nil  // a commit diff is not the changes diff
         bodyState.activateViewer()
     }
 }
