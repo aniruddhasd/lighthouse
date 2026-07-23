@@ -13,10 +13,9 @@ public enum WorktreeRemovalMode: Sendable, Equatable {
 }
 
 /// The single place Lighthouse ever invokes git. All subprocess execution
-/// uses argument arrays (no shell, no interpolation); every nonzero exit is
-/// a typed thrown error except merge conflicts, which are an expected state
-/// reported via `MergeOutcome`. This client has no network operations by
-/// design — no fetch, pull, or push exists here; Lighthouse is fully offline.
+/// uses argument arrays (no shell, no interpolation); every nonzero exit is a
+/// typed thrown error. This client has no network operations by design — no
+/// fetch, pull, or push exists here; Lighthouse is fully offline.
 public actor GitClient {
     private let gitExecutable: String
 
@@ -153,96 +152,6 @@ public actor GitClient {
         case 0, 1: return result.stdoutText
         default: throw classify(result, arguments: arguments, in: repository)
         }
-    }
-
-    // MARK: - Merge
-
-    /// `git merge --no-edit <branch>`. A conflict is returned as
-    /// `.conflicted` with the unmerged paths — it is a state, not an error.
-    public func merge(_ branch: String, in repository: URL) async throws -> MergeOutcome {
-        let arguments = ["merge", "--no-edit", "--end-of-options", branch]
-        let result = try await run(arguments, in: repository)
-        return try await mergeOutcome(from: result, arguments: arguments, in: repository)
-    }
-
-    /// `git merge --continue` after conflicts have been resolved and staged.
-    /// Uses a no-op editor so the default merge-commit message is taken.
-    public func continueMerge(in repository: URL) async throws -> MergeOutcome {
-        let arguments = ["-c", "core.editor=true", "merge", "--continue"]
-        let result = try await run(arguments, in: repository)
-        return try await mergeOutcome(from: result, arguments: arguments, in: repository)
-    }
-
-    /// True while a merge is in progress (MERGE_HEAD exists), verified via
-    /// `git rev-parse -q --verify MERGE_HEAD` — the canonical check.
-    public func isMergeInProgress(in repository: URL) async throws -> Bool {
-        let result = try await run(["rev-parse", "-q", "--verify", "MERGE_HEAD"], in: repository)
-        switch result.exitCode {
-        case 0: return true
-        case 1 where result.stderrText.isEmpty: return false // -q: absent, quietly
-        default: throw classify(result, arguments: ["rev-parse", "-q", "--verify", "MERGE_HEAD"], in: repository)
-        }
-    }
-
-    /// `git checkout --conflict=zdiff3 -- <path>` — re-materializes conflict
-    /// markers (with the base section) in a conflicted file, e.g. after an
-    /// external editor mangled them.
-    public func rematerializeConflict(path: String, in repository: URL) async throws {
-        try await runExpectingSuccess(
-            ["checkout", "--conflict=zdiff3", "--", path], in: repository)
-    }
-
-    /// `git merge --abort` — restores the pre-merge state (index + working
-    /// tree). Non-destructive to committed work (verified git 2.50.1); the
-    /// in-app exit from a paused merge in the user's clone.
-    public func abortMerge(in repository: URL) async throws {
-        try await runExpectingSuccess(["merge", "--abort"], in: repository)
-    }
-
-    /// Which side of a conflict to take whole-file, for binary and
-    /// delete/modify cases where text markers do not exist.
-    public enum ConflictSide: Sendable { case ours, theirs }
-
-    /// `git checkout --ours|--theirs -- <path>` then stage it — whole-file
-    /// resolution for a binary conflict (no text transform possible).
-    public func takeWholeFile(_ side: ConflictSide, path: String, in repository: URL) async throws {
-        let flag = side == .ours ? "--ours" : "--theirs"
-        try await runExpectingSuccess(
-            ["--literal-pathspecs", "checkout", flag, "--", path], in: repository)
-        try await stage(paths: [path], in: repository)
-    }
-
-    /// Stages resolved paths: `git add -- <paths>`. Used after a conflict
-    /// transform writes resolved content, or to mark a whole-file/
-    /// keep-modified choice. Paths are pathspecs (not revisions); the `--`
-    /// separator keeps a path beginning with `-` out of the option parser
-    /// (`git add` does not accept `--end-of-options`; verified git 2.50.1).
-    /// `--literal-pathspecs` additionally disables pathspec magic, so a path
-    /// git handed us that begins with `:` (e.g. `:(exclude)`) is treated as a
-    /// literal filename rather than a magic pathspec — belt to the `--` braces.
-    public func stage(paths: [String], in repository: URL) async throws {
-        guard !paths.isEmpty else { return }
-        try await runExpectingSuccess(["--literal-pathspecs", "add", "--"] + paths, in: repository)
-    }
-
-    /// `git rm -- <path>` — the keep-deleted resolution for a delete/modify
-    /// conflict (records the deletion in the index). `--literal-pathspecs`
-    /// disables `:`-prefixed pathspec magic, same as `stage`.
-    public func removeConflictedPath(_ path: String, in repository: URL) async throws {
-        try await runExpectingSuccess(["--literal-pathspecs", "rm", "--", path], in: repository)
-    }
-
-    /// True when a conflicted path is binary: `git diff --numstat` between
-    /// its ours-stage (`:2:`) and theirs-stage (`:3:`) blobs prints `-` for
-    /// binary content (verified git 2.50.1). Callers must pass a genuinely
-    /// both-modified conflict (both stages present); delete/modify is
-    /// classified from the status `u` line instead.
-    public func isConflictBinary(path: String, in repository: URL) async throws -> Bool {
-        let result = try await runExpectingSuccess(
-            ["diff", "--numstat", "--end-of-options", ":2:\(path)", ":3:\(path)"],
-            in: repository)
-        // Format: "<added>\t<deleted>\t<path>"; binary → "-\t-\t<path>".
-        return result.stdoutText.hasPrefix("-\t-")
     }
 
     // MARK: - Branches
@@ -609,19 +518,6 @@ public actor GitClient {
             throw classify(result, arguments: arguments, in: directory)
         }
         return result
-    }
-
-    private func mergeOutcome(
-        from result: ProcessResult, arguments: [String], in repository: URL
-    ) async throws -> MergeOutcome {
-        if result.exitCode == 0 { return .merged }
-        // Distinguish "stopped on conflicts" (a state) from real failure by
-        // the canonical marker: MERGE_HEAD exists while a merge is unresolved.
-        if try await isMergeInProgress(in: repository) {
-            let status = try await status(in: repository)
-            return .conflicted(paths: status.conflictedPaths)
-        }
-        throw classify(result, arguments: arguments, in: repository)
     }
 
     private func classify(

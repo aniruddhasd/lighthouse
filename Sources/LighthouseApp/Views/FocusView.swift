@@ -188,8 +188,7 @@ struct BeaconRail: View {
 /// (30), with the navigator as a trailing slide-in overlay. Owns the single
 /// per-task `WorkbenchModel` — its lifecycle IS the live-diff watcher lifecycle
 /// (created on appear, stopped on background, restarted on foreground, torn down
-/// on task switch via the enclosing `.id(task.id)`). The conflict pane takes
-/// over the whole column during a paused merge walk.
+/// on task switch via the enclosing `.id(task.id)`).
 struct FocusCenter: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.scenePhase) private var scenePhase
@@ -200,12 +199,9 @@ struct FocusCenter: View {
 
     var body: some View {
         // ZStack, NOT Group: a Group would re-fire onAppear on a branch switch
-        // (merge-walk on/off) and recreate the model — the REVIEWPANE loop scar.
+        // and recreate the model — the REVIEWPANE loop scar.
         ZStack {
-            if let walk = runtime.mergeWalk, walk.task.id == task.id {
-                ConflictPaneView(controller: walk)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let workbench {
+            if let workbench {
                 column(workbench)
             } else {
                 ProgressView()
@@ -304,10 +300,9 @@ struct FocusCenter: View {
 // MARK: - Task header (52px, spec §C.1)
 
 /// Replaces the retired detail toolbar: status · title/meta · Terminal/Summary
-/// segmented · context meter (honest only) · navigator toggle (◨) · Merge to
-/// base. The Merge button is promoted (filled green/idle) ONLY when the task is
-/// done; the context meter renders ONLY when an honest estimate exists (Phase 4
-/// — omitted, not faked, otherwise the header stays as Phase 3).
+/// segmented · context meter (honest only) · navigator toggle (◨). The context
+/// meter renders ONLY when an honest estimate exists (Phase 4 — omitted, not
+/// faked, otherwise the header stays as Phase 3).
 struct FocusTaskHeader: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
@@ -337,11 +332,6 @@ struct FocusTaskHeader: View {
                 ContextMeter(context: context)
             }
             navigatorToggle
-            // In-place tasks have no branch to merge — the session runs in the
-            // repo's own checkout, so a merge-back would be meaningless.
-            if !task.isInPlace {
-                mergeButton
-            }
         }
         .padding(.horizontal, 14)
         .frame(height: Theme.Metric.headerRow)
@@ -377,33 +367,6 @@ struct FocusTaskHeader: View {
         }
         .buttonStyle(.plain)
         .help("Show or hide the navigator (⌘\\)")
-    }
-
-    private var mergeButton: some View {
-        // Promoted (filled idle/green) only when the task is done; otherwise a
-        // neutral secondary button. Wiring is unchanged from the retired toolbar.
-        let promoted = state == .done
-        return Button {
-            Task {
-                await runtime.startMergeWalk(
-                    for: task, orderedRepoIds: task.workspaces.map(\.repoId))
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.merge")
-                Text("Merge to base").font(LHFont.button)
-            }
-            .foregroundStyle(promoted ? theme.primaryText : theme.text)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(
-                promoted ? theme.idle : theme.panel3,
-                in: RoundedRectangle(cornerRadius: Theme.Radius.chip))
-        }
-        .buttonStyle(.plain)
-        .disabled(runtime.mergeWalk != nil)
-        .opacity(runtime.mergeWalk != nil ? 0.5 : 1)
-        .help("Merge this task's worktree back to base")
     }
 
     private var metaLine: String {

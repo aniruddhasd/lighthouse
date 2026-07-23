@@ -16,8 +16,7 @@ public struct GitCommandFailure: Sendable, Equatable {
 }
 
 /// Typed failures from GitClient. Nonzero exits always surface here — there
-/// are no silent fallbacks. A merge conflict is deliberately NOT an error;
-/// it is reported as `MergeOutcome.conflicted`.
+/// are no silent fallbacks.
 public enum GitClientError: Error, Sendable, Equatable {
     /// The directory is not inside a git repository.
     case notARepository(path: String, failure: GitCommandFailure)

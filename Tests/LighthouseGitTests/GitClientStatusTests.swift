@@ -51,8 +51,9 @@ final class GitClientStatusTests {
 
     @Test func midMergeContentConflictShowsBothModified() async throws {
         let fixture = try fixtures.contentConflictRepo()
-        let outcome = try await client.merge(fixture.incomingBranch, in: fixture.repo.path)
-        #expect(outcome == .conflicted(paths: [fixture.conflictedPath]))
+        // Raw git to reach the conflicted state (a conflicting merge exits
+        // non-zero → ignore); this asserts status parsing, not the merge itself.
+        _ = try? fixtures.git(["merge", "--no-edit", fixture.incomingBranch], in: fixture.repo.path)
 
         let status = try await client.status(in: fixture.repo.path)
         let entry = try #require(status.unmerged.first)
@@ -62,7 +63,7 @@ final class GitClientStatusTests {
 
     @Test func deleteModifyConflictDetectedFromUStages() async throws {
         let fixture = try fixtures.deleteModifyConflictRepo()
-        _ = try await client.merge(fixture.incomingBranch, in: fixture.repo.path)
+        _ = try? fixtures.git(["merge", "--no-edit", fixture.incomingBranch], in: fixture.repo.path)
 
         let status = try await client.status(in: fixture.repo.path)
         let entry = try #require(status.unmerged.first)
@@ -76,8 +77,7 @@ final class GitClientStatusTests {
 
     @Test func binaryConflictDetectedFromStatusNotContent() async throws {
         let fixture = try fixtures.binaryConflictRepo()
-        let outcome = try await client.merge(fixture.incomingBranch, in: fixture.repo.path)
-        #expect(outcome == .conflicted(paths: [fixture.conflictedPath]))
+        _ = try? fixtures.git(["merge", "--no-edit", fixture.incomingBranch], in: fixture.repo.path)
 
         // The conflicted file contains raw binary, no text markers — the u
         // line alone is the detector.

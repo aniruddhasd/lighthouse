@@ -285,33 +285,3 @@ struct DiffRefresherTests {
         #expect(DiffRefresher.backgroundDebounce > DiffRefresher.defaultDebounce)
     }
 }
-
-@Suite("ConflictPageBuilder security")
-struct ConflictPageBuilderTests {
-
-    @Test func hostileBlockContentNeverAppearsRawInHTML() {
-        let page = ConflictPageBuilder.page(path: "evil.txt", blocks: ConflictPageBuilder.hostileBlocks)
-        #expect(!page.contains("<script>window.__pwned=true</script>"))
-        #expect(!page.contains("onerror=\"window.__pwned=true\""))
-        #expect(!page.contains("nonce=steal"))
-        // Content is present only inside the base64 payload.
-        #expect(page.contains("default-src 'none'"))
-        #expect(!page.contains("http://"))
-        #expect(!page.contains("https://"))
-    }
-
-    @Test func pathIsAlsoBase64NotRaw() {
-        let page = ConflictPageBuilder.page(
-            path: "</h2><script>alert(1)</script>", blocks: [])
-        #expect(!page.contains("<script>alert(1)</script>"))
-    }
-
-    @Test func nonceDiffersPerBuild() {
-        func nonce(_ html: String) -> String? {
-            html.components(separatedBy: "'nonce-").dropFirst().first?
-                .components(separatedBy: "'").first
-        }
-        #expect(nonce(ConflictPageBuilder.page(path: "a", blocks: []))
-                != nonce(ConflictPageBuilder.page(path: "a", blocks: [])))
-    }
-}

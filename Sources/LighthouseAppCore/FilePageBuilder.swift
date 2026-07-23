@@ -3,7 +3,7 @@ import Foundation
 /// Renders a repo file as read-only, escaped monospace text with line numbers
 /// for the content viewer's locked WKWebView.
 ///
-/// Same discipline as DiffPageBuilder / ConflictPageBuilder (spec §8): file
+/// Same discipline as DiffPageBuilder (spec §8): file
 /// content is untrusted repo content, so no byte of it — nor the filename —
 /// ever appears raw in the markup. Both are base64-embedded and decoded
 /// in-page into TEXT nodes only, under a `default-src 'none'` CSP with a

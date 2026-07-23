@@ -653,31 +653,6 @@ public final class AppModel {
         attentionSince[taskId]
     }
 
-    /// Records that every workspace of a task merged into base — the task is
-    /// done (spec §2.5). Marks each workspace merged and persists.
-    public func markMerged(taskId: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        for wsIndex in tasks[index].workspaces.indices {
-            tasks[index].workspaces[wsIndex].mergeState = .merged
-        }
-        try? persist()
-    }
-
-    /// Records the current per-workspace merge states of a paused/partial
-    /// walk so partially-merged is visible after the walk object is gone.
-    public func updateMergeStates(taskId: UUID, merged: [UUID], conflicted: [UUID]) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        for wsIndex in tasks[index].workspaces.indices {
-            let repoId = tasks[index].workspaces[wsIndex].repoId
-            if merged.contains(repoId) {
-                tasks[index].workspaces[wsIndex].mergeState = .merged
-            } else if conflicted.contains(repoId) {
-                tasks[index].workspaces[wsIndex].mergeState = .conflicted
-            }
-        }
-        try? persist()
-    }
-
     // MARK: - Derivations for the UI
 
     /// A task can be resumed whenever it has a persisted session and the agent

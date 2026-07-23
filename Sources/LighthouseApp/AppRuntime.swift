@@ -62,8 +62,6 @@ final class AppRuntime {
     /// selected falls back to Harbor. Mutating it re-renders the shell (normal
     /// @Observable propagation).
     var nav = NavigationState()
-    /// Active merge-back walk for the selected task, when one is running.
-    var mergeWalk: MergeWalkController?
     /// Surfaced verbatim in the UI — always the full typed description.
     var lastError: String?
     /// Set when the attention socket could not start: sessions still run,
@@ -129,7 +127,6 @@ final class AppRuntime {
         runDiffRenderCheckIfRequested()
         runFileRenderCheckIfRequested()
         runNavigatorCheckIfRequested()
-        runMergeWalkCheckIfRequested()
         runNotificationCheckIfRequested()
         runThemeCheckIfRequested()
         runHarborCheckIfRequested()
@@ -670,23 +667,6 @@ final class AppRuntime {
 
     private let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
-    /// Begins a merge-back walk for `task` over `orderedRepoIds` (default:
-    /// creation order). The UI shows the conflict pane when it pauses.
-    func startMergeWalk(for task: TaskRecord, orderedRepoIds: [UUID]) async {
-        let controller = MergeWalkController(
-            task: task, repos: model.repos, orderedRepoIds: orderedRepoIds,
-            git: git, session: registry, loginShell: loginShell)
-        mergeWalk = controller
-        await controller.start()
-        // A clean walk finishes immediately: reflect done, drop the pane.
-        if case .completed = controller.state {
-            model.markMerged(taskId: task.id)
-            mergeWalk = nil
-        }
-    }
-
-    func endMergeWalk() { mergeWalk = nil }
-
     // MARK: - Two-mode navigation (spec §3.4)
 
     /// Open a task in Focus — the card / ⌘K-result / beacon-dot action. Applies
@@ -753,48 +733,6 @@ final class AppRuntime {
             let enqueued = notifications.post(kind: .needsInput, taskId: taskId, taskName: "notify-probe")
             log("enqueued=\(enqueued)")
             log("done")
-        }
-    }
-
-    /// LIGHTHOUSE_DEBUG_MERGEWALK=<clone-with-conflict>: drives a full
-    /// merge-back cycle in the real app over a scripted conflicting repo —
-    /// run → assert paused-conflicted → resolve every text file whole-file
-    /// (current) via the transform API → complete → assert completed. Logs
-    /// each stage for Scripts/smoke-run.sh to assert.
-    private var mergeWalkKeepAlive: MergeWalkController?
-    private func runMergeWalkCheckIfRequested() {
-        guard let clonePath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_MERGEWALK"]
-        else { return }
-        Task { @MainActor in
-            func log(_ m: String) {
-                FileHandle.standardOutput.write(Data("MERGEWALK-STAGE \(m)\n".utf8))
-            }
-            let repo = RepoConfig(path: clonePath, baseBranch: "main")
-            let task = TaskRecord(
-                name: "mergewalk-probe", branch: "task", adapterKind: "debug",
-                sessionRef: nil, state: .done,
-                workspaces: [Workspace(repoId: repo.id, worktreePath: clonePath, mergeState: .unmerged)])
-            let controller = MergeWalkController(
-                task: task, repos: [repo], orderedRepoIds: [repo.id],
-                git: git, session: registry, loginShell: loginShell)
-            mergeWalkKeepAlive = controller
-            await controller.start()
-            guard controller.isPausedConflicted else {
-                log("unexpected-state \(controller.state)"); return
-            }
-            log("paused conflicted=\(controller.conflicts.count)")
-            for conflict in controller.conflicts {
-                if case .text = conflict.kind {
-                    await controller.resolveWholeFileText(path: conflict.path, side: .current)
-                }
-            }
-            log("resolved remaining=\(controller.conflicts.count)")
-            await controller.completeCurrentRepo()
-            if case .completed = controller.state {
-                log("completed")
-            } else {
-                log("not-completed \(controller.state)")
-            }
         }
     }
 

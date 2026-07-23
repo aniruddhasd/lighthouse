@@ -80,17 +80,6 @@ final class GitClientOptionInjectionTests {
         #expect(!FileManager.default.fileExists(atPath: canary))
     }
 
-    @Test func mergeTreatsOptionLookalikeAsBranch() async throws {
-        let repo = try fixtures.cleanRepo()
-        let canary = canaryPath()
-        await #expect {
-            _ = try await self.client.merge("--output=\(canary)", in: repo.path)
-        } throws: { _ in true }
-        #expect(!FileManager.default.fileExists(atPath: canary))
-        // A failed (not conflicted) merge must not leave merge state behind.
-        #expect(try await client.isMergeInProgress(in: repo.path) == false)
-    }
-
     @Test func createBranchTreatsOptionLookalikeStartPointAsRevision() async throws {
         let repo = try fixtures.cleanRepo()
         let canary = canaryPath()
