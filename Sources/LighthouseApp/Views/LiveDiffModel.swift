@@ -48,6 +48,16 @@ final class ReviewPaneModel {
     var expansion = TreeExpansionState()
     private(set) var renderError: String?
 
+    /// Which changes to show. Defaults to uncommitted ("what changed right
+    /// now"); flipping it re-reads the diff so the tree + patch follow the
+    /// scope. Bound directly by the navigator's Uncommitted | vs base toggle.
+    var scope: DiffScope = .uncommitted {
+        didSet {
+            guard oldValue != scope else { return }
+            refreshNow()
+        }
+    }
+
     private var watcher: FileSystemWatcher?
     private var refresher: DiffRefresher?
     /// Whether the review surface is currently on screen. Remembered (not just
@@ -184,8 +194,8 @@ final class ReviewPaneModel {
     private func regenerate() async {
         guard let workspace = selectedWorkspace, let base = selectedBaseBranch else { return }
         do {
-            let diff = try await service.liveDiff(
-                workspace: workspace.worktreeURL, baseBranch: base)
+            let diff = try await service.diff(
+                workspace: workspace.worktreeURL, baseBranch: base, scope: scope)
             // Tree + counts + patch update FIRST and unconditionally — the file
             // list is useful even before anything renders in the center.
             let newTree = FileTreeBuilder.build(entries: diff.entries, untracked: diff.untracked)

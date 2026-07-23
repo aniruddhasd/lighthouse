@@ -84,4 +84,34 @@ final class LiveDiffServiceTests {
         #expect(diff.entries.isEmpty)
         #expect(diff.untracked.isEmpty)
     }
+
+    /// The whole point of the scope toggle: uncommitted shows only working-tree
+    /// changes (+ untracked), NOT committed branch work — which vs-base includes.
+    @Test func uncommittedScopeExcludesCommittedBranchWork() async throws {
+        let repo = try taskBranchRepo()
+        // A tracked file that exists in HEAD.
+        try Data("v1\n".utf8).write(to: repo.path.appendingPathComponent("tracked.txt"))
+        try fixtures.git(["add", "tracked.txt"], in: repo.path)
+        try fixtures.git(["commit", "-m", "add tracked"], in: repo.path)
+        // Committed branch work — in "vs base", NOT in "uncommitted".
+        try Data("committed\n".utf8).write(to: repo.path.appendingPathComponent("committed.txt"))
+        try fixtures.git(["add", "committed.txt"], in: repo.path)
+        try fixtures.git(["commit", "-m", "committed work"], in: repo.path)
+        // Uncommitted: modify the tracked file + add an untracked one.
+        try Data("v2\n".utf8).write(to: repo.path.appendingPathComponent("tracked.txt"))
+        try Data("new\n".utf8).write(to: repo.path.appendingPathComponent("untracked.txt"))
+
+        let uncommitted = try await service.uncommittedDiff(workspace: repo.path)
+        #expect(uncommitted.entries.map(\.path) == ["tracked.txt"]) // committed.txt absent
+        #expect(uncommitted.untracked == ["untracked.txt"])
+        #expect(uncommitted.patch.contains("+v2"))
+        #expect(uncommitted.patch.contains("+new"))
+        #expect(!uncommitted.patch.contains("+committed"))
+
+        // vs base still carries the committed branch work.
+        let vsBase = try await service.diff(
+            workspace: repo.path, baseBranch: "main", scope: .vsBase)
+        #expect(vsBase.entries.map(\.path).sorted() == ["committed.txt", "tracked.txt"])
+        #expect(vsBase.patch.contains("+committed"))
+    }
 }

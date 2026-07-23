@@ -82,6 +82,7 @@ final class ReviewRefreshTests {
         defer { model.stop() }
 
         model.start()
+        model.scope = .vsBase // these self-heal cases count committed work too
         #expect(await refreshedFileCount(model) == 2)
 
         // Simulate: app backgrounded (watcher stopped), a commit happens the
@@ -134,6 +135,7 @@ final class ReviewRefreshTests {
         let model = makeModel(repo: repo, worktree: worktree)
         defer { model.stop() }
         model.start()
+        model.scope = .vsBase // asserts committed work shows up → vs-base scope
         #expect(await refreshedFileCount(model) == 2)
 
         // A change with the watcher still running but (pretend) not fired.
@@ -149,6 +151,7 @@ final class ReviewRefreshTests {
         let model = makeModel(repo: repo, worktree: worktree)
         defer { model.stop() }
         model.start()
+        model.scope = .vsBase // a commit only changes the vs-base diff
         #expect(await refreshedFileCount(model) == 2)
 
         // No stop/start, no manual refresh — the gitdir watch must catch the

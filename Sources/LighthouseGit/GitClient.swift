@@ -111,6 +111,22 @@ public actor GitClient {
         return try Self.parseNameStatus(result.stdout)
     }
 
+    /// UNCOMMITTED changes only: `git diff HEAD --` — the working tree (staged +
+    /// unstaged) relative to the last commit, excluding committed branch work.
+    /// The "what have I not committed yet" view; untracked files are separate.
+    public func uncommittedDiff(in repository: URL) async throws -> String {
+        let result = try await runExpectingSuccess(
+            ["diff", "--end-of-options", "HEAD", "--"], in: repository)
+        return result.stdoutText
+    }
+
+    /// File list for the uncommitted diff: `git diff --name-status -z HEAD --`.
+    public func uncommittedNameStatus(in repository: URL) async throws -> [DiffEntry] {
+        let result = try await runExpectingSuccess(
+            ["diff", "--name-status", "-z", "--end-of-options", "HEAD", "--"], in: repository)
+        return try Self.parseNameStatus(result.stdout)
+    }
+
     /// Deterministic add/del/file counts for the live review surface:
     /// `git diff --numstat --merge-base <base> --` — the working tree relative
     /// to the merge base of `<base>` and HEAD (committed + staged + unstaged),

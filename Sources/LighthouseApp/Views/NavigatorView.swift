@@ -51,10 +51,17 @@ struct NavigatorView: View {
             .buttonStyle(.plain)
             .help("Add a repo or worktree to this task")
             if workbench.navigatorMode == .changes {
-                Text("diff vs base")
-                    .font(LHFont.mono(11))
-                    .foregroundStyle(theme.diffVsBase)
-                    .lineLimit(1)
+                // Uncommitted (working tree vs HEAD) vs the whole branch vs base.
+                Picker("Scope", selection: Binding(
+                    get: { workbench.review.scope },
+                    set: { workbench.review.scope = $0 })) {
+                    Text("Uncommitted").tag(DiffScope.uncommitted)
+                    Text("vs base").tag(DiffScope.vsBase)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Uncommitted changes, or the whole branch vs its base")
                 Button { workbench.review.refreshNow() } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11)).foregroundStyle(theme.dim)
