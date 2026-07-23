@@ -48,10 +48,27 @@ public enum DiffPageBuilder {
             body { margin: 0; font-family: -apple-system, sans-serif; }
             .d2h-wrapper { padding: 8px; }
             #empty { color: #888; padding: 24px; text-align: center; }
+            /* Collapsible files: click a header to fold its body so long diffs
+               scroll quickly. The header (the scroll anchor) always stays. */
+            #lh-toolbar { position: sticky; top: 0; z-index: 10; display: none;
+                gap: 8px; padding: 6px 8px; background: #fff;
+                border-bottom: 1px solid #ddd; }
+            #lh-toolbar button { font: inherit; font-size: 12px; padding: 2px 8px;
+                cursor: pointer; }
+            .d2h-file-header { cursor: pointer; }
+            .lh-chevron { display: inline-block; width: 1em; margin-right: 2px;
+                color: #888; transition: transform 0.1s; user-select: none; }
+            .d2h-file-wrapper.lh-collapsed .lh-chevron { transform: rotate(-90deg); }
+            .d2h-file-wrapper.lh-collapsed .d2h-file-diff,
+            .d2h-file-wrapper.lh-collapsed .d2h-files-diff { display: none; }
             @media (prefers-color-scheme: dark) { body { background: #1e1e1e; filter: invert(0.9) hue-rotate(180deg); } }
         </style>
         </head>
         <body>
+        <div id="lh-toolbar">
+            <button id="lh-collapse-all" type="button">Collapse all</button>
+            <button id="lh-expand-all" type="button">Expand all</button>
+        </div>
         <div id="diff"></div>
         <script src="\(scriptAsset)"></script>
         <script nonce="\(nonce)">
@@ -68,18 +85,45 @@ public enum DiffPageBuilder {
                     matching: 'lines',
                 });
             }
-            // File anchors for the tree's click-to-scroll.
+            // File anchors for the tree's click-to-scroll, plus per-file collapse
+            // (fold a file's body to skim long diffs). The header stays visible
+            // when collapsed, so it remains a valid scroll target.
             const anchors = {};
-            document.querySelectorAll('.d2h-file-wrapper').forEach(wrapper => {
+            const wrappers = document.querySelectorAll('.d2h-file-wrapper');
+            wrappers.forEach(wrapper => {
                 const name = wrapper.querySelector('.d2h-file-name');
                 if (name) { anchors[name.textContent.trim()] = wrapper; }
+                const header = wrapper.querySelector('.d2h-file-header');
+                if (!header) return;
+                const chevron = document.createElement('span');
+                chevron.className = 'lh-chevron';
+                chevron.textContent = '\\u25BE';
+                header.insertBefore(chevron, header.firstChild);
+                header.addEventListener('click', (e) => {
+                    // Leave interactive header controls (copy button/links) alone.
+                    if (e.target.closest('a, button, input')) { return; }
+                    wrapper.classList.toggle('lh-collapsed');
+                });
             });
+            const setAllCollapsed = (collapsed) => wrappers.forEach(
+                w => w.classList.toggle('lh-collapsed', collapsed));
+            if (wrappers.length > 0) {
+                const toolbar = document.getElementById('lh-toolbar');
+                toolbar.style.display = 'flex';
+                document.getElementById('lh-collapse-all')
+                    .addEventListener('click', () => setAllCollapsed(true));
+                document.getElementById('lh-expand-all')
+                    .addEventListener('click', () => setAllCollapsed(false));
+            }
             window.lighthouseScrollToFile = function (nameB64) {
                 const raw = new TextDecoder().decode(
                     Uint8Array.from(atob(nameB64), c => c.charCodeAt(0)));
                 const target = anchors[raw]
                     ?? Object.entries(anchors).find(([k]) => k.endsWith(raw))?.[1];
-                if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+                if (target) {
+                    target.classList.remove('lh-collapsed'); // reveal if folded
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
             };
             \(debugBlock)
         })();

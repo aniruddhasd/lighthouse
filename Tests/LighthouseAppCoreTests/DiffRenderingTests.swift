@@ -53,6 +53,19 @@ struct DiffPageBuilderTests {
         }
         #expect(nonce(page) != nonce(again))
     }
+
+    @Test func filesAreCollapsible() {
+        let page = DiffPageBuilder.page(
+            diff: "diff --git a/x b/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n")
+        // Collapse-all/expand-all controls and the per-file toggle class + wiring.
+        #expect(page.contains("id=\"lh-collapse-all\""))
+        #expect(page.contains("id=\"lh-expand-all\""))
+        #expect(page.contains("lh-collapsed"))
+        #expect(page.contains("lh-chevron"))
+        #expect(page.contains("addEventListener('click'"))
+        // CSP-safe: listeners are attached in the nonce'd script, never inline.
+        #expect(!page.contains("onclick="))
+    }
 }
 
 @Suite("PatchCapper")
