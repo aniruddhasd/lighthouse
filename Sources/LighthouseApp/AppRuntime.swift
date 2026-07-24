@@ -1048,6 +1048,43 @@ final class AppRuntime {
         }
     }
 
+    /// Creates a task from a GitHub PR (`reference` = number or URL) in `repoId`
+    /// and starts its session. `name` empty → the PR title.
+    func createTaskFromPRAndStartSession(
+        reference: String, repoId: UUID, name: String
+    ) async {
+        do {
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let (task, plan) = try await model.createTaskFromPR(
+                reference: reference, repoId: repoId,
+                name: trimmedName.isEmpty ? nil : trimmedName)
+            await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
+            startAgentSession(taskId: task.id, plan: plan)
+            selectedTaskId = task.id
+        } catch let error as PullRequestCheckoutError {
+            lastError = Self.describePRCheckout(error)
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    private static func describePRCheckout(_ error: PullRequestCheckoutError) -> String {
+        switch error {
+        case .ghNotAvailable:
+            return "The GitHub CLI (gh) was not found. Install it and run `gh auth login` to create tasks from PRs."
+        case .invalidReference(let ref):
+            return "'\(ref)' is not a PR number or URL."
+        case .resolveFailed(let stderr):
+            return "Could not find that PR (is it in the selected repo, and are you signed in?):\n\(stderr)"
+        case .checkoutFailed(let stderr):
+            return "PR checkout failed:\n\(stderr)"
+        case .launchFailed(let reason):
+            return "Could not launch gh: \(reason)"
+        }
+    }
+
     /// Resume `claude --resume <id>`. If the agent shell is still alive (Claude
     /// exited to the prompt), the command is TYPED into it; otherwise a fresh
     /// agent shell tab is opened and the command typed there. A dead/unknown

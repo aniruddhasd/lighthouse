@@ -37,6 +37,15 @@ public actor GitClient {
             ["worktree", "add", "-b", newBranch, path.path, "--", baseRef], in: repository)
     }
 
+    /// `git worktree add --detach <path> -- <ref>` — a worktree checked out at
+    /// `ref` with a DETACHED HEAD (no new branch created). The empty landing
+    /// spot a PR checkout switches onto the PR's branch (see PullRequestCheckout);
+    /// `--` fences a ref beginning with `-` from the option parser.
+    public func addDetachedWorktree(at path: URL, from ref: String, in repository: URL) async throws {
+        try await runExpectingSuccess(
+            ["worktree", "add", "--detach", path.path, "--", ref], in: repository)
+    }
+
     /// Parsed `git worktree list --porcelain -z`.
     public func listWorktrees(in repository: URL) async throws -> [Worktree] {
         let result = try await runExpectingSuccess(

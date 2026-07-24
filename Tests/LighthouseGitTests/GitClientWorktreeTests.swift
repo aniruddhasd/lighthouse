@@ -134,4 +134,19 @@ final class GitClientWorktreeTests {
         #expect(status.head == .branch("task/one"))
         #expect(status.isClean)
     }
+
+    @Test func addDetachedWorktreeChecksOutRefWithNoBranch() async throws {
+        let repo = try fixtures.cleanRepo()
+        let baseTip = try await client.revParse("HEAD", in: repo.path)
+        let destination = repo.path.deletingLastPathComponent()
+            .appendingPathComponent("detached-wt")
+
+        try await client.addDetachedWorktree(at: destination, from: "HEAD", in: repo.path)
+
+        #expect(try await client.headCommit(in: destination) == baseTip)
+        // Detached: at the commit, but on no branch.
+        let status = try await client.status(in: destination)
+        #expect(status.head == .detached)
+        #expect(status.isClean)
+    }
 }

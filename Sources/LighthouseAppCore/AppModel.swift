@@ -85,6 +85,7 @@ public final class AppModel {
     private let engine: TaskEngine
     private let git: GitClient
     private let cloner: RepoCloner
+    private let prCheckout: PullRequestCheckout
     private let adapter: any AgentAdapter
     private let socketPath: URL
     private let loginShell: String
@@ -95,6 +96,7 @@ public final class AppModel {
         adapter: any AgentAdapter,
         git: GitClient = GitClient(),
         cloner: RepoCloner = RepoCloner(),
+        prCheckout: PullRequestCheckout = PullRequestCheckout(),
         loginShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -103,6 +105,7 @@ public final class AppModel {
         self.adapter = adapter
         self.git = git
         self.cloner = cloner
+        self.prCheckout = prCheckout
         self.engine = TaskEngine(git: git)
         self.loginShell = loginShell
         self.now = now
@@ -462,6 +465,85 @@ public final class AppModel {
             await removeInPlaceAttention(for: task)
             throw error
         }
+    }
+
+    /// Creates a task from a GitHub pull request: a worktree checked out on the
+    /// PR's head (local branch `pr-<N>`, tracking the PR so commits push back).
+    /// `reference` is a PR number or URL. A NETWORK op — resolves + fetches via
+    /// `gh`. On any failure the (possibly empty) worktree is rolled back, so a
+    /// retry never trips over debris.
+    public func createTaskFromPR(
+        reference: String, repoId: UUID, name: String? = nil
+    ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
+        guard let repo = repos.first(where: { $0.id == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        let info = try await prCheckout.resolve(reference: reference, in: repo.pathURL)
+        let taskName = Self.taskName(fromPR: info, override: name)
+        let localBranch = PullRequestCheckout.localBranch(for: info.number)
+        let destination = TaskEngine.worktreeDestination(
+            for: repo, taskName: taskName,
+            worktreesRootOverride: worktreesRootOverride.map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            })
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw TaskEngineError.worktreeDestinationOccupied(path: destination.path)
+        }
+
+        // Detached worktree first, then `gh pr checkout` INSIDE it (network).
+        // Any failure past the worktree creation removes it before rethrowing.
+        try await git.addDetachedWorktree(at: destination, from: "HEAD", in: repo.pathURL)
+        do {
+            try await prCheckout.checkout(
+                reference: reference, localBranch: localBranch, in: destination)
+        } catch {
+            try? await git.removeWorktree(
+                at: destination, in: repo.pathURL,
+                mode: .forceDiscardingChanges(
+                    justification: "PR checkout failed; removing the empty worktree"))
+            // gh may have created the local branch before failing; drop it so a
+            // retry doesn't trip over an existing `pr-<N>`.
+            try? await git.deleteBranch(localBranch, force: true, in: repo.pathURL)
+            throw error
+        }
+
+        var task = TaskRecord(
+            name: taskName, branch: localBranch, adapterKind: adapter.kind,
+            sessionRef: nil, state: .done,
+            workspaces: [Workspace(
+                repoId: repo.id, worktreePath: destination.path, mergeState: .unmerged)])
+        do {
+            guard let primary = task.workspaces.first?.worktreeURL else {
+                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
+            }
+            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
+            let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
+            task.sessionRef = plan.sessionRef
+            tasks.append(task)
+            attention[task.id] = task.state
+            try persist()
+            return (task, plan)
+        } catch {
+            tasks.removeAll { $0.id == task.id }
+            attention.removeValue(forKey: task.id)
+            await rollBackFailedCreation(task)
+            throw error
+        }
+    }
+
+    /// The task's display name: an explicit override, else the PR title made
+    /// path-safe (it becomes a worktree directory component), falling back to
+    /// `pr-<N>` when nothing usable remains.
+    static func taskName(fromPR info: PullRequestInfo, override: String?) -> String {
+        if let override = override?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return override
+        }
+        let safe = info.title
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (safe.isEmpty || safe == "." || safe == "..") ? "pr-\(info.number)" : safe
     }
 
     // MARK: - Adding workspaces to an already-running task

@@ -596,6 +596,20 @@ final class AppModelTests {
 
     // MARK: - repoName derivation
 
+    // MARK: - PR task naming
+
+    @Test func prTaskNameSanitizesTitleAndHonorsOverride() {
+        let info = PullRequestInfo(number: 14, title: "fix: cache/eviction bug")
+        // Default: PR title, path-safe (slashes → dashes).
+        #expect(AppModel.taskName(fromPR: info, override: nil) == "fix: cache-eviction bug")
+        // Override wins when non-empty.
+        #expect(AppModel.taskName(fromPR: info, override: "my task") == "my task")
+        #expect(AppModel.taskName(fromPR: info, override: "  ") == "fix: cache-eviction bug")
+        // A title that sanitizes to nothing falls back to pr-<N>.
+        #expect(AppModel.taskName(
+            fromPR: PullRequestInfo(number: 7, title: "   "), override: nil) == "pr-7")
+    }
+
     @Test func repoNameStripsGitSuffixAcrossURLShapes() {
         #expect(AppModel.repoName(fromURL: "git@github.com:org/repo.git") == "repo")
         #expect(AppModel.repoName(fromURL: "https://github.com/org/repo.git") == "repo")

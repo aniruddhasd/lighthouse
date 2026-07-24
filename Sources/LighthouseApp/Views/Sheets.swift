@@ -12,40 +12,54 @@ struct CreateTaskSheet: View {
     /// Ordered selection: position = walk order at creation and merge-back.
     @State private var selectedRepoIds: [UUID] = []
     @State private var creating = false
-    /// Where the session runs. Worktree (default) branches off base into an
-    /// isolated worktree; in-place runs in the repo's own checkout for
-    /// investigation — no worktree, no branch, nothing to merge back.
-    @State private var inPlace = false
+    /// How the session's workspace is made. New worktree (default) branches off
+    /// base; current-directory runs in the repo's own checkout (investigation);
+    /// from-PR fetches a pull request's branch into a worktree.
+    private enum Mode: Hashable { case newWorktree, currentDir, fromPR }
+    @State private var mode: Mode = .newWorktree
+    /// A PR number or URL (from-PR mode).
+    @State private var prReference = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New Task").font(.headline)
-            TextField("Name (e.g. payments fix)", text: $name)
+            TextField(mode == .fromPR ? "Name (blank = PR title)" : "Name (e.g. payments fix)",
+                      text: $name)
                 .onChange(of: name) {
                     if !branchEdited { branch = AppModel.branchSlug(from: name) }
                 }
 
-            Picker("Workspace", selection: $inPlace) {
-                Text("New worktree").tag(false)
-                Text("Current directory").tag(true)
+            Picker("Workspace", selection: $mode) {
+                Text("New worktree").tag(Mode.newWorktree)
+                Text("Current directory").tag(Mode.currentDir)
+                Text("From PR").tag(Mode.fromPR)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            if inPlace {
-                Text("Runs the session in each repo's own checkout — no worktree, no branch. For investigating or learning a repo without changing it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
+            switch mode {
+            case .newWorktree:
                 TextField("Branch", text: $branch)
                     .onChange(of: branch) { _, new in
                         branchEdited = new != AppModel.branchSlug(from: name)
                     }
                     .font(.system(.body, design: .monospaced))
+            case .currentDir:
+                Text("Runs the session in each repo's own checkout — no worktree, no branch. For investigating or learning a repo without changing it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .fromPR:
+                TextField("PR number or URL", text: $prReference)
+                    .font(.system(.body, design: .monospaced))
+                Text("Fetches the PR's branch into a worktree (via gh) on `pr-<N>`, tracking the PR so commits push back. Pick ONE repo — the PR's repo.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Repos (selection order = creation order)")
+            Text(mode == .fromPR ? "Repo (pick the PR's repo)"
+                 : "Repos (selection order = creation order)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             List(runtime.model.repos) { repo in
@@ -82,9 +96,17 @@ struct CreateTaskSheet: View {
                 Button(creating ? "Creating…" : "Create & Start Session") {
                     creating = true
                     Task {
-                        await runtime.createTaskAndStartSession(
-                            name: name, branch: branch, repoIds: selectedRepoIds,
-                            inPlace: inPlace)
+                        switch mode {
+                        case .newWorktree, .currentDir:
+                            await runtime.createTaskAndStartSession(
+                                name: name, branch: branch, repoIds: selectedRepoIds,
+                                inPlace: mode == .currentDir)
+                        case .fromPR:
+                            if let repoId = selectedRepoIds.first {
+                                await runtime.createTaskFromPRAndStartSession(
+                                    reference: prReference, repoId: repoId, name: name)
+                            }
+                        }
                         creating = false
                         dismiss()
                     }
@@ -101,8 +123,16 @@ struct CreateTaskSheet: View {
     /// hint text and the button's disabled state, so they can never disagree.
     private var missingRequirements: [String] {
         var missing: [String] = []
-        if name.isEmpty { missing.append("a task name") }
-        if !inPlace && branch.isEmpty { missing.append("a branch name") }
+        switch mode {
+        case .newWorktree:
+            if name.isEmpty { missing.append("a task name") }
+            if branch.isEmpty { missing.append("a branch name") }
+        case .currentDir:
+            if name.isEmpty { missing.append("a task name") }
+        case .fromPR:
+            // Name is optional (defaults to the PR title).
+            if prReference.isEmpty { missing.append("a PR number or URL") }
+        }
         if selectedRepoIds.isEmpty { missing.append("a repo") }
         return missing
     }
