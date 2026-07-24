@@ -127,9 +127,39 @@ struct FocusBodyView: View {
                         systemImage: "doc.text.magnifyingglass",
                         description: Text("Pick a change, file, or commit in the navigator."))
                 }
+                // Edit mode: a native monospace editor over the read-only page.
+                if workbench.isEditing {
+                    fileEditor
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var fileEditor: some View {
+        VStack(spacing: 0) {
+            if workbench.editConflict {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color(hex: 0xf0b45e))
+                    Text("This file changed on disk since you started editing.")
+                        .font(.caption)
+                    Spacer()
+                    Button("Overwrite") { Task { await workbench.overwriteEdits() } }
+                    Button("Reload") { Task { await workbench.reloadForEditing() } }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(hex: 0x3a2f14))
+            }
+            TextEditor(text: $workbench.editText)
+                .font(.system(.body, design: .monospaced))
+                .autocorrectionDisabled(true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scrollContentBackground(.hidden)
+                .background(Color(hex: 0x1e1e1e))
+                .foregroundStyle(Color(hex: 0xd4d4d4))
+        }
     }
 
     private var viewerHeader: some View {
@@ -145,12 +175,33 @@ struct FocusBodyView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text("read-only")
-                .font(LHFont.mono(11))
-                .foregroundStyle(Color(hex: 0x6f7890))
+            if workbench.isEditing {
+                Text("editing")
+                    .font(LHFont.mono(11)).foregroundStyle(Color(hex: 0xf0b45e))
+            } else if !workbench.canEditCurrentFile {
+                Text("read-only")
+                    .font(LHFont.mono(11)).foregroundStyle(Color(hex: 0x6f7890))
+            }
             Spacer(minLength: 12)
-            if let error = workbench.viewer.renderError {
+            if let editError = workbench.editError {
+                Text(editError).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            } else if let error = workbench.viewer.renderError {
                 Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            }
+            if workbench.isEditing {
+                Button("Save") { Task { await workbench.saveEdits() } }
+                    .keyboardShortcut("s", modifiers: .command)
+                Button("Cancel") { workbench.exitEditing() }
+            } else if workbench.canEditCurrentFile {
+                Button { Task { await workbench.beginEditing() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil")
+                        Text("Edit").font(LHFont.button)
+                    }
+                    .foregroundStyle(Color(hex: 0xc8cfdd))
+                }
+                .buttonStyle(.plain)
+                .help("Edit this file")
             }
             Button { workbench.showTerminal() } label: {
                 HStack(spacing: 6) {

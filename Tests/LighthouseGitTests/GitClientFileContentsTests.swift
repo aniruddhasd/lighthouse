@@ -110,4 +110,62 @@ final class GitClientFileContentsTests {
         #expect(try await client.fileContents(worktree: repo.path, relativePath: "src/a.swift")
                 == .text("let x = 1\n"))
     }
+
+    // MARK: - writeFile: same boundary, plus round-trip
+
+    @Test func writeRejectsPathEscapingTheWorktree() async throws {
+        let repo = try fixtures.cleanRepo(commitCount: 1)
+        let escape = String(repeating: "../", count: 20) + "etc/passwd"
+        await #expect {
+            try await self.client.writeFile(
+                worktree: repo.path, relativePath: escape, contents: "pwned")
+        } throws: { error in
+            guard case .pathOutsideWorktree = error as? GitClientError else { return false }
+            return true
+        }
+    }
+
+    @Test func writeRejectsASymlinkEscape() async throws {
+        let repo = try fixtures.cleanRepo(commitCount: 1)
+        // Point a link at a real outside file; a naive write would clobber it.
+        let outside = fixtures.root.appendingPathComponent("outside.txt")
+        try Data("original\n".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            atPath: repo.path.appendingPathComponent("link").path,
+            withDestinationPath: outside.path)
+        await #expect {
+            try await self.client.writeFile(
+                worktree: repo.path, relativePath: "link", contents: "clobbered")
+        } throws: { error in
+            guard case .pathOutsideWorktree = error as? GitClientError else { return false }
+            return true
+        }
+        #expect(try String(contentsOf: outside, encoding: .utf8) == "original\n") // untouched
+    }
+
+    @Test func writeRejectsDirectoryAndMissingFile() async throws {
+        let repo = try fixtures.cleanRepo(commitCount: 1)
+        try FileManager.default.createDirectory(
+            at: repo.path.appendingPathComponent("dir"), withIntermediateDirectories: true)
+        for path in ["dir", "does-not-exist.txt"] {
+            await #expect {
+                try await self.client.writeFile(
+                    worktree: repo.path, relativePath: path, contents: "x")
+            } throws: { error in
+                guard case .fileUnwritable = error as? GitClientError else { return false }
+                return true
+            }
+        }
+    }
+
+    @Test func writeRoundTripsThroughFileContents() async throws {
+        let repo = try fixtures.cleanRepo(commitCount: 1)
+        try Data("old\n".utf8).write(to: repo.path.appendingPathComponent("edit.txt"))
+
+        try await client.writeFile(
+            worktree: repo.path, relativePath: "edit.txt", contents: "new content\n")
+
+        #expect(try await client.fileContents(worktree: repo.path, relativePath: "edit.txt")
+                == .text("new content\n"))
+    }
 }

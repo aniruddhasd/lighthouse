@@ -202,6 +202,28 @@ final class WorkbenchModel {
     /// nothing yet). Drives ⌘F's in-file search scope.
     private(set) var currentFilePath: String?
 
+    // MARK: File editing (simple native editor)
+
+    /// The current viewer content is a single editable text file (set by
+    /// `selectFile`; false for diffs, binaries, too-large files).
+    private(set) var currentFileEditable = false
+    /// In edit mode: the read-only page is replaced by a native text editor.
+    private(set) var isEditing = false
+    /// The editable buffer (bound by the editor view).
+    var editText = ""
+    /// File contents as loaded into the editor — the baseline for Cancel and for
+    /// the on-disk staleness check at save time.
+    private var editBaseline = ""
+    private(set) var editError: String?
+    /// The file changed on disk (e.g. the agent edited it) since editing began —
+    /// Save shows an Overwrite/Reload choice instead of clobbering silently.
+    private(set) var editConflict = false
+
+    /// Whether the Edit affordance should show for the current viewer content.
+    var canEditCurrentFile: Bool {
+        currentFileEditable && currentFilePath != nil && !isEditing
+    }
+
     // Files surface (browser tree, lazy).
     private(set) var files: [FileTreeNode] = []
     private(set) var filesError: String?
@@ -341,6 +363,8 @@ final class WorkbenchModel {
     /// diff for the current patch is already showing, just scroll to the file —
     /// no reload — so picking files doesn't snap back to the top.
     func selectChangedFile(_ path: String) async {
+        exitEditing()
+        currentFileEditable = false // a diff is not an editable single file
         await review.awaitRefresh()
         guard let patch = review.latestPatch else { return }
         if shownChangesPatch == patch {
@@ -366,11 +390,15 @@ final class WorkbenchModel {
             bodyState.activateViewer()
             return
         }
+        exitEditing()
         do {
             let contents = try await git.fileContents(worktree: url, relativePath: path)
+            // Only a real text file is editable — not binaries or oversized files.
+            if case .text = contents { currentFileEditable = true } else { currentFileEditable = false }
             viewer.apply(NavigatorPresenter.fileSelection(
                 contents: contents, filename: path, scrollToLine: line))
         } catch {
+            currentFileEditable = false
             // A read fault (traversal, missing) becomes an escaped message page,
             // never a crash.
             viewer.apply(.file(html: FilePageBuilder.page(
@@ -384,6 +412,8 @@ final class WorkbenchModel {
 
     /// History: render the picked commit's diff.
     func selectCommit(_ commit: CommitSummary) async {
+        exitEditing()
+        currentFileEditable = false // a commit diff is not an editable file
         guard let url = review.selectedWorktreeURL else { return }
         do {
             let patch = try await git.commitDiff(worktree: url, hash: commit.hash)
@@ -397,5 +427,76 @@ final class WorkbenchModel {
         currentFilePath = nil  // a commit diff is not a single file
         shownChangesPatch = nil  // a commit diff is not the changes diff
         bodyState.activateViewer()
+    }
+
+    // MARK: File editing
+
+    /// Enter edit mode for the current file: re-read it fresh from disk (so the
+    /// editor starts from the current bytes) and swap in the native editor.
+    func beginEditing() async {
+        guard let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        do {
+            guard case .text(let contents) = try await git.fileContents(
+                worktree: url, relativePath: path) else {
+                editError = "This file can't be edited here."
+                return
+            }
+            editText = contents
+            editBaseline = contents
+            editError = nil
+            editConflict = false
+            isEditing = true
+        } catch {
+            editError = "Could not open \(path) for editing: \(error)"
+        }
+    }
+
+    /// Save the buffer to disk. If the file changed underneath us (the agent
+    /// touched it), surface a conflict instead of clobbering — the view then
+    /// offers Overwrite / Reload.
+    func saveEdits() async {
+        guard isEditing, let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        // Staleness: compare the current on-disk bytes to what we loaded.
+        if case .text(let onDisk) = try? await git.fileContents(worktree: url, relativePath: path),
+           onDisk != editBaseline {
+            editConflict = true
+            return
+        }
+        await writeAndExit(path: path, url: url)
+    }
+
+    /// Overwrite despite an on-disk change (the conflict banner's choice).
+    func overwriteEdits() async {
+        guard isEditing, let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        await writeAndExit(path: path, url: url)
+    }
+
+    /// Discard local edits and reload the file's current on-disk contents into
+    /// the editor (the conflict banner's other choice).
+    func reloadForEditing() async {
+        editConflict = false
+        await beginEditing()
+    }
+
+    private func writeAndExit(path: String, url: URL) async {
+        do {
+            try await git.writeFile(worktree: url, relativePath: path, contents: editText)
+            editConflict = false
+            exitEditing()
+            // Re-render the (now saved) file so the read-only viewer is current;
+            // the live-diff watcher also picks the change up on its own.
+            await selectFile(path)
+        } catch {
+            editError = "Could not save \(path): \(error)"
+        }
+    }
+
+    /// Leave edit mode without saving (Cancel, or any new selection).
+    func exitEditing() {
+        isEditing = false
+        editText = ""
+        editBaseline = ""
+        editError = nil
+        editConflict = false
     }
 }

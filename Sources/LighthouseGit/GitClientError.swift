@@ -40,6 +40,10 @@ public enum GitClientError: Error, Sendable, Equatable {
     /// `fileContents` could not read the resolved file (missing, a directory,
     /// or a filesystem error); the reason is carried for diagnosis.
     case fileUnreadable(relativePath: String, reason: String)
+    /// `writeFile` could not write the resolved file (not a regular file, or a
+    /// filesystem error). Path-containment failures still surface as
+    /// `pathOutsideWorktree`.
+    case fileUnwritable(relativePath: String, reason: String)
 }
 
 extension GitClientError: CustomStringConvertible {
@@ -62,6 +66,8 @@ extension GitClientError: CustomStringConvertible {
             return "path resolves outside the worktree: \(relativePath)"
         case .fileUnreadable(let relativePath, let reason):
             return "cannot read \(relativePath): \(reason)"
+        case .fileUnwritable(let relativePath, let reason):
+            return "cannot write \(relativePath): \(reason)"
         }
     }
 }

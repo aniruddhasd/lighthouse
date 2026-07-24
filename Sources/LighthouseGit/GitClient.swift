@@ -477,6 +477,41 @@ public actor GitClient {
         return .text(String(decoding: data, as: UTF8.self))
     }
 
+    /// Overwrites an EXISTING file inside `worktree` with UTF-8 `contents`
+    /// (atomic temp-then-rename). Same canonical-containment guard as
+    /// `fileContents`: a path resolving outside the worktree — via `..`, an
+    /// absolute path, or an escaping symlink — is refused with
+    /// `pathOutsideWorktree`, never written. The file editor's save path; only
+    /// files the viewer already opened (existing, regular) are writable.
+    public func writeFile(worktree: URL, relativePath: String, contents: String) async throws {
+        guard let canonicalRoot = Self.realPath(worktree.path) else {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: "worktree root not resolvable")
+        }
+        let joined = URL(
+            fileURLWithPath: relativePath,
+            relativeTo: URL(fileURLWithPath: canonicalRoot, isDirectory: true))
+        guard let canonicalTarget = Self.realPath(joined.path) else {
+            throw GitClientError.fileUnwritable(relativePath: relativePath, reason: "no such file")
+        }
+        guard Self.isContained(canonicalTarget, within: canonicalRoot) else {
+            throw GitClientError.pathOutsideWorktree(relativePath: relativePath)
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: canonicalTarget, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: "not a regular file")
+        }
+        do {
+            try Data(contents.utf8).write(
+                to: URL(fileURLWithPath: canonicalTarget), options: .atomic)
+        } catch {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: String(describing: error))
+        }
+    }
+
     /// realpath(3) wrapper: fully resolves symlinks and `..`; nil if the path
     /// does not exist. Mirrors FixtureFactory's use of realpath — chosen over
     /// URL.resolvingSymlinksInPath(), which strips the /private prefix on macOS.
