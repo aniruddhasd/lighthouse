@@ -21,6 +21,11 @@ struct FocusBodyView: View {
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
+    /// Viewer header row height. Shared so the navigator overlay can start
+    /// BELOW it (FocusView), keeping the header's Edit/Terminal controls
+    /// visible instead of tucked behind the slid-in navigator.
+    static let viewerHeaderHeight: CGFloat = 40
+
     var body: some View {
         let body = workbench.effectiveBody
         ZStack {
@@ -215,7 +220,7 @@ struct FocusBodyView: View {
             .help("Back to the running terminal (⌘J)")
         }
         .padding(.horizontal, 12)
-        .frame(height: 40)
+        .frame(height: Self.viewerHeaderHeight)
         .background(Color.black.opacity(0.28))
     }
 }

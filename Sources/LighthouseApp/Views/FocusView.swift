@@ -267,10 +267,14 @@ struct FocusCenter: View {
                 // and is anchored to the BODY — NOT the whole column — so it
                 // floats over the content only and never covers the task header
                 // or the footer (the overlap bug). The terminal stays full-width
-                // beneath it.
-                .overlay(alignment: .trailing) {
+                // beneath it. In viewer mode it starts BELOW the viewer header so
+                // that header's Edit/Terminal controls stay visible and clickable
+                // (they used to be tucked behind the panel).
+                .overlay(alignment: .topTrailing) {
                     if workbench.navigatorVisible {
                         NavigatorOverlay(workbench: workbench)
+                            .padding(.top, workbench.effectiveBody == .viewer
+                                     ? FocusBodyView.viewerHeaderHeight : 0)
                             .transition(.move(edge: .trailing))
                     }
                 }
