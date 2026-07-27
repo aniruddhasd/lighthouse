@@ -40,16 +40,24 @@ func harborStatusLabel(_ state: TaskAttentionState) -> String {
     }
 }
 
-/// A 9px status dot in the state accent. `.working` gets a pulsing expanding
-/// ring (~1.6s infinite, handoff) — reduce-motion gated, so it is a steady dot
-/// when motion is off. The ring is an OVERLAY (never changes the dot's frame),
-/// so a pulsing dot never reflows the row. `glow` adds the needs-you amber halo.
+/// A 9px status dot in the state accent. `.working` CAN get a pulsing expanding
+/// ring (~1.6s infinite, handoff), but only where `pulses` is opted in — see
+/// that property. Reduce-motion gated, so it is a steady dot when motion is off.
+/// The ring is an OVERLAY (never changes the dot's frame), so a pulsing dot
+/// never reflows the row. `glow` adds the needs-you amber halo.
 struct StatusDot: View {
     @Environment(\.theme) private var theme
     @Environment(\.motionEnabled) private var motionEnabled
     let state: TaskAttentionState
     var size: CGFloat = 9
     var glow: Bool = false
+    /// Opt-in continuous pulse, default OFF so the dot is STATIC everywhere a
+    /// terminal is on screen (the focus rail/header, the switcher). An infinite
+    /// animation there forces an NSHostingView layout pass every display cycle,
+    /// stealing the main thread from SwiftTerm's drawing and lagging typing
+    /// (profiled 2026-07-27). Only the harbor rows — never on screen while a
+    /// terminal is — turn it on.
+    var pulses: Bool = false
     @State private var pulsing = false
 
     var body: some View {
@@ -58,10 +66,10 @@ struct StatusDot: View {
             .fill(accent)
             .frame(width: size, height: size)
             .overlay {
-                // Only the working state pulses, and only when motion is on:
-                // the ring view is absent under reduce-motion, so no infinite
-                // animation is ever mounted (not merely paused).
-                if state == .working && motionEnabled {
+                // Only the working state pulses, only when motion is on, and only
+                // where the caller opted in: the ring view is otherwise absent
+                // (not merely paused), so no infinite animation is ever mounted.
+                if state == .working && motionEnabled && pulses {
                     Circle()
                         .stroke(accent, lineWidth: 1.5)
                         .scaleEffect(pulsing ? 2.6 : 1)
@@ -350,7 +358,10 @@ struct TaskCardView: View {
         let accent = theme.accent(for: state)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 10) {
-                StatusDot(state: state, glow: state == .needsInput)
+                // Harbor rows are the ONLY place the working pulse animates: this
+                // screen is never on screen while a terminal is, so the per-frame
+                // layout cost can't steal SwiftTerm's main thread.
+                StatusDot(state: state, glow: state == .needsInput, pulses: true)
                     .padding(.top, 4)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.name)

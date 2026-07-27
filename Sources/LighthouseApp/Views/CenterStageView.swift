@@ -426,8 +426,13 @@ struct AttentionBadge: View {
     var body: some View {
         switch state {
         case .working:
-            ProgressView()
-                .controlSize(.small)
+            // A STATIC glyph, never an indeterminate ProgressView spinner: this
+            // badge sits on the terminal tab bar the whole time the agent works,
+            // and a per-frame spinner animation forces an NSHostingView layout
+            // pass every display cycle, stealing the main thread from SwiftTerm's
+            // (main-thread) drawing and making typing lag. Profiled 2026-07-27.
+            Image(systemName: "ellipsis.circle.fill")
+                .foregroundStyle(.blue)
                 .help("Agent is working")
         case .needsInput:
             Image(systemName: "exclamationmark.circle.fill")
