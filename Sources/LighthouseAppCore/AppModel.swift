@@ -39,21 +39,23 @@ extension Comparable {
 }
 
 /// The app's observable core: config-backed repo registry and task list,
-/// per-task attention state, and the orchestration of TaskEngine + adapter
+/// per-task session liveness, and the orchestration of TaskEngine + adapter
 /// for creation/resume/removal. Deliberately free of any UI import — every
-/// rule here is unit-tested. The UI layer owns SwiftTerm and the socket
-/// listener and feeds this model via `apply(_:)` / `noteSession…`.
+/// rule here is unit-tested. The UI layer owns SwiftTerm and feeds this model
+/// session lifecycle via `noteSessionStarted` / `noteSessionEnded`.
 @MainActor @Observable
 public final class AppModel {
     public private(set) var repos: [RepoConfig] = []
     public private(set) var tasks: [TaskRecord] = []
-    /// Live attention state per task (seeded from persisted TaskRecord.state).
-    public private(set) var attention: [UUID: TaskAttentionState] = [:]
-    /// When each task entered its current attention state — drives the inbox
-    /// "oldest-blocked first" ordering. Session-only.
-    private var attentionSince: [UUID: Date] = [:]
     /// Task ids with a live pty right now — maintained by the session layer.
+    /// This is the ONE honest, Lighthouse-observed status signal (it spawns and
+    /// reaps the shell itself); everything the UI shows as "active" derives from
+    /// it, not from agent hooks. Semantic status is user-set free text
+    /// (`TaskRecord.status`).
     public private(set) var liveSessions: Set<UUID> = []
+    /// When each task last started/ended a session — session-only, drives the
+    /// "most recent first" ordering and the Harbor card's relative-time slot.
+    private var lastActivity: [UUID: Date] = [:]
     /// First-run setup flags (config schema v3).
     public private(set) var hasCompletedSetup = false
     public private(set) var notificationsHintDismissed = false
@@ -87,12 +89,10 @@ public final class AppModel {
     private let cloner: RepoCloner
     private let prCheckout: PullRequestCheckout
     private let adapter: any AgentAdapter
-    private let socketPath: URL
     private let loginShell: String
 
     public init(
         store: ConfigStore,
-        socketPath: URL,
         adapter: any AgentAdapter,
         git: GitClient = GitClient(),
         cloner: RepoCloner = RepoCloner(),
@@ -101,7 +101,6 @@ public final class AppModel {
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
-        self.socketPath = socketPath
         self.adapter = adapter
         self.git = git
         self.cloner = cloner
@@ -111,25 +110,13 @@ public final class AppModel {
         self.now = now
     }
 
-    /// Loads persisted state. Attention seeds from each task's stored state,
-    /// reconciled through `reconciledLoadState` (see below).
+    /// Loads persisted state. No session is live the instant we start (terminal
+    /// controllers are in-memory and die with the app), so `liveSessions` begins
+    /// empty and every task reads as inactive until a session is launched.
     public func load() throws {
         let config = try store.load()
         repos = config.repos
-        // A task last persisted as `.working` can never be truthful at load:
-        // terminal controllers are in-memory only and die with the app, so no
-        // pty can be live the instant we start. Left as `.working`, canResume
-        // returns false (no Resume button) and the `.dirty` warning is skipped,
-        // leaving a dead-end "No session for this task." pane (2026-07-14, found
-        // in acceptance testing). Fold it to `.dirty` at the load seam — the
-        // same state the live `.sessionDied` transition yields — so Resume and
-        // the interrupted-workspace warning both appear. Live `.working`
-        // transitions run through AttentionStateMachine and are untouched.
-        tasks = config.tasks.map { record in
-            var record = record
-            record.state = Self.reconciledLoadState(record.state)
-            return record
-        }
+        tasks = config.tasks
         worktreesRootOverride = config.worktreesRootOverride
         hasCompletedSetup = config.hasCompletedSetup
         notificationsHintDismissed = config.notificationsHintDismissed
@@ -138,19 +125,7 @@ public final class AppModel {
         showBeam = config.showBeam
         // Clamp on load too: a hand-edited config can carry an out-of-range size.
         terminalFontSize = config.terminalFontSize.clamped(to: Self.terminalFontRange)
-        attention = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.state) })
-        attentionSince = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
-    }
-
-    /// Pure load-seed reconciliation: a persisted `.working` folds to `.dirty`
-    /// (no pty is live at load, so the agent that was "working" is gone —
-    /// exactly the live `.sessionDied` outcome); every other state is truthful
-    /// and passes through. Load-time only — live transitions go through
-    /// `AttentionStateMachine`, never here.
-    nonisolated static func reconciledLoadState(
-        _ persisted: TaskAttentionState
-    ) -> TaskAttentionState {
-        persisted == .working ? .dirty : persisted
+        lastActivity = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
     }
 
     public func markSetupCompleted() {
@@ -209,7 +184,7 @@ public final class AppModel {
     public func insertEphemeralTask(_ task: TaskRecord) {
         ephemeralTaskIds.insert(task.id)
         tasks.append(task)
-        attention[task.id] = task.state
+        lastActivity[task.id] = now()
     }
 
     /// Debug-only sibling of insertEphemeralTask for the repo the probe's
@@ -217,6 +192,36 @@ public final class AppModel {
     public func insertEphemeralRepo(_ repo: RepoConfig) {
         ephemeralRepoIds.insert(repo.id)
         repos.append(repo)
+    }
+
+    // MARK: - Scratch terminal (repo-less)
+
+    /// Creates a repo-less scratch-terminal task: NO workspaces (so no diff /
+    /// review surface — `workspaces.isEmpty` is the UI's "terminal-only"
+    /// discriminator), and ephemeral (reuses `insertEphemeralTask`, so it is
+    /// excluded from every save and dies with the app). `directory` is stored in
+    /// `branch` purely so the header/card can show where the shell is; there is
+    /// no branch semantics for a shell. `adapterKind` is "scratch" as a marker.
+    @discardableResult
+    public func createScratchTask(directory: URL) -> TaskRecord {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let label = directory.standardizedFileURL.path == home
+            ? "Home" : directory.lastPathComponent
+        let task = TaskRecord(
+            name: label.isEmpty ? "Scratch" : label,
+            branch: directory.path, adapterKind: "scratch",
+            sessionRef: nil, workspaces: [])
+        insertEphemeralTask(task)
+        return task
+    }
+
+    /// Tears a scratch task out of the model. No engine / worktree work — a
+    /// scratch task owns nothing on disk — so this never touches `store`.
+    public func removeScratchTask(_ id: UUID) {
+        tasks.removeAll { $0.id == id }
+        ephemeralTaskIds.remove(id)
+        lastActivity.removeValue(forKey: id)
+        liveSessions.remove(id)
     }
 
     private func persist() throws {
@@ -378,12 +383,10 @@ public final class AppModel {
 
     // MARK: - Task lifecycle
 
-    /// Atomic creation (engine) + attention wiring (hooks in the PRIMARY
-    /// worktree — `--add-dir` loads no sibling `.claude/` config, verified) +
-    /// a ready-to-spawn LaunchPlan with the pre-assigned session id
-    /// persisted as the task's sessionRef. Errors propagate typed
-    /// (TaskCreationFailure carries cause + rollback account) — the UI
-    /// formats them honestly, it never invents a generic message.
+    /// Atomic creation (engine) + a ready-to-spawn LaunchPlan with the
+    /// pre-assigned session id persisted as the task's sessionRef. Errors
+    /// propagate typed (TaskCreationFailure carries cause + rollback account) —
+    /// the UI formats them honestly, it never invents a generic message.
     public func createTask(
         name: String, branch: String, repoIds: [UUID]
     ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
@@ -402,38 +405,28 @@ public final class AppModel {
             })
 
         // The engine created worktrees + branches and rolled back only failures
-        // INSIDE createTask. Everything below (hook wiring, launch-plan build,
-        // persist) can still throw — e.g. a repo whose base tip carries an
-        // invalid committed `.claude/settings.local.json` makes
-        // prepareWorkspaceAttention throw. Without a teardown here those
-        // worktrees/branches are left on disk but unrecorded in config, and a
-        // retry then fails with `branchAlreadyExists` over invisible debris.
+        // INSIDE createTask. The launch-plan build + persist below can still
+        // throw; without a teardown here those worktrees/branches would be left
+        // on disk but unrecorded, and a retry would fail with branchAlreadyExists
+        // over invisible debris.
         do {
-            guard let primary = task.workspaces.first?.worktreeURL else {
-                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
-            }
-            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
-
             let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
             task.sessionRef = plan.sessionRef
             tasks.append(task)
-            attention[task.id] = task.state
+            lastActivity[task.id] = now()
             try persist()
             return (task, plan)
         } catch {
             tasks.removeAll { $0.id == task.id }
-            attention.removeValue(forKey: task.id)
+            lastActivity.removeValue(forKey: task.id)
             await rollBackFailedCreation(task)
             throw error
         }
     }
 
     /// In-place creation: the session runs in each selected repo's OWN checkout
-    /// (no worktree, no branch) — for investigation/learning. Attention hooks
-    /// ARE installed into the primary repo's `.claude/settings.local.json`
-    /// (merge semantics, git-excluded, reversed on removal) so the session still
-    /// drives the attention pipeline. Post-engine wiring failures roll back by
-    /// uninstalling those hooks — nothing on disk was branched or copied.
+    /// (no worktree, no branch) — for investigation/learning. Nothing on disk is
+    /// branched or copied, so a post-engine failure just drops the record.
     public func createInPlaceTask(
         name: String, repoIds: [UUID]
     ) async throws -> (task: TaskRecord, plan: LaunchPlan) {
@@ -448,21 +441,15 @@ public final class AppModel {
             name: name, adapterKind: adapter.kind, repos: selected)
 
         do {
-            guard let primary = task.workspaces.first?.worktreeURL else {
-                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
-            }
-            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
-
             let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
             task.sessionRef = plan.sessionRef
             tasks.append(task)
-            attention[task.id] = task.state
+            lastActivity[task.id] = now()
             try persist()
             return (task, plan)
         } catch {
             tasks.removeAll { $0.id == task.id }
-            attention.removeValue(forKey: task.id)
-            await removeInPlaceAttention(for: task)
+            lastActivity.removeValue(forKey: task.id)
             throw error
         }
     }
@@ -509,23 +496,19 @@ public final class AppModel {
 
         var task = TaskRecord(
             name: taskName, branch: localBranch, adapterKind: adapter.kind,
-            sessionRef: nil, state: .done,
+            sessionRef: nil,
             workspaces: [Workspace(
                 repoId: repo.id, worktreePath: destination.path, mergeState: .unmerged)])
         do {
-            guard let primary = task.workspaces.first?.worktreeURL else {
-                throw TaskEngineError.taskHasNoWorkspaces(taskId: task.id)
-            }
-            try await adapter.prepareWorkspaceAttention(in: primary, socketPath: socketPath)
             let plan = try adapter.launchPlan(for: try sessionSpec(for: task))
             task.sessionRef = plan.sessionRef
             tasks.append(task)
-            attention[task.id] = task.state
+            lastActivity[task.id] = now()
             try persist()
             return (task, plan)
         } catch {
             tasks.removeAll { $0.id == task.id }
-            attention.removeValue(forKey: task.id)
+            lastActivity.removeValue(forKey: task.id)
             await rollBackFailedCreation(task)
             throw error
         }
@@ -613,18 +596,6 @@ public final class AppModel {
         try persist()
     }
 
-    /// Removes Lighthouse's attention hooks from every in-place workspace's real
-    /// repo `.claude/settings.local.json`. For worktree tasks the whole worktree
-    /// dir is deleted, taking the hooks with it — but an in-place repo is never
-    /// deleted, so its hooks must be uninstalled explicitly or they would
-    /// linger. Best-effort: a failure here must never block task removal.
-    private func removeInPlaceAttention(for task: TaskRecord) async {
-        for workspace in task.workspaces where workspace.isInPlace {
-            guard let repo = repos.first(where: { $0.id == workspace.repoId }) else { continue }
-            try? await adapter.removeWorkspaceAttention(from: repo.pathURL)
-        }
-    }
-
     /// Best-effort teardown of a task the engine created but whose post-engine
     /// wiring failed. Force-destroys regardless of hazards — the task was never
     /// live, so leaving its worktree/branch would only orphan on-disk debris a
@@ -667,124 +638,92 @@ public final class AppModel {
         _ task: TaskRecord, mode: TaskRemovalMode
     ) async throws -> TaskRemovalReport {
         let report = try await engine.removeTask(task, repos: repos, mode: mode)
-        // Worktree tasks lose their hooks when the worktree dir is deleted;
-        // in-place tasks keep their repo, so uninstall our hooks explicitly.
-        await removeInPlaceAttention(for: task)
         tasks.removeAll { $0.id == task.id }
-        attention.removeValue(forKey: task.id)
+        lastActivity.removeValue(forKey: task.id)
         liveSessions.remove(task.id)
         try persist()
         return report
     }
 
-    // MARK: - Attention
+    // MARK: - Session liveness (the one honest, hook-free status signal)
 
-    /// Reducer for socket signals: folds the event through the state machine.
-    /// Unknown tasks are ignored (the listener already dropped unknown
-    /// sessions; this guards the id-level race after task removal).
-    /// Applies a socket signal; returns the resulting transition (if the
-    /// state changed) so the runtime can decide on a notification.
-    @discardableResult
-    public func apply(_ signal: TaskAttentionSignal) -> AttentionTransition? {
-        applyEvent(signal.event, to: signal.taskId)
-    }
-
-    @discardableResult
-    public func noteSessionStarted(taskId: UUID) -> AttentionTransition? {
-        guard tasks.contains(where: { $0.id == taskId }) else { return nil }
+    /// Records that a live pty exists for this task (the session layer calls
+    /// this when it spawns the shell). No agent-status inference — Lighthouse
+    /// only knows a session is LIVE, never what the agent is doing.
+    public func noteSessionStarted(taskId: UUID) {
+        guard tasks.contains(where: { $0.id == taskId }) else { return }
         liveSessions.insert(taskId)
-        return applyEvent(.agentWorking, to: taskId)
+        lastActivity[taskId] = now()
     }
 
-    /// Pty death (process exited, window closed the fd, crash) — distinct
-    /// from the SessionEnd hook, which may or may not have arrived first;
-    /// both fold to the same defined state.
-    @discardableResult
-    public func noteSessionEnded(taskId: UUID) -> AttentionTransition? {
+    /// Records that the pty died (process exited, fd closed, crash).
+    public func noteSessionEnded(taskId: UUID) {
         liveSessions.remove(taskId)
-        return applyEvent(.sessionDied, to: taskId)
+        lastActivity[taskId] = now()
     }
 
-    @discardableResult
-    private func applyEvent(_ event: AttentionEvent, to taskId: UUID) -> AttentionTransition? {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return nil }
-        let current = attention[taskId] ?? tasks[index].state
-        let next = AttentionStateMachine.nextState(from: current, on: event)
-        guard next != current else { return nil }
-        attention[taskId] = next
-        attentionSince[taskId] = now()
-        tasks[index].state = next
-        try? persist() // state persistence is best-effort; next save catches up
-        return AttentionTransition(taskId: taskId, event: event, oldState: current, newState: next)
+    /// Whether a session is live for this task right now — the sole basis for
+    /// every "active" affordance (the live dot, quit-safety, resume-gating).
+    public func isSessionLive(_ taskId: UUID) -> Bool {
+        liveSessions.contains(taskId)
     }
 
-    /// Number of tasks currently needing input — the dock badge count.
-    public var needsInputCount: Int {
-        tasks.reduce(0) { $0 + (attentionState(of: $1.id) == .needsInput ? 1 : 0) }
+    /// When the task last started/ended a session, or nil if never — honest data
+    /// for the Harbor card's relative-time slot (never a fabricated time).
+    public func lastActivity(of taskId: UUID) -> Date? {
+        lastActivity[taskId]
     }
 
-    public func attentionState(of taskId: UUID) -> TaskAttentionState {
-        attention[taskId] ?? .done
-    }
-
-    /// When a task entered its current attention state (its last transition),
-    /// or nil if unknown. Honest data for the Harbor card's relative-time slot
-    /// — `attentionSince` was private; the Harbor UI needs a read accessor and
-    /// this exposes exactly the recorded value (never a fabricated time).
-    public func attentionSince(of taskId: UUID) -> Date? {
-        attentionSince[taskId]
+    /// Sets the user's free-text status on a task and persists it. Trimmed;
+    /// empty clears it. This is the only thing that changes a task's status now.
+    public func setStatus(_ status: String, for taskId: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tasks[index].status != trimmed else { return }
+        tasks[index].status = trimmed
+        try? persist() // best-effort; next save catches up
     }
 
     // MARK: - Derivations for the UI
 
-    /// A task can be resumed whenever it has a persisted session and the agent
-    /// is not actively working. With persistent shells the pty outlives
-    /// Claude, so "no live pty" is no longer the signal — the runtime resumes
-    /// by typing `claude --resume` into the live shell (or a fresh tab).
+    /// A task can be resumed whenever it has a persisted session and no session
+    /// is currently live (a live session is already open — go to it, don't
+    /// resume). The runtime resumes by typing `claude --resume` into a shell.
     public func canResume(_ task: TaskRecord) -> Bool {
-        task.sessionRef != nil && attentionState(of: task.id) != .working
+        task.sessionRef != nil && !liveSessions.contains(task.id)
     }
 
-    /// Quitting kills in-flight agent work (pty death); these tasks make the
-    /// quit confirmation mandatory (spec §3).
+    /// Quitting kills in-flight agent work (pty death); any task with a live
+    /// session makes the quit confirmation mandatory.
     public func tasksBlockingQuit() -> [TaskRecord] {
-        tasks.filter { liveSessions.contains($0.id) && attentionState(of: $0.id) == .working }
+        tasks.filter { liveSessions.contains($0.id) }
     }
 
-    private func inboxItem(_ task: TaskRecord) -> InboxItem {
-        InboxItem(
-            id: task.id, name: task.name, state: attentionState(of: task.id),
-            since: attentionSince[task.id] ?? .distantPast)
+    /// The one task order, used by both the Harbor grid and ⌘K: live sessions
+    /// first, then most-recent activity, then name, then id — a deterministic
+    /// total order (there is no attention hierarchy to sort by any more).
+    public func orderedTasks() -> [TaskRecord] {
+        tasks.sorted(by: taskPrecedes)
     }
 
-    /// The authoritative "what needs me" order (spec §6 step 7): needs-input
-    /// (oldest-blocked first), then working, dirty, done. Used by the Cmd+K
-    /// inbox with no query.
-    public func inboxOrder() -> [TaskRecord] {
-        let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        return InboxOrder.ordered(tasks.map(inboxItem)).compactMap { byId[$0.id] }
+    private func taskPrecedes(_ a: TaskRecord, _ b: TaskRecord) -> Bool {
+        let aLive = liveSessions.contains(a.id), bLive = liveSessions.contains(b.id)
+        if aLive != bLive { return aLive }
+        let aAt = lastActivity[a.id] ?? .distantPast, bAt = lastActivity[b.id] ?? .distantPast
+        if aAt != bAt { return aAt > bAt }
+        let byName = a.name.localizedCompare(b.name)
+        if byName != .orderedSame { return byName == .orderedAscending }
+        return a.id.uuidString < b.id.uuidString
     }
 
-    /// The Harbor grid order (spec §5.1): needs → working → idle → stale.
-    /// DISTINCT from `inboxOrder()` (⌘K keeps its needs→working→dirty→done).
-    /// The active filter chip is applied by the view over this ordered list.
-    public func harborOrder() -> [TaskRecord] {
-        let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        return HarborOrder.ordered(tasks.map(inboxItem)).compactMap { byId[$0.id] }
-    }
-
-    /// Cmd+K entries: with no query, the authoritative inbox order; with a
-    /// query, fuzzy-filtered but still needs-input-first (inbox semantics),
-    /// then by match quality, then name.
+    /// Cmd+K entries: with no query, the standard task order; with a query,
+    /// fuzzy-filtered by match quality, then name.
     public func switcherEntries(query: String) -> [TaskRecord] {
-        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return inboxOrder() }
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return orderedTasks() }
         let scored: [(TaskRecord, Int)] = tasks.compactMap { task in
             FuzzyMatcher.score(query: query, candidate: task.name).map { (task, $0) }
         }
         return scored.sorted { lhs, rhs in
-            let lhsNeedsInput = attentionState(of: lhs.0.id) == .needsInput
-            let rhsNeedsInput = attentionState(of: rhs.0.id) == .needsInput
-            if lhsNeedsInput != rhsNeedsInput { return lhsNeedsInput }
             if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
             return lhs.0.name.localizedCompare(rhs.0.name) == .orderedAscending
         }.map(\.0)

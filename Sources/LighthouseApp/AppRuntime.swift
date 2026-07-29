@@ -23,7 +23,6 @@ final class AppRuntime {
     private let wheelMonitor = WheelReportMonitor()
     /// Single GitClient shared by the model and the review pane.
     let git = GitClient()
-    private let listener: AttentionSocketListener
     private let adapter = ClaudeCodeAdapter()
 
     /// Owns the active theme and drives app-wide re-resolution; the resolved
@@ -64,9 +63,6 @@ final class AppRuntime {
     var nav = NavigationState()
     /// Surfaced verbatim in the UI — always the full typed description.
     var lastError: String?
-    /// Set when the attention socket could not start: sessions still run,
-    /// badges degrade to unknown (spec §8 fail-safe) — but say so visibly.
-    var attentionDegraded: String?
 
     /// LIGHTHOUSE_CONFIG_DIR overrides the config+socket location — used by
     /// scripted checks so they never touch the real config or unlink a live
@@ -81,12 +77,8 @@ final class AppRuntime {
     }
 
     init(configDirectory: URL = AppRuntime.defaultConfigDirectory()) {
-        // Socket at the config-directory ROOT: unix socket paths cap at ~104
-        // bytes (sun_path), so no nesting.
-        listener = AttentionSocketListener(directory: configDirectory, adapter: adapter)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
-            socketPath: listener.socketURL,
             adapter: adapter,
             git: git)
         do {
@@ -109,25 +101,13 @@ final class AppRuntime {
         // session-only) falls back to Harbor rather than a blank detail pane.
         let startView: NavView = model.startView == "focus" ? .focus : .harbor
         nav = NavigationState(view: startView == .focus && selectedTaskId == nil ? .harbor : startView)
-        notifications.onSelectTask = { [weak self] id in self?.selectedTaskId = id }
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
         setupPresented = model.repos.isEmpty && !model.hasCompletedSetup
-        // NSApp does not exist yet during App.init — anything touching NSApp
-        // (dock badge) or UN* must run AFTER launch, on the main actor, once
-        // NSApplication.main() is up. (A dock-badge write in init crashed on
-        // a nil NSApp — 2026-07-14.)
-        Task { @MainActor in
-            notifications.configure()
-            updateDockBadge()
-            refreshNotificationStatus()
-        }
-        Task { await runAttentionPipeline() }
         setUpGeometryProbeIfRequested()
         runDiffRenderCheckIfRequested()
         runFileRenderCheckIfRequested()
         runNavigatorCheckIfRequested()
-        runNotificationCheckIfRequested()
         runThemeCheckIfRequested()
         runHarborCheckIfRequested()
         runFocusCheckIfRequested()
@@ -218,7 +198,7 @@ final class AppRuntime {
             repoId: repo.id, worktreePath: fixture.path, mergeState: .unmerged)
         let task = TaskRecord(
             name: "digest-probe", branch: "task/digest", adapterKind: "debug",
-            sessionRef: nil, state: .done, workspaces: [workspace])
+            sessionRef: nil, workspaces: [workspace])
         model.insertEphemeralTask(task)
 
         // A hostile last-assistant-message: markup + script + markdown. Stored
@@ -329,17 +309,12 @@ final class AppRuntime {
         let repo = RepoConfig(
             path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
         model.insertEphemeralRepo(repo)
-        // Three tasks (varied states) so the rail shows a non-trivial dot count.
-        let seedStates: [(String, TaskAttentionState)] = [
-            ("focus-probe", .done),
-            ("focus-working", .working),
-            ("focus-needs", .needsInput),
-        ]
+        // Three tasks so the rail shows a non-trivial dot count.
         var seeded: [TaskRecord] = []
-        for (name, state) in seedStates {
+        for name in ["focus-probe", "focus-two", "focus-three"] {
             let task = TaskRecord(
                 name: name, branch: "task/\(name)", adapterKind: "debug",
-                sessionRef: nil, state: state, workspaces: [])
+                sessionRef: nil, workspaces: [])
             model.insertEphemeralTask(task)
             seeded.append(task)
         }
@@ -446,21 +421,12 @@ final class AppRuntime {
             path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
         model.insertEphemeralRepo(repo)
         // Seed one task per state — two needsInput so the group order and the
-        // needs-count are both non-trivial. Order chosen so a WRONG sort (plain
-        // name, or InboxOrder's needs→working→dirty→done) yields a different
-        // sequence than the expected needs→working→idle(done)→stale(dirty).
-        let seedStates: [(String, TaskAttentionState)] = [
-            ("harbor-needs-a", .needsInput),
-            ("harbor-needs-b", .needsInput),
-            ("harbor-working", .working),
-            ("harbor-idle", .done),
-            ("harbor-stale", .dirty),
-        ]
+        // Five tasks so the grid renders a non-trivial card count.
         var seeded: [TaskRecord] = []
-        for (name, state) in seedStates {
+        for name in ["harbor-a", "harbor-b", "harbor-c", "harbor-d", "harbor-e"] {
             let task = TaskRecord(
                 name: name, branch: "task/\(name)", adapterKind: "debug",
-                sessionRef: nil, state: state, workspaces: [])
+                sessionRef: nil, workspaces: [])
             model.insertEphemeralTask(task)
             seeded.append(task)
         }
@@ -481,23 +447,9 @@ final class AppRuntime {
                 FileHandle.standardOutput.write(Data("HARBOR-STAGE \(m)\n".utf8))
             }
 
-            // Sort: the Harbor order restricted to the seeded tasks must be
-            // needs → working → idle(done) → stale(dirty).
-            let order = model.harborOrder()
-                .filter { seededIds.contains($0.id) }
-                .map { model.attentionState(of: $0.id).rawValue }
-            log("sort=\(order.joined(separator: ","))")
-
-            // Filter chips: each yields the right subset of the seeded tasks.
-            @MainActor func count(_ filter: HarborFilter) -> Int {
-                model.harborOrder().filter {
-                    seededIds.contains($0.id)
-                        && filter.matches(model.attentionState(of: $0.id))
-                }.count
-            }
-            log("filter-all=\(count(.all)) filter-needs=\(count(.needs)) "
-                + "filter-working=\(count(.working)) filter-idle=\(count(.idle)) "
-                + "filter-stale=\(count(.stale))")
+            // Order: the standard task order includes every seeded task.
+            let ordered = model.orderedTasks().filter { seededIds.contains($0.id) }
+            log("ordered-count=\(ordered.count)")
 
             // card → Focus: driving `open(id)` (what a card tap calls) sets
             // view=.focus AND the selection.
@@ -647,24 +599,6 @@ final class AppRuntime {
 
     /// Whether the first-run setup sheet is showing.
     var setupPresented = false
-    /// Whether notification authorization is known-denied (drives the
-    /// one-time, dismissible inbox hint).
-    private(set) var notificationsDenied = false
-
-    /// The dismissible "notifications are off" inbox hint: shown once, when
-    /// denied and there are tasks, until the user dismisses it.
-    var notificationsHintVisible: Bool {
-        notificationsDenied && !model.notificationsHintDismissed && !model.tasks.isEmpty
-    }
-
-    func dismissNotificationsHint() { model.dismissNotificationsHint() }
-
-    private func refreshNotificationStatus() {
-        Task { @MainActor in
-            notificationsDenied = await notifications.authorizationStatus() == .denied
-        }
-    }
-
     private let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
     // MARK: - Two-mode navigation (spec §3.4)
@@ -690,51 +624,16 @@ final class AppRuntime {
     /// A SetupModel wired to this runtime's services. Fresh each time the
     /// sheet opens so checks re-run cleanly.
     func makeSetupModel() -> SetupModel {
-        SetupModel(
-            git: git, loginShell: loginShell, socketPath: listener.socketURL,
-            notifications: notifications,
-            makeListener: { dir in AttentionSocketListener(directory: dir, adapter: ClaudeCodeAdapter()) })
+        SetupModel(git: git, loginShell: loginShell)
     }
 
     func finishSetup() {
         model.markSetupCompleted()
         setupPresented = false
-        refreshNotificationStatus()
     }
 
     /// Help → Run Setup Checks (re-runnable any time).
     func openSetup() { setupPresented = true }
-
-    /// LIGHTHOUSE_DEBUG_NOTIFY=<output-file>: drives a real attention
-    /// transition on a probe task that is NOT currently viewed and writes the
-    /// decision + UN* enqueue result to the file (a file, not stdout, so
-    /// capture is reliable regardless of launch method). MUST be launched via
-    /// `open` — UNUserNotificationCenter.current() SIGTRAPs when the binary is
-    /// direct-exec'd (LaunchServices hasn't registered the app). It does NOT
-    /// call requestAuthorization (that shows a blocking modal); `center.add`
-    /// enqueues without authorization. Banner DISPLAY still needs the user's
-    /// grant — the gate asserts the decision + enqueue path only, honestly.
-    private func runNotificationCheckIfRequested() {
-        guard let outPath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_NOTIFY"],
-              !outPath.isEmpty else { return }
-        Task { @MainActor in
-            var lines: [String] = []
-            func log(_ m: String) {
-                lines.append("NOTIFY-STAGE \(m)")
-                try? lines.joined(separator: "\n").appending("\n")
-                    .write(toFile: outPath, atomically: true, encoding: .utf8)
-            }
-            let taskId = UUID()
-            let transition = AttentionTransition(
-                taskId: taskId, event: .agentNeedsInput, oldState: .working, newState: .needsInput)
-            log("decision=\(NotificationDecider.decide(transition, isCurrentlyViewed: false).map(\.rawValue) ?? "nil")")
-            log("suppressed-when-viewed=\(NotificationDecider.decide(transition, isCurrentlyViewed: true) == nil)")
-            // UN* init happens here; under `open` it is safe.
-            let enqueued = notifications.post(kind: .needsInput, taskId: taskId, taskName: "notify-probe")
-            log("enqueued=\(enqueued)")
-            log("done")
-        }
-    }
 
     /// LIGHTHOUSE_DEBUG_DIFFRENDER=1: renders the hostile fixture diff
     /// through the REAL pipeline (page builder → vendored assets → locked
@@ -808,7 +707,7 @@ final class AppRuntime {
             let repo = RepoConfig(path: repoPath, baseBranch: "main")
             let task = TaskRecord(
                 name: "navigator-probe", branch: "task", adapterKind: "debug",
-                sessionRef: nil, state: .done,
+                sessionRef: nil,
                 workspaces: [Workspace(repoId: repo.id, worktreePath: repoPath, mergeState: .unmerged)])
             // A live terminal so "still running after the swap" is a real check.
             let plan = LaunchPlan(
@@ -893,7 +792,7 @@ final class AppRuntime {
         }
         let probe = TaskRecord(
             name: "geometry-probe", branch: "debug/geometry-probe",
-            adapterKind: "debug", sessionRef: nil, state: .done, workspaces: workspaces)
+            adapterKind: "debug", sessionRef: nil, workspaces: workspaces)
         model.insertEphemeralTask(probe)
         let plan = LaunchPlan(
             executable: "/bin/cat", arguments: [], environment: [:],
@@ -911,61 +810,6 @@ final class AppRuntime {
         // creation in other launch contexts and silently no-opped.
     }
 
-    private func runAttentionPipeline() async {
-        do {
-            try await listener.start()
-        } catch {
-            attentionDegraded =
-                "Attention socket failed to start (\(error)). Sessions still work; badges won't update."
-            return
-        }
-        for task in model.tasks {
-            if let ref = task.sessionRef {
-                await listener.register(sessionRef: ref, taskId: task.id)
-            }
-        }
-        let stream = await listener.signals()
-        for await signal in stream {
-            let transition = model.apply(signal)
-            handleTransition(transition)
-            feedDigest(from: signal)
-        }
-    }
-
-    /// Feeds the digest cache from a raw attention signal. `baked` is measured
-    /// between this task's most recent `agentWorking` (UserPromptSubmit) and its
-    /// `agentStopped` (Stop); on Stop we also stash the untrusted action and
-    /// kick off the (bounded) transcript read for model/ctx and a diffStat
-    /// refresh. Wall-clock is stamped here, at the moment the signal lands.
-    private func feedDigest(from signal: TaskAttentionSignal) {
-        let now = Date()
-        switch signal.event {
-        case .agentWorking:
-            digests.noteWorkStarted(taskId: signal.taskId, at: now)
-        case .agentStopped:
-            digests.recordStop(
-                taskId: signal.taskId, action: signal.lastAssistantMessage, at: now)
-            if let path = signal.transcriptPath {
-                refreshTranscriptDigest(taskId: signal.taskId, transcriptPath: path)
-            }
-            if let task = model.tasks.first(where: { $0.id == signal.taskId }) {
-                Task { await refreshDiffDigest(for: task) }
-            }
-        default:
-            break
-        }
-    }
-
-    /// Reads the transcript OFF the main actor (bounded tail, malformed-safe)
-    /// and folds the honest model + ctx estimate into the cache. Any failure
-    /// leaves those fields blank — never fabricated.
-    private func refreshTranscriptDigest(taskId: UUID, transcriptPath: String) {
-        Task {
-            let digest = await Task.detached { TranscriptReader.read(path: transcriptPath) }.value
-            digests.setTranscript(taskId: taskId, model: digest.model, context: digest.context)
-        }
-    }
-
     /// Recomputes the deterministic diff counts for a task by summing
     /// `git diff --numstat --merge-base <base>` across its worktrees (each vs
     /// its repo's base). A per-worktree failure leaves that worktree out rather
@@ -980,36 +824,6 @@ final class AppRuntime {
             total = (total ?? .zero).adding(stat)
         }
         digests.setDiffStat(taskId: task.id, total)
-    }
-
-    let notifications = NotificationService()
-
-    /// Whether the user is currently looking at a task: app active AND that
-    /// task selected. Notifications fire only when a signal would be MISSED.
-    private func isCurrentlyViewed(_ taskId: UUID) -> Bool {
-        NSApp.isActive && selectedTaskId == taskId
-    }
-
-    /// Decides (pure) then posts a notification for an attention transition,
-    /// and refreshes the dock badge. Called for every transition — socket
-    /// signals and session start/stop alike.
-    func handleTransition(_ transition: AttentionTransition?) {
-        if let transition,
-           let kind = NotificationDecider.decide(
-               transition, isCurrentlyViewed: isCurrentlyViewed(transition.taskId)),
-           let task = model.tasks.first(where: { $0.id == transition.taskId }) {
-            notifications.post(kind: kind, taskId: task.id, taskName: task.name)
-        }
-        updateDockBadge()
-    }
-
-    /// Dock badge = number of needs-input tasks; cleared when zero. Uses
-    /// NSApplication.shared (always valid) — the `NSApp` global is nil until
-    /// the app instance is first created, which crashed a dock-badge write in
-    /// App.init (2026-07-14); this and deferring the first call past init fix it.
-    func updateDockBadge() {
-        let count = model.needsInputCount
-        NSApplication.shared.dockTile.badgeLabel = count > 0 ? String(count) : nil
     }
 
     // MARK: - Terminal tabs (UI-only, not persisted; die with the app)
@@ -1036,7 +850,6 @@ final class AppRuntime {
             let (task, plan) = inPlace
                 ? try await model.createInPlaceTask(name: name, repoIds: repoIds)
                 : try await model.createTask(name: name, branch: branch, repoIds: repoIds)
-            await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
             startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
         } catch let failure as TaskCreationFailure {
@@ -1058,7 +871,6 @@ final class AppRuntime {
             let (task, plan) = try await model.createTaskFromPR(
                 reference: reference, repoId: repoId,
                 name: trimmedName.isEmpty ? nil : trimmedName)
-            await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
             startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
         } catch let error as PullRequestCheckoutError {
@@ -1099,7 +911,7 @@ final class AppRuntime {
             if let controller = registry.agentController(taskId: task.id), controller.isRunning,
                let command = plan.typedCommand {
                 registry.runCommand(taskId: task.id, tabId: TabID.agent, command: command)
-                handleTransition(model.noteSessionStarted(taskId: task.id))
+                model.noteSessionStarted(taskId: task.id)
             } else {
                 startAgentSession(taskId: task.id, plan: plan) // calls noteSessionStarted
             }
@@ -1125,7 +937,7 @@ final class AppRuntime {
         tabs[taskId, default: []].removeAll { $0.id == TabID.agent }
         tabs[taskId, default: []].insert(TerminalTab(id: TabID.agent, title: "Agent", isAgent: true), at: 0)
         focusedTab[taskId] = TabID.agent
-        handleTransition(model.noteSessionStarted(taskId: taskId))
+        model.noteSessionStarted(taskId: taskId)
     }
 
     /// Cmd+T: a plain persistent login shell in the task's primary worktree —
@@ -1145,6 +957,53 @@ final class AppRuntime {
         focusedTab[task.id] = tabId
     }
 
+    // MARK: - Scratch terminal (repo-less)
+
+    /// Prompts for a directory (default $HOME) and opens a plain scratch
+    /// terminal there — see `openScratchTerminal`. Shared by the Harbor button
+    /// and the ⌘⌥T menu command so the picker lives in one place.
+    func promptAndOpenScratchTerminal() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        panel.prompt = "Open Terminal"
+        panel.message = "Choose a directory for the scratch terminal"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openScratchTerminal(directory: url)
+    }
+
+    /// Opens a repo-less scratch terminal: a plain login shell at `directory`,
+    /// no agent, no hooks, no review pane (the task has no workspaces). The task
+    /// is ephemeral — it vanishes when its shell exits, when closed, or on quit.
+    func openScratchTerminal(directory: URL) {
+        let task = model.createScratchTask(directory: directory)
+        open(task.id)
+        let tabId = UUID()
+        let plan = LaunchPlan(
+            executable: loginShell, arguments: ["-l", "-i"], environment: [:],
+            workingDirectory: directory, sessionRef: "", typedCommand: nil)
+        registry.open(taskId: task.id, tabId: tabId, plan: plan) { [weak self] key, _ in
+            self?.handleTerminalExit(key)
+        }
+        tabs[task.id] = [TerminalTab(id: tabId, title: "shell", isAgent: false)]
+        focusedTab[task.id] = tabId
+    }
+
+    /// Closes a scratch terminal task: tears down its terminals and drops the
+    /// ephemeral task. No engine / worktree cleanup — it owns nothing on disk.
+    func closeScratchTask(_ task: TaskRecord) {
+        let wasViewing = selectedTaskId == task.id
+        registry.discardTask(taskId: task.id)
+        tabs[task.id] = nil
+        focusedTab[task.id] = nil
+        digests.remove(taskId: task.id)
+        if wasViewing { selectedTaskId = nil }
+        model.removeScratchTask(task.id)
+        if wasViewing { backToHarbor() }
+    }
+
     /// Cmd+W: close the focused non-agent tab (the agent tab is closed only
     /// via task removal / explicit confirmation elsewhere).
     func closeFocusedTab(for taskId: UUID) {
@@ -1162,11 +1021,17 @@ final class AppRuntime {
 
     private func handleTerminalExit(_ key: TabKey) {
         if key.tabId == TabID.agent {
-            handleTransition(model.noteSessionEnded(taskId: key.taskId))
+            model.noteSessionEnded(taskId: key.taskId)
         }
         tabs[key.taskId]?.removeAll { $0.id == key.tabId }
         if focusedTab[key.taskId] == key.tabId {
             focusedTab[key.taskId] = tabs[key.taskId]?.first?.id
+        }
+        // A scratch terminal IS its shell: when that shell exits and no tabs
+        // remain, the repo-less task has nothing left, so retire it entirely.
+        if let task = model.tasks.first(where: { $0.id == key.taskId }),
+           task.workspaces.isEmpty, (tabs[key.taskId] ?? []).isEmpty {
+            closeScratchTask(task)
         }
     }
 
@@ -1178,15 +1043,11 @@ final class AppRuntime {
             // digests — a failed removal must leave the task fully intact
             // (session alive, still listed) so the user can retry or cancel.
             _ = try await model.removeTask(task, mode: mode)
-            if let ref = task.sessionRef {
-                await listener.unregister(sessionRef: ref)
-            }
             registry.discardTask(taskId: task.id)
             tabs[task.id] = nil
             focusedTab[task.id] = nil
             digests.remove(taskId: task.id)
             if selectedTaskId == task.id { selectedTaskId = nil }
-            updateDockBadge() // a needs-input task may have gone away
             return true
         } catch let error as TaskEngineError {
             lastError = FailureDescriber.describe(error)
@@ -1197,9 +1058,10 @@ final class AppRuntime {
         }
     }
 
-    /// Called on the way out (applicationWillTerminate): unlink the socket.
-    /// Ptys die with the app; conversation context survives via --resume.
-    nonisolated func shutdown() {
-        listener.stop()
+    /// Called on the way out (applicationWillTerminate): tear down the wheel
+    /// monitor. Ptys die with the app; conversation context survives via
+    /// --resume.
+    func shutdown() {
+        wheelMonitor.stop()
     }
 }

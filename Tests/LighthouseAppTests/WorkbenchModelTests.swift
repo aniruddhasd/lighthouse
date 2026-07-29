@@ -32,7 +32,7 @@ final class WorkbenchModelTests {
         try Data("new\n".utf8).write(to: worktree.appendingPathComponent("untracked.txt"))
         let repo = RepoConfig(path: main.path.path, baseBranch: "main")
         let task = TaskRecord(
-            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil, state: .done,
+            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil,
             workspaces: [Workspace(repoId: repo.id, worktreePath: worktree.path, mergeState: .unmerged)])
         return (WorkbenchModel(task: task, repos: [repo], git: git), worktree)
     }

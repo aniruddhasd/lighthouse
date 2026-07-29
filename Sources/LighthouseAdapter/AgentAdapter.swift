@@ -64,35 +64,15 @@ public struct SessionSpec: Sendable, Equatable {
     }
 }
 
-/// A raw attention payload translated into task-engine terms: which session
-/// spoke, and what it means. `event` is nil for payloads that are valid but
-/// irrelevant (e.g. an auth notification).
-public struct AgentAttentionSignal: Sendable, Equatable {
-    public let sessionRef: String
-    public let event: AttentionEvent?
-    /// The agent's final message on a `Stop` (the hook's
-    /// `last_assistant_message`), else nil. UNTRUSTED content — carried through
-    /// for the Phase-4 digest, never interpreted here. Optional and
-    /// backward-compatible: decoders treat it as absent by default.
-    public let lastAssistantMessage: String?
-    /// The session transcript JSONL path (`transcript_path`), present on every
-    /// hook payload, else nil. Read-only source for model/ctx in the digest.
-    public let transcriptPath: String?
-
-    public init(
-        sessionRef: String, event: AttentionEvent?,
-        lastAssistantMessage: String? = nil, transcriptPath: String? = nil
-    ) {
-        self.sessionRef = sessionRef
-        self.event = event
-        self.lastAssistantMessage = lastAssistantMessage
-        self.transcriptPath = transcriptPath
-    }
-}
-
 /// The seam between Lighthouse and any agent CLI (spec guardrail 3: app code
 /// never calls agent CLIs raw). Shaped around capabilities, not Claude
 /// specifics — this is one of the two future-public contracts (§4).
+///
+/// Attention/hook wiring was removed (2026-07-29): Lighthouse no longer infers
+/// a task's status from agent hooks (they were untrustworthy) — status is now
+/// user-set free text. The adapter's remaining job is purely to build the
+/// command that launches or resumes a session, which is the one piece still
+/// specific to the agent CLI.
 public protocol AgentAdapter: Sendable {
     /// Stable identifier persisted as TaskRecord.adapterKind.
     var kind: String { get }
@@ -103,18 +83,4 @@ public protocol AgentAdapter: Sendable {
 
     /// Plan that resumes a previously persisted sessionRef.
     func resumePlan(for spec: SessionSpec, sessionRef: String) throws -> LaunchPlan
-
-    /// Installs attention wiring (hook config) into a workspace so the
-    /// running agent pushes events at `socketPath`. Idempotent; merges with
-    /// any existing user configuration.
-    func prepareWorkspaceAttention(in workspace: URL, socketPath: URL) async throws
-
-    /// Removes exactly what prepareWorkspaceAttention installed, leaving any
-    /// user configuration intact.
-    func removeWorkspaceAttention(from workspace: URL) async throws
-
-    /// Translates one raw payload (as delivered to the attention socket)
-    /// into a signal. Returns nil when the payload is not this agent's
-    /// schema — the listener drops it.
-    func attentionSignal(fromPayload payload: Data) -> AgentAttentionSignal?
 }

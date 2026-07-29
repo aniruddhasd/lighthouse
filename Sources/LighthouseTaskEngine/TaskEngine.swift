@@ -153,8 +153,6 @@ public actor TaskEngine {
         return TaskRecord(
             name: name, branch: branch, adapterKind: adapterKind,
             sessionRef: nil,
-            // No agent session exists yet (step 3): nothing needs attention.
-            state: .done,
             workspaces: workspaces)
     }
 
@@ -204,7 +202,7 @@ public actor TaskEngine {
         return TaskRecord(
             name: name, branch: primaryBranch ?? "(detached HEAD)",
             adapterKind: adapterKind, sessionRef: nil,
-            state: .done, workspaces: workspaces)
+            workspaces: workspaces)
     }
 
     // MARK: - Adding a workspace to an already-created task

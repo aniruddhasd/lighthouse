@@ -29,15 +29,6 @@ public struct RepoConfig: Codable, Sendable, Equatable, Identifiable {
     public var pathURL: URL { URL(fileURLWithPath: path, isDirectory: true) }
 }
 
-/// Task attention state (spec §3 attention pipeline):
-/// working / needs-input / done / dirty.
-public enum TaskAttentionState: String, Codable, Sendable, Equatable, CaseIterable {
-    case working
-    case needsInput = "needs-input"
-    case done
-    case dirty
-}
-
 /// Per-workspace merge-back progress. Partially-merged tasks are a visible
 /// state, not an error (spec §2.5) — hence a value per workspace, not per task.
 public enum WorkspaceMergeState: String, Codable, Sendable, Equatable, CaseIterable {
@@ -95,20 +86,42 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
     public var branch: String
     public var adapterKind: String
     public var sessionRef: String?
-    public var state: TaskAttentionState
+    /// Free-text status the user sets by hand (e.g. "waiting on review"). Empty
+    /// means unset. Replaces the old automatic attention state — Lighthouse no
+    /// longer infers a task's status from agent hooks; whether a SESSION is live
+    /// is tracked separately and honestly (AppModel.liveSessions).
+    public var status: String
     public var workspaces: [Workspace]
 
     public init(
         id: UUID = UUID(), name: String, branch: String, adapterKind: String,
-        sessionRef: String? = nil, state: TaskAttentionState, workspaces: [Workspace]
+        sessionRef: String? = nil, status: String = "", workspaces: [Workspace]
     ) {
         self.id = id
         self.name = name
         self.branch = branch
         self.adapterKind = adapterKind
         self.sessionRef = sessionRef
-        self.state = state
+        self.status = status
         self.workspaces = workspaces
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, branch, adapterKind, sessionRef, status, workspaces
+    }
+
+    /// Custom decode so configs written before free-text status (which carried a
+    /// `state` enum instead) still load: the legacy `state` key is ignored and
+    /// `status` defaults to empty. Encode is synthesized (writes `status`).
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        branch = try c.decode(String.self, forKey: .branch)
+        adapterKind = try c.decode(String.self, forKey: .adapterKind)
+        sessionRef = try c.decodeIfPresent(String.self, forKey: .sessionRef)
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
+        workspaces = try c.decode([Workspace].self, forKey: .workspaces)
     }
 
     /// True when EVERY workspace runs in-place (investigation mode) — the UI

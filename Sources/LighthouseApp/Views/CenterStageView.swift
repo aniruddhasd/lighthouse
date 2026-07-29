@@ -86,11 +86,6 @@ struct FocusBodyView: View {
     @ViewBuilder
     private var noSessionView: some View {
         VStack(spacing: 12) {
-            if runtime.model.attentionState(of: task.id) == .dirty {
-                Label("Session ended — workspace may hold unfinished work",
-                      systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.yellow)
-            }
             if runtime.model.canResume(task) {
                 Button { runtime.resumeSession(for: task) } label: {
                     Label("Resume session", systemImage: "play.circle")
@@ -237,7 +232,7 @@ struct SummaryPaneView: View {
     @Environment(\.theme) private var theme
     let task: TaskRecord
 
-    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
@@ -260,18 +255,17 @@ struct SummaryPaneView: View {
         .background(theme.bg)
     }
 
-    // status dot + label, then "baked for {baked}" when the timing is known.
+    // Live dot + an editable free-text status. "Live" means a session is
+    // running (the one honest signal); the status text is whatever the user
+    // typed. Submitting the field persists it via AppModel.setStatus.
     private var statusLine: some View {
         HStack(spacing: 10) {
-            Circle().fill(theme.accent(for: state)).frame(width: 9, height: 9)
-            Text(Self.statusLabel(state))
-                .font(LHFont.ui(15, .semibold))
-                .foregroundStyle(theme.text)
-            if let baked = digest.baked {
-                Text("baked for \(Self.bakedText(baked))")
-                    .font(LHFont.mono(12))
-                    .foregroundStyle(theme.dim)
-            }
+            StatusDot(live: live)
+            Text(live ? "Session live" : "No session")
+                .font(LHFont.ui(13, .medium))
+                .foregroundStyle(live ? theme.text : theme.dim)
+            Divider().frame(height: 16)
+            StatusEditor(task: task)
         }
     }
 
@@ -352,24 +346,6 @@ struct SummaryPaneView: View {
             .strokeBorder(theme.border, lineWidth: 1))
     }
 
-    static func statusLabel(_ state: TaskAttentionState) -> String {
-        switch state {
-        case .working: return "Working"
-        case .needsInput: return "Needs you"
-        case .done: return "Idle"
-        case .dirty: return "Unaccounted"
-        }
-    }
-
-    /// "45s", "2m 14s", "1h 3m" — a compact turn duration.
-    static func bakedText(_ interval: TimeInterval) -> String {
-        let total = Int(interval.rounded())
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m \(s)s" }
-        return "\(s)s"
-    }
-
     /// 1_000_000 → "1M", 200_000 → "200K", else the raw count.
     static func windowText(_ tokens: Int) -> String {
         if tokens % 1_000_000 == 0 { return "\(tokens / 1_000_000)M" }
@@ -392,7 +368,7 @@ struct TerminalTabBar: View {
                 let focused = runtime.focusedTab[task.id] == tab.id
                 HStack(spacing: 4) {
                     if tab.isAgent {
-                        AttentionBadge(state: runtime.model.attentionState(of: task.id))
+                        AttentionBadge(live: runtime.model.isSessionLive(task.id))
                     }
                     Text(tab.title).font(.caption)
                     if !tab.isAgent {
@@ -417,35 +393,43 @@ struct TerminalTabBar: View {
     }
 }
 
-/// The ambient attention signal (spec §1 problem 2). Badges the agent tab in
-/// the terminal tab bar. (The redesign's task cards / rail use the themed
-/// `StatusDot`; this compact symbol badge is the tab-bar variant.)
+/// Badges the agent tab with SESSION LIVENESS — a STATIC filled dot, green when
+/// a session is live, muted otherwise. Never an animated/indeterminate badge:
+/// it sits on the terminal tab bar the whole session, and a per-frame animation
+/// forces an NSHostingView layout pass every display cycle, stealing the main
+/// thread from SwiftTerm's (main-thread) drawing and lagging typing (profiled
+/// 2026-07-27). The honest signal only — no agent-status inference.
 struct AttentionBadge: View {
-    let state: TaskAttentionState
+    let live: Bool
 
     var body: some View {
-        switch state {
-        case .working:
-            // A STATIC glyph, never an indeterminate ProgressView spinner: this
-            // badge sits on the terminal tab bar the whole time the agent works,
-            // and a per-frame spinner animation forces an NSHostingView layout
-            // pass every display cycle, stealing the main thread from SwiftTerm's
-            // (main-thread) drawing and making typing lag. Profiled 2026-07-27.
-            Image(systemName: "ellipsis.circle.fill")
-                .foregroundStyle(.blue)
-                .help("Agent is working")
-        case .needsInput:
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.orange)
-                .help("Needs your input")
-        case .done:
-            Image(systemName: "checkmark.circle")
-                .foregroundStyle(.green)
-                .help("Idle — nothing pending")
-        case .dirty:
-            Image(systemName: "circle.dotted.circle")
-                .foregroundStyle(.yellow)
-                .help("Unaccounted-for changes (session died or edits with no agent)")
-        }
+        Image(systemName: "circle.fill")
+            .font(.system(size: 8))
+            .foregroundStyle(live ? .green : .secondary)
+            .help(live ? "Session live" : "No live session")
     }
+}
+
+/// Inline editor for a task's free-text status. Seeds from the task, commits on
+/// submit or focus-loss via AppModel.setStatus — the only way status changes now.
+struct StatusEditor: View {
+    @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
+    let task: TaskRecord
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Set a status…", text: $draft)
+            .textFieldStyle(.plain)
+            .font(LHFont.ui(13, .regular))
+            .foregroundStyle(theme.text)
+            .focused($focused)
+            .onAppear { draft = task.status }
+            .onChange(of: task.id) { draft = task.status }
+            .onSubmit { commit() }
+            .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+    }
+
+    private func commit() { runtime.model.setStatus(draft, for: task.id) }
 }

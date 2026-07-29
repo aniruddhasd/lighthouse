@@ -17,7 +17,6 @@ struct SetupView: View {
                 .font(.callout).foregroundStyle(.secondary)
 
             checksSection
-            notificationsSection
             repoSection
 
             Spacer(minLength: 0)
@@ -62,23 +61,6 @@ struct SetupView: View {
             } else {
                 ProgressView("Running checks…").padding(4)
             }
-        }
-    }
-
-    @ViewBuilder
-    private var notificationsSection: some View {
-        GroupBox("Notifications") {
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("So a blocked agent can reach you when you're in another app.")
-                        .font(.callout)
-                    Text("Status: \(setup?.notificationStatus ?? "unknown")")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Enable notifications") { Task { await setup?.requestNotifications() } }
-            }
-            .padding(4)
         }
     }
 

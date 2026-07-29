@@ -17,59 +17,36 @@ enum HarborDebug {
 }
 
 extension Theme {
-    /// Status → accent color: the clean mapping (spec §2) with no new state
-    /// machine — working, needsInput→needs(amber), done→idle(green),
-    /// dirty→stale(muted yellow).
-    func accent(for state: TaskAttentionState) -> Color {
-        switch state {
-        case .working: return working
-        case .needsInput: return needs
-        case .done: return idle
-        case .dirty: return stale
-        }
-    }
+    /// Session-liveness → dot color. Green (`idle` token) when a session is
+    /// live for the task, muted (`dim`) when not. Replaces the old
+    /// attention-state palette — the only automatic signal now is "is a session
+    /// live", which Lighthouse observes directly.
+    func liveAccent(_ live: Bool) -> Color { live ? idle : dim }
 }
 
-/// Human-facing status label (the redesign's vocabulary: idle/unaccounted).
-func harborStatusLabel(_ state: TaskAttentionState) -> String {
-    switch state {
-    case .working: return "Working"
-    case .needsInput: return "Needs you"
-    case .done: return "Idle"
-    case .dirty: return "Unaccounted"
-    }
-}
-
-/// A 9px status dot in the state accent. `.working` CAN get a pulsing expanding
-/// ring (~1.6s infinite, handoff), but only where `pulses` is opted in — see
-/// that property. Reduce-motion gated, so it is a steady dot when motion is off.
-/// The ring is an OVERLAY (never changes the dot's frame), so a pulsing dot
-/// never reflows the row. `glow` adds the needs-you amber halo.
+/// A small dot indicating SESSION LIVENESS: the state accent green when a live
+/// session exists for the task, muted otherwise. When live it CAN pulse, but
+/// only where `pulses` is opted in (harbor rows) — a per-frame animation is
+/// kept off the terminal screens (profiled 2026-07-27). The ring is an OVERLAY
+/// (never changes the dot's frame), so a pulsing dot never reflows the row.
 struct StatusDot: View {
     @Environment(\.theme) private var theme
     @Environment(\.motionEnabled) private var motionEnabled
-    let state: TaskAttentionState
+    let live: Bool
     var size: CGFloat = 9
-    var glow: Bool = false
-    /// Opt-in continuous pulse, default OFF so the dot is STATIC everywhere a
-    /// terminal is on screen (the focus rail/header, the switcher). An infinite
-    /// animation there forces an NSHostingView layout pass every display cycle,
-    /// stealing the main thread from SwiftTerm's drawing and lagging typing
-    /// (profiled 2026-07-27). Only the harbor rows — never on screen while a
-    /// terminal is — turn it on.
     var pulses: Bool = false
     @State private var pulsing = false
 
     var body: some View {
-        let accent = theme.accent(for: state)
+        let accent = theme.liveAccent(live)
         Circle()
             .fill(accent)
             .frame(width: size, height: size)
             .overlay {
-                // Only the working state pulses, only when motion is on, and only
-                // where the caller opted in: the ring view is otherwise absent
-                // (not merely paused), so no infinite animation is ever mounted.
-                if state == .working && motionEnabled && pulses {
+                // A live session can pulse, only when motion is on and the caller
+                // opted in: the ring view is otherwise absent (not merely paused),
+                // so no infinite animation is ever mounted.
+                if live && motionEnabled && pulses {
                     Circle()
                         .stroke(accent, lineWidth: 1.5)
                         .scaleEffect(pulsing ? 2.6 : 1)
@@ -80,27 +57,28 @@ struct StatusDot: View {
                         .onAppear { pulsing = true }
                 }
             }
-            .shadow(color: glow ? accent.opacity(0.65) : .clear, radius: glow ? 5 : 0)
     }
 }
 
-/// Status pill: `{accent}22` bg, `{accent}55` border, `{accent}` text, radius
-/// 20 (handoff §1 card head row).
+/// A pill showing the user's free-text status. Renders NOTHING when the status
+/// is empty (unset) — no fabricated "Idle"/"Working"; the card just omits it.
 struct StatusPill: View {
     @Environment(\.theme) private var theme
-    let state: TaskAttentionState
+    let status: String
 
     var body: some View {
-        let accent = theme.accent(for: state)
-        Text(harborStatusLabel(state))
-            .font(LHFont.pill)
-            .foregroundStyle(accent)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
-            .background(accent.opacity(0.13),
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.pill))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.pill)
-                .strokeBorder(accent.opacity(0.33), lineWidth: 1))
+        if !status.isEmpty {
+            Text(status)
+                .font(LHFont.pill)
+                .foregroundStyle(theme.dim)
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(theme.panel2,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.pill))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.pill)
+                    .strokeBorder(theme.border2, lineWidth: 1))
+        }
     }
 }
 
@@ -126,17 +104,10 @@ struct HarborView: View {
     @Environment(\.theme) private var theme
     @Binding var showCreateTask: Bool
 
-    private var orderedFilteredTasks: [TaskRecord] {
-        runtime.model.harborOrder().filter {
-            runtime.nav.filter.matches(runtime.model.attentionState(of: $0.id))
-        }
-    }
-
     var body: some View {
-        let cards = orderedFilteredTasks
+        let cards = runtime.model.orderedTasks()
         VStack(spacing: 0) {
             header
-            filterChips
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
                     if runtime.model.tasks.isEmpty {
@@ -172,6 +143,7 @@ struct HarborView: View {
             }
             Spacer()
             searchButton
+            scratchTerminalButton
             newTaskButton
         }
         .padding(.leading, Theme.Metric.gutter)
@@ -183,8 +155,8 @@ struct HarborView: View {
     private var subtitle: String {
         let n = runtime.model.tasks.count
         let m = runtime.model.repos.count
-        let k = runtime.model.needsInputCount
-        return "\(n) task\(n == 1 ? "" : "s") across \(m) repo\(m == 1 ? "" : "s") · \(k) need you"
+        let live = runtime.model.tasks.filter { runtime.model.isSessionLive($0.id) }.count
+        return "\(n) task\(n == 1 ? "" : "s") across \(m) repo\(m == 1 ? "" : "s") · \(live) live"
     }
 
     private var searchButton: some View {
@@ -206,6 +178,26 @@ struct HarborView: View {
         .buttonStyle(.plain)
     }
 
+    /// A plain terminal in a chosen directory, with no repo — see
+    /// `AppRuntime.promptAndOpenScratchTerminal`. Always enabled (needs no
+    /// registered repo), which is the whole point.
+    private var scratchTerminalButton: some View {
+        Button { runtime.promptAndOpenScratchTerminal() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                Text("Scratch terminal").font(LHFont.button)
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Open a plain terminal in a chosen directory — no repo needed")
+    }
+
     private var newTaskButton: some View {
         Button { showCreateTask = true } label: {
             HStack(spacing: 6) {
@@ -221,30 +213,6 @@ struct HarborView: View {
         .disabled(runtime.model.repos.isEmpty)
         .opacity(runtime.model.repos.isEmpty ? 0.5 : 1)
         .help(runtime.model.repos.isEmpty ? "Register a repo first" : "Create a new task")
-    }
-
-    // MARK: Filter chips
-
-    private var filterChips: some View {
-        FlowLayout(spacing: 9) {
-            ForEach(HarborFilter.allCases) { filter in
-                FilterChip(
-                    filter: filter,
-                    count: chipCount(filter),
-                    active: runtime.nav.filter == filter,
-                    action: { runtime.nav.setFilter(filter) })
-            }
-        }
-        .padding(.horizontal, Theme.Metric.gutter)
-        .padding(.top, 14)
-        .padding(.bottom, 16)
-    }
-
-    /// Chip counts come from the full task list mapped by state (spec §3).
-    private func chipCount(_ filter: HarborFilter) -> Int {
-        runtime.model.tasks.filter {
-            filter.matches(runtime.model.attentionState(of: $0.id))
-        }.count
     }
 
     // MARK: Task grid
@@ -351,17 +319,17 @@ struct TaskCardView: View {
     let task: TaskRecord
     @State private var appeared = false
 
-    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
-        let accent = theme.accent(for: state)
+        let accent = theme.liveAccent(live)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 10) {
-                // Harbor rows are the ONLY place the working pulse animates: this
+                // Harbor rows are the ONLY place the live pulse animates: this
                 // screen is never on screen while a terminal is, so the per-frame
                 // layout cost can't steal SwiftTerm's main thread.
-                StatusDot(state: state, glow: state == .needsInput, pulses: true)
+                StatusDot(live: live, pulses: true)
                     .padding(.top, 4)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.name)
@@ -375,7 +343,7 @@ struct TaskCardView: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
-                StatusPill(state: state)
+                StatusPill(status: task.status)
             }
             // Footer (handoff §1): model chip · +add/−del · files · time. Every
             // slot is honest — a nil digest field renders NOTHING (never a fake
@@ -389,7 +357,7 @@ struct TaskCardView: View {
                     DiffMetrics(stat: stat)
                 }
                 Spacer(minLength: 8)
-                if let since = runtime.model.attentionSince(of: task.id) {
+                if let since = runtime.model.lastActivity(of: task.id) {
                     Text(relativeTime(since))
                         .font(LHFont.metaFaint)
                         .foregroundStyle(theme.faint)
@@ -409,11 +377,10 @@ struct TaskCardView: View {
                 .fill(accent)
                 .frame(width: 3)
         }
-        // Needs-you card glow shadow (handoff §1: `0 0 26px -8px {accent}`) —
-        // a STATIC ambient signal, not motion-gated. The 3px accent border
-        // above stays.
-        .shadow(color: state == .needsInput ? accent.opacity(0.5) : .clear,
-                radius: state == .needsInput ? 13 : 0)
+        // Live-session glow shadow — a STATIC ambient "this one is running"
+        // signal, not motion-gated. The 3px accent border above stays.
+        .shadow(color: live ? accent.opacity(0.5) : .clear,
+                radius: live ? 13 : 0)
         // fadeup entrance (~.4s subtle offset+opacity), reduce-motion gated:
         // when motion is off the card is shown in its final frame with no
         // animation.
@@ -487,91 +454,6 @@ struct RepoCardView: View {
     }
 }
 
-/// One Harbor filter chip: status dot (except All) + label + count. Active =
-/// status-tint bg + border + colored text; inactive = panel2/border2/dim.
-struct FilterChip: View {
-    @Environment(\.theme) private var theme
-    let filter: HarborFilter
-    let count: Int
-    let active: Bool
-    let action: () -> Void
-
-    private var label: String {
-        switch filter {
-        case .all: return "All"
-        case .needs: return "Needs you"
-        case .working: return "Working"
-        case .idle: return "Idle"
-        case .stale: return "Unaccounted"
-        }
-    }
-
-    var body: some View {
-        // The tint color for a chip: its mapped status accent, or primary for All.
-        let tint: Color = filter.attentionState.map { theme.accent(for: $0) } ?? theme.primary
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let state = filter.attentionState {
-                    Circle().fill(theme.accent(for: state)).frame(width: 7, height: 7)
-                }
-                Text(label).font(LHFont.button)
-                Text("\(count)").font(LHFont.metaFaint)
-                    .foregroundStyle(active ? tint.opacity(0.9) : theme.faint)
-            }
-            .foregroundStyle(active ? tint : theme.dim)
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(active ? tint.opacity(0.14) : theme.panel2,
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.chip))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.chip)
-                .strokeBorder(active ? tint.opacity(0.45) : theme.border2, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// A minimal wrapping HStack for the filter chip row (the chips wrap; SwiftUI
-/// has no stock flow container pre-macOS 15, so a tiny Layout keeps the deploy
-/// target at macOS 14).
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 9
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var rows: [[CGSize]] = [[]]
-        var x: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth, !rows[rows.count - 1].isEmpty {
-                rows.append([]); x = 0
-            }
-            rows[rows.count - 1].append(size)
-            x += size.width + spacing
-        }
-        let height = rows.reduce(CGFloat(0)) { acc, row in
-            acc + (row.map(\.height).max() ?? 0) + spacing
-        } - (rows.isEmpty ? 0 : spacing)
-        return CGSize(width: maxWidth == .infinity ? x : maxWidth, height: max(0, height))
-    }
-
-    func placeSubviews(
-        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void
-    ) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX; y += rowHeight + spacing; rowHeight = 0
-            }
-            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-    }
-}
-
 /// Right-click actions shared by every task surface (Harbor card, beacon-rail
 /// dot): resume a resumable session, and remove the task (opens the
 /// confirmation sheet via `runtime.taskPendingRemoval`). Restores the affordance
@@ -582,11 +464,19 @@ private struct TaskContextMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content.contextMenu {
-            if runtime.model.canResume(task) {
-                Button("Resume Session") { runtime.resumeSession(for: task) }
-            }
-            Button("Remove Task…", role: .destructive) {
-                runtime.taskPendingRemoval = task
+            // A scratch terminal owns nothing on disk, so it skips the
+            // removal-hazard sheet and just closes.
+            if task.workspaces.isEmpty {
+                Button("Close Terminal", role: .destructive) {
+                    runtime.closeScratchTask(task)
+                }
+            } else {
+                if runtime.model.canResume(task) {
+                    Button("Resume Session") { runtime.resumeSession(for: task) }
+                }
+                Button("Remove Task…", role: .destructive) {
+                    runtime.taskPendingRemoval = task
+                }
             }
         }
     }

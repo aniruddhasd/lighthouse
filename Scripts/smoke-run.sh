@@ -504,45 +504,8 @@ print("NAVIGATOR GATE: PASS")
 PY
 rm -f "$navigator_log"
 
-# --- Notification gate: decision + UN* enqueue path in the real app --------
-# UNUserNotificationCenter SIGTRAPs unless the app is launched by
-# LaunchServices, so this probe launches via `open` (how the real app runs)
-# and writes results to a file. It asserts the DECISION (needs-input fires,
-# suppressed when the task is viewed) and that the request ENQUEUED — banner
-# DISPLAY needs the user's authorization and is NOT asserted here (honest).
-notify_out="$(mktemp -d)/notify.txt"
-notify_cfg="$(mktemp -d)"
-open -n --env "LIGHTHOUSE_DEBUG_NOTIFY=$notify_out" --env "LIGHTHOUSE_CONFIG_DIR=$notify_cfg" \
-    "$package_root/dist/Lighthouse.app"
-trap 'pkill -9 -f "dist/Lighthouse.app/Contents/MacOS/Lighthouse" 2>/dev/null || true; rm -rf "$notify_cfg" "$(dirname "$notify_out")"' EXIT
-notify_tries=0
-until grep -q "NOTIFY-STAGE done" "$notify_out" 2>/dev/null; do
-    notify_tries=$((notify_tries + 1))
-    if [ "$notify_tries" -gt 100 ]; then
-        echo "NOTIFY GATE: FAIL (no result within 20s)" >&2
-        cat "$notify_out" 2>/dev/null >&2 || true
-        exit 1
-    fi
-    sleep 0.2
-done
-pkill -9 -f "dist/Lighthouse.app/Contents/MacOS/Lighthouse" 2>/dev/null || true
-trap - EXIT
-python3 - "$notify_out" <<'PY'
-import sys
-lines = dict(
-    l.strip().removeprefix("NOTIFY-STAGE ").split("=", 1)
-    for l in open(sys.argv[1]) if l.startswith("NOTIFY-STAGE ") and "=" in l)
-print(f"NOTIFY stages: {lines}")
-problems = []
-if lines.get("decision") != "needsInput": problems.append(f"decision={lines.get('decision')}")
-if lines.get("suppressed-when-viewed") != "true": problems.append("not suppressed when viewed")
-if lines.get("enqueued") != "true": problems.append("request not enqueued")
-if problems:
-    print("NOTIFY GATE: FAIL (" + "; ".join(problems) + ")")
-    sys.exit(1)
-print("NOTIFY GATE: PASS (banner display depends on user authorization — not asserted)")
-PY
-rm -rf "$notify_cfg" "$(dirname "$notify_out")"
+# The notification gate was removed with the attention/hook system (2026-07-29):
+# Lighthouse no longer posts notifications, so there is nothing to assert here.
 
 # --- Theme gate: the runtime theme foundation in the real app --------------
 # The Theme tokens are pure and unit-tested, but the LIVE flip + the custom
@@ -710,15 +673,9 @@ def want(key, val):
 
 # The live grid rendered the five seeded cards.
 want("rendered-cards", "5")
-# HarborOrder: needs -> working -> idle(done) -> stale(dirty). A wrong sort
-# (plain name, or InboxOrder's needs->working->dirty->done) fails here.
-want("sort", "needs-input,needs-input,working,done,dirty")
-# Each filter chip selects exactly its mapped state's subset.
-want("filter-all", "5")
-want("filter-needs", "2")
-want("filter-working", "1")
-want("filter-idle", "1")
-want("filter-stale", "1")
+# The standard task order includes every seeded task (status filters were
+# removed with the attention system — one ordered list, no chips).
+want("ordered-count", "5")
 # card -> Focus and ⌘K -> Focus both flip the runtime, with selection applied.
 want("card-open-view", "focus")
 want("card-open-selected", "true")

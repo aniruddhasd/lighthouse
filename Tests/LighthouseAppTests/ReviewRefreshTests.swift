@@ -41,7 +41,7 @@ final class ReviewRefreshTests {
 
     private func makeModel(repo: RepoConfig, worktree: URL) -> ReviewPaneModel {
         let task = TaskRecord(
-            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil, state: .done,
+            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil,
             workspaces: [Workspace(repoId: repo.id, worktreePath: worktree.path, mergeState: .unmerged)])
         return ReviewPaneModel(task: task, repos: [repo], git: git)
     }

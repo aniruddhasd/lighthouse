@@ -78,16 +78,6 @@ struct ContentView: View {
         } message: {
             Text(runtime.lastError ?? "")
         }
-        .safeAreaInset(edge: .bottom) {
-            if let degraded = runtime.attentionDegraded {
-                Text(degraded)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity)
-                    .padding(4)
-                    .background(.quaternary)
-            }
-        }
     }
 
 }

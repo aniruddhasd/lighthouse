@@ -147,10 +147,7 @@ struct BeaconRail: View {
     private func railDot(_ task: TaskRecord) -> some View {
         let selected = runtime.selectedTaskId == task.id
         return Button { runtime.open(task.id) } label: {
-            StatusDot(
-                state: runtime.model.attentionState(of: task.id),
-                size: 11,
-                glow: runtime.model.attentionState(of: task.id) == .needsInput)
+            StatusDot(live: runtime.model.isSessionLive(task.id), size: 11)
                 .frame(width: 40, height: 40)
                 .background(
                     selected ? theme.panel3 : Color.clear,
@@ -271,7 +268,9 @@ struct FocusCenter: View {
                 // that header's Edit/Terminal controls stay visible and clickable
                 // (they used to be tucked behind the panel).
                 .overlay(alignment: .topTrailing) {
-                    if workbench.navigatorVisible {
+                    // Never on a scratch terminal (no workspaces → nothing to
+                    // navigate), even if ⌘\ toggles the flag.
+                    if workbench.navigatorVisible && !task.workspaces.isEmpty {
                         NavigatorOverlay(workbench: workbench)
                             .padding(.top, workbench.effectiveBody == .viewer
                                      ? FocusBodyView.viewerHeaderHeight : 0)
@@ -313,12 +312,12 @@ struct FocusTaskHeader: View {
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
-    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
         HStack(spacing: 12) {
-            StatusDot(state: state, glow: state == .needsInput)
+            StatusDot(live: live)
             VStack(alignment: .leading, spacing: 1) {
                 Text(task.name)
                     .font(LHFont.taskHeader)
@@ -331,11 +330,15 @@ struct FocusTaskHeader: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 12)
-            modeToggle
-            if let context = digest.context {
-                ContextMeter(context: context)
+            // A scratch terminal (no workspaces) has nothing to diff/summarize,
+            // so it is terminal-only: no mode toggle, no navigator.
+            if !task.workspaces.isEmpty {
+                modeToggle
+                if let context = digest.context {
+                    ContextMeter(context: context)
+                }
+                navigatorToggle
             }
-            navigatorToggle
         }
         .padding(.horizontal, 14)
         .frame(height: Theme.Metric.headerRow)
@@ -374,6 +377,8 @@ struct FocusTaskHeader: View {
     }
 
     private var metaLine: String {
+        // Scratch terminal: `branch` holds the shell's directory — show it whole.
+        if task.workspaces.isEmpty { return task.branch }
         let repoNames = task.workspaces.compactMap { ws in
             runtime.model.repos.first { $0.id == ws.repoId }?.pathURL.lastPathComponent
         }

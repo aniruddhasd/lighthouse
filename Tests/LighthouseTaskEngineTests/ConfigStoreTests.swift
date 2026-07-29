@@ -24,7 +24,7 @@ final class ConfigStoreTests {
         let repoMinimal = RepoConfig(path: "/tmp/repos/beta", baseBranch: "develop")
         let task = TaskRecord(
             name: "payments-fix", branch: "task/payments-fix", adapterKind: "claude-code",
-            sessionRef: "session-123", state: .needsInput,
+            sessionRef: "session-123", status: "waiting on review",
             workspaces: [
                 Workspace(repoId: repoFull.id, worktreePath: "/tmp/wt/alpha", mergeState: .conflicted),
                 Workspace(repoId: repoMinimal.id, worktreePath: "/tmp/wt/beta", mergeState: .merged),
@@ -173,7 +173,7 @@ final class ConfigStoreTests {
             repos: [RepoConfig(path: "/tmp/r", baseBranch: "main")],
             tasks: [TaskRecord(
                 name: "t", branch: "task/t", adapterKind: "claude-code",
-                sessionRef: nil, state: .done, workspaces: [])])
+                sessionRef: nil, workspaces: [])])
         try store.save(config)
         let loaded = try store.load()
         #expect(loaded == config)

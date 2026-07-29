@@ -67,6 +67,11 @@ struct LighthouseMain: App {
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(runtime.selectedTaskId == nil)
 
+                // A plain terminal in a chosen directory, no repo. ⌘⌥T (⌘T is
+                // the in-task new-tab); always available.
+                Button("New Scratch Terminal…") { runtime.promptAndOpenScratchTerminal() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
+
                 Button("Close Terminal Tab") {
                     if let id = runtime.selectedTaskId { runtime.closeFocusedTab(for: id) }
                 }
