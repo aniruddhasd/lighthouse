@@ -341,6 +341,29 @@ final class AppModelTests {
         #expect(reloaded.tasks.first { $0.id == task.id }?.status == "waiting on review")
     }
 
+    /// The per-task base-branch override is trimmed, persists across a reload,
+    /// and an empty value clears it back to the repo default.
+    @Test func baseOverrideSetsPersistsAndClears() async throws {
+        let task = try await makeTask()
+        let repoId = task.workspaces[0].repoId
+        func override(in m: AppModel) -> String?? {
+            m.tasks.first { $0.id == task.id }?.workspaces[0].baseOverride
+        }
+        #expect(override(in: model) == .some(nil)) // default: no override
+
+        model.setWorkspaceBaseOverride(taskId: task.id, repoId: repoId, base: "  develop  ")
+        #expect(override(in: model) == "develop") // trimmed
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(override(in: reloaded) == "develop") // survived relaunch
+
+        model.setWorkspaceBaseOverride(taskId: task.id, repoId: repoId, base: "   ")
+        #expect(override(in: model) == .some(nil)) // empty clears it
+    }
+
     // MARK: Derivations
 
     /// Resume needs a stored session and NO live session (a live one is already

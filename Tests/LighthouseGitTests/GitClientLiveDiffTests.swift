@@ -3,9 +3,10 @@ import Testing
 import LighthouseFixtures
 @testable import LighthouseGit
 
-/// The live-diff invocation (`git diff --merge-base <base> --`): committed +
-/// staged + unstaged relative to the merge base, base-side commits excluded,
-/// untracked separate.
+/// The live-diff invocation (`git diff --merge-base <base> --`): the worktree's
+/// NET FORWARD CHANGE — committed + staged + unstaged relative to the merge base
+/// of <base> and HEAD, base-side commits excluded (what a merge into <base>
+/// would bring). Untracked files are handled separately.
 @Suite("GitClient live diff (fixture repos)")
 final class GitClientLiveDiffTests {
     private let fixtures: FixtureFactory
@@ -49,7 +50,7 @@ final class GitClientLiveDiffTests {
         // typed error is commandFailed, not notARepository. Loud either way.
         let dir = try fixtures.nonRepoDirectory()
         await #expect {
-            _ = try await self.client.liveDiff(againstMergeBaseOf: "main", in: dir)
+            _ = try await self.client.liveDiff(against: "main", in: dir)
         } throws: { error in
             switch error as? GitClientError {
             case .commandFailed, .notARepository: return true
@@ -61,9 +62,9 @@ final class GitClientLiveDiffTests {
     @Test func emptyDiffIsEmptyString() async throws {
         let repo = try fixtures.cleanRepo()
         try fixtures.git(["checkout", "-b", "task"], in: repo.path)
-        let patch = try await client.liveDiff(againstMergeBaseOf: "main", in: repo.path)
+        let patch = try await client.liveDiff(against: "main", in: repo.path)
         #expect(patch.isEmpty)
-        let entries = try await client.liveDiffNameStatus(againstMergeBaseOf: "main", in: repo.path)
+        let entries = try await client.liveDiffNameStatus(against: "main", in: repo.path)
         #expect(entries.isEmpty)
     }
 
@@ -87,21 +88,23 @@ final class GitClientLiveDiffTests {
 
     @Test func liveDiffCoversCommittedStagedAndUnstaged() async throws {
         let repo = try mixedRepo()
-        let patch = try await client.liveDiff(againstMergeBaseOf: "main", in: repo.path)
+        let patch = try await client.liveDiff(against: "main", in: repo.path)
         #expect(patch.contains("+committed change"))
         #expect(patch.contains("+staged change"))
         #expect(patch.contains("+unstaged line"))
-        // Base-side commits are NOT the task's changes.
+        // Merge-base excludes the base branch's own commits since divergence —
+        // they are not part of this worktree's forward change.
         #expect(!patch.contains("base-moved"))
     }
 
     @Test func liveNameStatusMatchesThePatch() async throws {
         let repo = try mixedRepo()
-        let entries = try await client.liveDiffNameStatus(againstMergeBaseOf: "main", in: repo.path)
+        let entries = try await client.liveDiffNameStatus(against: "main", in: repo.path)
         let byPath = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0.change) })
         #expect(byPath["committed.txt"] == .added)
         #expect(byPath["staged.txt"] == .added)
         #expect(byPath["notes.txt"] == .modified)
+        // The base branch's own commit is excluded from the forward change.
         #expect(byPath["base-moved.txt"] == nil)
     }
 }

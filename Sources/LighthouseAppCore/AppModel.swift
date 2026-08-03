@@ -684,6 +684,19 @@ public final class AppModel {
         try? persist() // best-effort; next save catches up
     }
 
+    /// Overrides the "vs base" diff base branch for one task's workspace
+    /// (identified by its repo). `base` nil/empty reverts to the repo default.
+    /// Persisted so the choice survives a relaunch.
+    public func setWorkspaceBaseOverride(taskId: UUID, repoId: UUID, base: String?) {
+        guard let ti = tasks.firstIndex(where: { $0.id == taskId }),
+              let wi = tasks[ti].workspaces.firstIndex(where: { $0.repoId == repoId }) else { return }
+        let trimmed = base?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard tasks[ti].workspaces[wi].baseOverride != normalized else { return }
+        tasks[ti].workspaces[wi].baseOverride = normalized
+        try? persist() // best-effort; next save catches up
+    }
+
     // MARK: - Derivations for the UI
 
     /// A task can be resumed whenever it has a persisted session and no session

@@ -51,27 +51,34 @@ public struct Workspace: Codable, Sendable, Equatable {
     /// nested inside TaskRecord and both-way tolerant (older builds ignore it on
     /// read), so it needs no top-level config schema bump.
     public var isInPlace: Bool
+    /// The base branch this task's "vs base" diff compares against — a branch
+    /// name. nil means "use the repo's registered `baseBranch`" (the branch the
+    /// worktree was created from). Changeable per task (from the Summary tab) so
+    /// a task can diff against any branch. Absent in older configs → decodes nil.
+    public var baseOverride: String?
 
     public init(
         repoId: UUID, worktreePath: String, mergeState: WorkspaceMergeState,
-        isInPlace: Bool = false
+        isInPlace: Bool = false, baseOverride: String? = nil
     ) {
         self.repoId = repoId
         self.worktreePath = worktreePath
         self.mergeState = mergeState
         self.isInPlace = isInPlace
+        self.baseOverride = baseOverride
     }
 
     public var worktreeURL: URL { URL(fileURLWithPath: worktreePath, isDirectory: true) }
 
-    /// Custom decode so a legacy workspace (no `isInPlace` key) loads as a
-    /// worktree — the only safe default for the removal path.
+    /// Custom decode so a legacy workspace (no `isInPlace`/`baseOverride` keys)
+    /// loads as a worktree with the repo-default base — the only safe defaults.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         repoId = try c.decode(UUID.self, forKey: .repoId)
         worktreePath = try c.decode(String.self, forKey: .worktreePath)
         mergeState = try c.decode(WorkspaceMergeState.self, forKey: .mergeState)
         isInPlace = try c.decodeIfPresent(Bool.self, forKey: .isInPlace) ?? false
+        baseOverride = try c.decodeIfPresent(String.self, forKey: .baseOverride)
     }
 }
 

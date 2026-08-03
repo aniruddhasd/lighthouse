@@ -104,7 +104,7 @@ struct FocusBodyView: View {
 
     @ViewBuilder
     private var summaryPane: some View {
-        SummaryPaneView(task: task)
+        SummaryPaneView(workbench: workbench, task: task)
     }
 
     // MARK: Viewer pane (restyled header — handoff §2: path · read-only · ⌘J)
@@ -230,6 +230,7 @@ struct FocusBodyView: View {
 struct SummaryPaneView: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
+    @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
     private var live: Bool { runtime.model.isSessionLive(task.id) }
@@ -240,6 +241,7 @@ struct SummaryPaneView: View {
             VStack(alignment: .leading, spacing: 20) {
                 statusLine
                 actionLine
+                if !task.workspaces.isEmpty { diffBaseSection }
                 statCards
                 // Phase 4b will add the rich transcript-derived Summary here:
                 // "What the agent did" (✓ per steps[]) and the amber "Next step"
@@ -253,6 +255,71 @@ struct SummaryPaneView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
+        .task(id: workbench.selectedWorkspaceIndex) { await workbench.loadBranchInfo() }
+    }
+
+    // MARK: Diff base — the branch the "vs base" diff compares against. This is
+    // the ONLY place the base is chosen (the sidebar just names it). "The folder
+    // (worktree, on whatever branch) vs a base branch you pick."
+    private var diffBaseSection: some View {
+        card(title: "Diff base") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Worktree on").font(LHFont.meta).foregroundStyle(theme.dim)
+                    Text(workbench.worktreeBranch ?? "—")
+                        .font(LHFont.mono(12)).foregroundStyle(theme.text)
+                }
+                HStack(spacing: 8) {
+                    Text("Compare vs").font(LHFont.meta).foregroundStyle(theme.dim)
+                    baseMenu
+                }
+                Text("“vs base” in the sidebar shows this branch. Uncommitted shows the working tree vs its own HEAD.")
+                    .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var baseMenu: some View {
+        Menu {
+            ForEach(workbench.availableBranches, id: \.self) { branch in
+                Button {
+                    chooseBase(branch)
+                } label: {
+                    if branch == workbench.review.activeBase {
+                        Label(branch, systemImage: "checkmark")
+                    } else {
+                        Text(branch)
+                    }
+                }
+            }
+            if let def = workbench.review.repoDefaultBase {
+                Divider()
+                Button(workbench.review.isBaseOverridden
+                       ? "Use repo default (\(def))" : "Repo default (\(def))") {
+                    chooseBase(nil)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 11))
+                Text(workbench.review.activeBase ?? "base").font(LHFont.mono(12))
+                if workbench.review.isBaseOverridden {
+                    Circle().fill(theme.primary).frame(width: 5, height: 5)
+                }
+            }
+            .foregroundStyle(theme.text)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose the base branch this task's diff compares against")
+    }
+
+    private func chooseBase(_ base: String?) {
+        workbench.setBase(base) { repoId, newBase in
+            runtime.model.setWorkspaceBaseOverride(
+                taskId: task.id, repoId: repoId, base: newBase)
+        }
     }
 
     // Live dot + an editable free-text status. "Live" means a session is

@@ -92,9 +92,35 @@ final class ReviewPaneModel {
     /// navigator surfaces read from, shared with the diff watcher.
     var selectedWorktreeURL: URL? { selectedWorkspace?.worktreeURL }
 
-    private var selectedBaseBranch: String? {
+    /// Repo of the currently-selected workspace — its id keys the base override.
+    var selectedRepoId: UUID? { selectedWorkspace?.repoId }
+
+    /// The repo's registered default base (the branch the worktree was created
+    /// from) — the fallback when no per-task override is set.
+    var repoDefaultBase: String? {
         guard let workspace = selectedWorkspace else { return nil }
         return repos.first { $0.id == workspace.repoId }?.baseBranch
+    }
+
+    /// The branch the "vs base" diff actually compares the worktree against right
+    /// now: the per-task override if set, else the repo default. Shown in the
+    /// sidebar label and the Summary tab so it is always clear.
+    var activeBase: String? { selectedWorkspace?.baseOverride ?? repoDefaultBase }
+
+    /// True when this workspace uses a per-task base override, not the default.
+    var isBaseOverridden: Bool { selectedWorkspace?.baseOverride != nil }
+
+    private var selectedBaseBranch: String? { activeBase }
+
+    /// Sets the diff base branch for the currently-selected workspace on this
+    /// model's snapshot and re-reads the diff. nil/empty reverts to the repo
+    /// default. Persistence is the caller's job (survives a relaunch).
+    func setBase(_ base: String?) {
+        guard task.workspaces.indices.contains(selectedWorkspaceIndex) else { return }
+        let trimmed = base?.trimmingCharacters(in: .whitespacesAndNewlines)
+        task.workspaces[selectedWorkspaceIndex].baseOverride =
+            (trimmed?.isEmpty ?? true) ? nil : trimmed
+        refreshNow()
     }
 
     private let git: GitClient

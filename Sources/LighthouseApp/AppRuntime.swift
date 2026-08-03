@@ -819,8 +819,13 @@ final class AppRuntime {
         var total: DiffStat?
         for workspace in task.workspaces {
             guard let repo = model.repos.first(where: { $0.id == workspace.repoId }) else { continue }
+            // The CHANGES card must use the SAME base the review pane shows — the
+            // per-task override if set, else the repo default — not the repo
+            // default unconditionally (2026-08-03: the card was ignoring the
+            // chosen base and disagreeing with the "Compare vs" branch).
+            let base = workspace.baseOverride ?? repo.baseBranch
             guard let stat = try? await git.diffStat(
-                worktree: workspace.worktreeURL, base: repo.baseBranch) else { continue }
+                worktree: workspace.worktreeURL, base: base) else { continue }
             total = (total ?? .zero).adding(stat)
         }
         digests.setDiffStat(taskId: task.id, total)

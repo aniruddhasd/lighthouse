@@ -99,12 +99,14 @@ public actor GitClient {
         return try Self.parseNameStatus(result.stdout)
     }
 
-    /// LIVE diff for the review pane: `git diff --merge-base <base> --` —
-    /// per git-diff(1), the working tree relative to the merge base of
-    /// <base> and HEAD. Covers committed + staged + unstaged in one
-    /// invocation and excludes base-side commits (verified live 2026-07-12);
-    /// untracked files are separate (see untrackedFilePatch).
-    public func liveDiff(againstMergeBaseOf base: String, in repository: URL) async throws -> String {
+    /// LIVE diff for the review pane: `git diff --merge-base <base> --`
+    /// (= `git diff <base>...HEAD`) — the worktree's NET FORWARD CHANGE on top of
+    /// `<base>`: committed + staged + unstaged relative to the merge base of
+    /// `<base>` and HEAD, so commits that are on the base branch but not this
+    /// worktree are excluded. This is exactly "what this worktree adds that a
+    /// merge into `<base>` would bring" (2026-08-03, user's framing). Untracked
+    /// files are appended separately (see untrackedFilePatch).
+    public func liveDiff(against base: String, in repository: URL) async throws -> String {
         let result = try await runExpectingSuccess(
             ["diff", "--merge-base", "--end-of-options", base, "--"], in: repository)
         return result.stdoutText
@@ -112,7 +114,7 @@ public actor GitClient {
 
     /// File list for the live diff: `git diff --name-status -z --merge-base <base> --`.
     public func liveDiffNameStatus(
-        againstMergeBaseOf base: String, in repository: URL
+        against base: String, in repository: URL
     ) async throws -> [DiffEntry] {
         let result = try await runExpectingSuccess(
             ["diff", "--name-status", "-z", "--merge-base", "--end-of-options", base, "--"], in: repository)
@@ -136,14 +138,13 @@ public actor GitClient {
     }
 
     /// Deterministic add/del/file counts for the live review surface:
-    /// `git diff --numstat --merge-base <base> --` — the working tree relative
-    /// to the merge base of `<base>` and HEAD (committed + staged + unstaged),
-    /// the same range as `liveDiff`. `--end-of-options` keeps a base ref
-    /// beginning with `-` out of git's option parser (verified git 2.50.1,
-    /// mirroring the neighbouring diff methods); parsing (binary `-`/`-`,
-    /// renames, zero-change) is handled by the pure `DiffStat.parse`. Untracked
-    /// files are NOT counted here (they never appear in a diff vs the merge
-    /// base) — the live review surface renders them separately.
+    /// `git diff --numstat --merge-base <base> --` — the worktree's net forward
+    /// change on top of `<base>` (committed + staged + unstaged relative to the
+    /// merge base), the same range as `liveDiff`, so the CHANGES card and the
+    /// review tree always agree. `--end-of-options` keeps a base ref beginning
+    /// with `-` out of git's option parser (verified git 2.50.1); parsing (binary
+    /// `-`/`-`, renames, zero-change) is handled by the pure `DiffStat.parse`.
+    /// Untracked files are NOT counted here — rendered separately.
     public func diffStat(worktree: URL, base: String) async throws -> DiffStat {
         let result = try await runExpectingSuccess(
             ["diff", "--numstat", "--merge-base", "--end-of-options", base, "--"], in: worktree)
@@ -253,6 +254,20 @@ public actor GitClient {
         case 1: return nil // detached HEAD
         default: throw classify(result, arguments: ["symbolic-ref", "--short", "HEAD"], in: repository)
         }
+    }
+
+    /// Local branch names (`git for-each-ref refs/heads`), most-recent commit
+    /// first — the candidate list for choosing a diff base. Branches are shared
+    /// across a repo's worktrees, so this is valid from any linked worktree.
+    /// Returns [] on any failure, never throws into the picker.
+    public func listBranches(in repository: URL) async -> [String] {
+        guard let result = try? await run(
+            ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/heads"],
+            in: repository), result.exitCode == 0 else { return [] }
+        return result.stdoutText
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// Absolute path of the git directory for `repository`

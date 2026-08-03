@@ -49,8 +49,8 @@ public struct LiveDiffService: Sendable {
     /// Diff-vs-base: the whole branch's change (committed + staged + unstaged)
     /// relative to the merge base with `baseBranch`, plus untracked files.
     public func liveDiff(workspace: URL, baseBranch: String) async throws -> LiveDiff {
-        let patch = try await git.liveDiff(againstMergeBaseOf: baseBranch, in: workspace)
-        let entries = try await git.liveDiffNameStatus(againstMergeBaseOf: baseBranch, in: workspace)
+        let patch = try await git.liveDiff(against: baseBranch, in: workspace)
+        let entries = try await git.liveDiffNameStatus(against: baseBranch, in: workspace)
         return try await assemble(basePatch: patch, entries: entries, workspace: workspace)
     }
 

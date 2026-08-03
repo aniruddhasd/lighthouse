@@ -325,6 +325,32 @@ final class WorkbenchModel {
             caseSensitive: false, folder: folder)
     }
 
+    /// Local branches of the selected repo — the candidate list for the base
+    /// picker in the Summary tab. Loaded lazily; empty on failure.
+    private(set) var availableBranches: [String] = []
+    /// The branch the selected worktree is currently on (its HEAD), for display
+    /// in the Summary tab. nil when detached or unknown.
+    private(set) var worktreeBranch: String?
+
+    /// Loads the base-picker candidates AND the worktree's current branch — the
+    /// branch names the Summary tab shows. Cheap; safe to call on appear.
+    func loadBranchInfo() async {
+        guard let url = review.selectedWorktreeURL else {
+            availableBranches = []; worktreeBranch = nil; return
+        }
+        availableBranches = await git.listBranches(in: url)
+        worktreeBranch = try? await git.currentBranch(in: url)
+    }
+
+    /// Sets the diff base branch for the selected workspace: updates the live
+    /// diff and persists the per-task override through the model (survives a
+    /// relaunch). `persist` receives the selected workspace's repo id.
+    func setBase(_ base: String?, persist: (_ repoId: UUID, _ base: String?) -> Void) {
+        let repoId = review.selectedRepoId
+        review.setBase(base)
+        if let repoId { persist(repoId, base) }
+    }
+
     func loadFiles() async {
         guard let url = review.selectedWorktreeURL else { return }
         filesLoaded = true

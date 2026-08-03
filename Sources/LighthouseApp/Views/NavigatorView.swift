@@ -51,17 +51,19 @@ struct NavigatorView: View {
             .buttonStyle(.plain)
             .help("Add a repo or worktree to this task")
             if workbench.navigatorMode == .changes {
-                // Uncommitted (working tree vs HEAD) vs the whole branch vs base.
+                // Uncommitted (working tree vs HEAD) vs the whole branch vs its
+                // base branch. The base is NAMED here (read-only); it is chosen
+                // in the Summary tab, not the sidebar.
                 Picker("Scope", selection: Binding(
                     get: { workbench.review.scope },
                     set: { workbench.review.scope = $0 })) {
                     Text("Uncommitted").tag(DiffScope.uncommitted)
-                    Text("vs base").tag(DiffScope.vsBase)
+                    Text(vsBaseLabel).tag(DiffScope.vsBase)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
-                .help("Uncommitted changes, or the whole branch vs its base")
+                .help("Uncommitted changes, or the whole worktree vs its base branch (set the base in the Summary tab)")
                 Button { workbench.review.refreshNow() } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11)).foregroundStyle(theme.dim)
@@ -85,6 +87,9 @@ struct NavigatorView: View {
         .padding(.horizontal, 10).padding(.vertical, 8)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.borderSoft).frame(height: 1) }
     }
+
+    /// The "vs base" segment label, naming the active base branch (e.g. "vs main").
+    private var vsBaseLabel: String { "vs \(workbench.review.activeBase ?? "base")" }
 
     /// Changes / Files / History — an equal-width segmented control, active
     /// segment `--elev` bg + `--border` (handoff §2 "Navigator overlay: Tabs").

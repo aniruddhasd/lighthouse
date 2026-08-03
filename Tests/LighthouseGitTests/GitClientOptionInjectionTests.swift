@@ -40,7 +40,7 @@ final class GitClientOptionInjectionTests {
         let repo = try fixtures.cleanRepo()
         let canary = canaryPath()
         await #expect {
-            _ = try await self.client.liveDiff(againstMergeBaseOf: "--output=\(canary)", in: repo.path)
+            _ = try await self.client.liveDiff(against: "--output=\(canary)", in: repo.path)
         } throws: { _ in true }
         #expect(!FileManager.default.fileExists(atPath: canary), "liveDiff --output leaked")
     }
@@ -50,7 +50,7 @@ final class GitClientOptionInjectionTests {
         let canary = canaryPath()
         await #expect {
             _ = try await self.client.liveDiffNameStatus(
-                againstMergeBaseOf: "--output=\(canary)", in: repo.path)
+                against: "--output=\(canary)", in: repo.path)
         } throws: { _ in true }
         #expect(!FileManager.default.fileExists(atPath: canary))
     }
