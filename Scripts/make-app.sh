@@ -39,6 +39,30 @@ cp ".build/$configuration/Lighthouse" "$app/Contents/MacOS/Lighthouse"
 mkdir -p "$app/Contents/Resources"
 cp -R ".build/$configuration/Lighthouse_LighthouseApp.bundle" "$app/Contents/Resources/"
 
+# App icon: compile AppIcon.appiconset → AppIcon.icns into Resources and point
+# Info.plist at it (CFBundleIconFile below). We assemble the bundle manually (no
+# Xcode/actool), so iconutil takes a .iconset with Apple's fixed filenames; the
+# appiconset's PNGs map 1:1 onto them (see AppIcon.appiconset/Contents.json).
+iconset_src="$package_root/AppIcon.appiconset"
+if [ -d "$iconset_src" ]; then
+    iconset_tmp="$(mktemp -d)/AppIcon.iconset"
+    mkdir -p "$iconset_tmp"
+    cp "$iconset_src/icon_16.png"   "$iconset_tmp/icon_16x16.png"
+    cp "$iconset_src/icon_32.png"   "$iconset_tmp/icon_16x16@2x.png"
+    cp "$iconset_src/icon_32.png"   "$iconset_tmp/icon_32x32.png"
+    cp "$iconset_src/icon_64.png"   "$iconset_tmp/icon_32x32@2x.png"
+    cp "$iconset_src/icon_128.png"  "$iconset_tmp/icon_128x128.png"
+    cp "$iconset_src/icon_256.png"  "$iconset_tmp/icon_128x128@2x.png"
+    cp "$iconset_src/icon_256.png"  "$iconset_tmp/icon_256x256.png"
+    cp "$iconset_src/icon_512.png"  "$iconset_tmp/icon_256x256@2x.png"
+    cp "$iconset_src/icon_512.png"  "$iconset_tmp/icon_512x512.png"
+    cp "$iconset_src/icon_1024.png" "$iconset_tmp/icon_512x512@2x.png"
+    iconutil -c icns "$iconset_tmp" -o "$app/Contents/Resources/AppIcon.icns"
+    rm -rf "$(dirname "$iconset_tmp")"
+else
+    echo "warning: $iconset_src not found — building without an app icon" >&2
+fi
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,6 +76,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <string>Lighthouse</string>
     <key>CFBundleExecutable</key>
     <string>Lighthouse</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
