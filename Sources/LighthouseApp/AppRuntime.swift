@@ -839,8 +839,10 @@ final class AppRuntime {
     var focusedTab: [UUID: UUID] = [:]
 
     private func loginShellURL(for task: TaskRecord) -> URL? {
-        guard let workspace = task.workspaces.first else { return nil }
-        return workspace.worktreeURL
+        if let workspace = task.workspaces.first { return workspace.worktreeURL }
+        // Scratch terminal: no workspace — the chosen directory lives in `branch`.
+        // Without this, ⌘T / the tab-bar `+` no-op'd on a scratch terminal.
+        return task.branch.isEmpty ? nil : URL(fileURLWithPath: task.branch, isDirectory: true)
     }
 
     // MARK: - Task + session flows
