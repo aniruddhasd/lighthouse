@@ -24,6 +24,15 @@ struct LighthouseMain: App {
                     runtime.switcherPresented.toggle()
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                // Flip to the next / previous task in Harbor order and open it,
+                // from anywhere (⌘-shortcuts reach the app before the terminal).
+                // ⌘⇧] / ⌘⇧[ — the Safari/VS Code next/prev-tab convention.
+                Button("Next Task") { runtime.focusAdjacentTask(1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    .disabled(runtime.model.tasks.isEmpty)
+                Button("Previous Task") { runtime.focusAdjacentTask(-1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                    .disabled(runtime.model.tasks.isEmpty)
                 // ⌘P quick-open (Command, not Ctrl+P: Ctrl-P is a readline key
                 // the terminal owns). Only meaningful in Focus, where a task's
                 // file list exists.

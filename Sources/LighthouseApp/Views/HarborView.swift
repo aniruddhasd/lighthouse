@@ -105,7 +105,8 @@ struct HarborView: View {
     @Binding var showCreateTask: Bool
 
     var body: some View {
-        let cards = runtime.model.orderedTasks()
+        @Bindable var runtime = runtime
+        let cards = runtime.visibleHarborTasks
         VStack(spacing: 0) {
             header
             ScrollView {
@@ -126,7 +127,27 @@ struct HarborView: View {
         // A background layer: never affects the grid layout, never intercepts
         // clicks (the beam is allowsHitTesting(false)).
         .background(HarborBackground())
+        // Arrow keys browse the grid (←/↑ previous, →/↓ next), Return opens the
+        // highlighted task. Zero-size hidden buttons, only mounted while Harbor
+        // is on screen, so they never fire in Focus.
+        .background { harborArrowKeys }
         .onAppear { HarborDebug.emit("rendered-cards=\(cards.count)") }
+    }
+
+    @ViewBuilder private var harborArrowKeys: some View {
+        Group {
+            Button("") { runtime.moveHarborHighlight(-1) }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+            Button("") { runtime.moveHarborHighlight(-1) }
+                .keyboardShortcut(.upArrow, modifiers: [])
+            Button("") { runtime.moveHarborHighlight(1) }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+            Button("") { runtime.moveHarborHighlight(1) }
+                .keyboardShortcut(.downArrow, modifiers: [])
+            Button("") { runtime.openHarborHighlight() }
+                .keyboardShortcut(.return, modifiers: [])
+        }
+        .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
     }
 
     // MARK: Header
@@ -227,6 +248,14 @@ struct HarborView: View {
                     TaskCardView(task: task)
                 }
                 .buttonStyle(.plain)
+                // Arrow-key browse highlight (Return opens it).
+                .overlay {
+                    if runtime.harborHighlightedTaskId == task.id {
+                        RoundedRectangle(cornerRadius: Theme.Radius.card)
+                            .strokeBorder(theme.primary, lineWidth: 2)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .taskContextMenu(for: task)
             }
         }

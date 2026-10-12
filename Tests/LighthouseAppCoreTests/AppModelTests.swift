@@ -413,6 +413,27 @@ final class AppModelTests {
         #expect(model.orderedTasks().first?.id == two.id)
     }
 
+    /// The keyboard-navigation primitive: wraps both ends, seeds sensibly from
+    /// no selection, and is nil only when there's nothing to step through.
+    @Test func stepTaskWrapsAndSeeds() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let ids = [a, b, c]
+        // forward / back from a real position
+        #expect(AppModel.stepTask(ids: ids, from: a, delta: 1) == b)
+        #expect(AppModel.stepTask(ids: ids, from: b, delta: -1) == a)
+        // wrap at both ends
+        #expect(AppModel.stepTask(ids: ids, from: c, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: ids, from: a, delta: -1) == c)
+        // no selection: +1 → first, -1 → last
+        #expect(AppModel.stepTask(ids: ids, from: nil, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: ids, from: nil, delta: -1) == c)
+        // an id not in the list is treated as "no selection"
+        #expect(AppModel.stepTask(ids: ids, from: UUID(), delta: 1) == a)
+        // single element wraps to itself; empty is nil
+        #expect(AppModel.stepTask(ids: [a], from: a, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: [], from: nil, delta: 1) == nil)
+    }
+
     // MARK: - Clone & register (spec option D) — failures first
 
     @Test func cloneWithEmptyURLRejectedBeforeCloning() async throws {

@@ -719,6 +719,17 @@ public final class AppModel {
         tasks.sorted(by: taskPrecedes)
     }
 
+    /// The id reached by stepping `delta` (±1) through `ids` from `current`,
+    /// wrapping at both ends — the keyboard task-navigation primitive. From no
+    /// selection, `+1` lands on the first and `-1` on the last. Returns nil only
+    /// when `ids` is empty. Pure, so the wrap/seed edge cases are unit-tested.
+    public static func stepTask(ids: [UUID], from current: UUID?, delta: Int) -> UUID? {
+        guard !ids.isEmpty else { return nil }
+        let index = current.flatMap { ids.firstIndex(of: $0) } ?? (delta > 0 ? -1 : 0)
+        let next = ((index + delta) % ids.count + ids.count) % ids.count
+        return ids[next]
+    }
+
     private func taskPrecedes(_ a: TaskRecord, _ b: TaskRecord) -> Bool {
         let aLive = liveSessions.contains(a.id), bLive = liveSessions.contains(b.id)
         if aLive != bLive { return aLive }

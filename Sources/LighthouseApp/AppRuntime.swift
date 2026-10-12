@@ -621,6 +621,48 @@ final class AppRuntime {
     /// Back to the Harbor overview (the Focus toolbar ◱ button / `backToHarbor`).
     func backToHarbor() { nav.backToHarbor() }
 
+    // MARK: - Keyboard task navigation
+
+    /// The tasks Harbor shows, in order — the single source the grid and the
+    /// keyboard navigation both read, so they never disagree.
+    var visibleHarborTasks: [TaskRecord] { model.orderedTasks() }
+
+    /// The tasks keyboard navigation steps through — the SAME set Harbor shows.
+    var navigableTasks: [TaskRecord] { visibleHarborTasks }
+
+    /// Flip to the next (`+1`) / previous (`-1`) task in Harbor order and open it
+    /// in Focus. Wraps around. From Harbor with nothing selected, `+1` lands on
+    /// the first task and `-1` on the last. ⌘⇧] / ⌘⇧[.
+    func focusAdjacentTask(_ delta: Int) {
+        if let next = AppModel.stepTask(
+            ids: navigableTasks.map(\.id), from: selectedTaskId, delta: delta) {
+            open(next)
+        }
+    }
+
+    /// Jump straight to the Nth task (1-based) in Harbor order, if it exists. ⌘1–9.
+    func focusTask(number: Int) {
+        let tasks = navigableTasks
+        guard number >= 1, number <= tasks.count else { return }
+        open(tasks[number - 1].id)
+    }
+
+    /// The card the Harbor arrow-key highlight is on (browse without opening).
+    /// nil when Harbor isn't being browsed; Return opens it.
+    var harborHighlightedTaskId: UUID?
+
+    /// Move the Harbor highlight by `delta` (wraps); seeds from the selected task.
+    func moveHarborHighlight(_ delta: Int) {
+        harborHighlightedTaskId = AppModel.stepTask(
+            ids: navigableTasks.map(\.id),
+            from: harborHighlightedTaskId ?? selectedTaskId, delta: delta)
+    }
+
+    /// Open the Harbor-highlighted task into Focus (Return). No-op if none.
+    func openHarborHighlight() {
+        if let id = harborHighlightedTaskId { open(id) }
+    }
+
     /// A SetupModel wired to this runtime's services. Fresh each time the
     /// sheet opens so checks re-run cleanly.
     func makeSetupModel() -> SetupModel {
