@@ -341,6 +341,28 @@ final class AppModelTests {
         #expect(reloaded.tasks.first { $0.id == task.id }?.status == "waiting on review")
     }
 
+    /// Hiding a task drops it from ⌘K, persists across a reload, and unhiding
+    /// brings it back.
+    @Test func hidingExcludesFromSwitcherAndPersists() async throws {
+        let task = try await makeTask(named: "secret")
+        #expect(task.hidden == false)
+        #expect(model.switcherEntries(query: "").contains { $0.id == task.id })
+
+        model.setTaskHidden(true, for: task.id)
+        #expect(model.tasks.first { $0.id == task.id }?.hidden == true)
+        #expect(!model.switcherEntries(query: "").contains { $0.id == task.id })
+        #expect(model.switcherEntries(query: "secret").isEmpty) // not even by name
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.first { $0.id == task.id }?.hidden == true)
+
+        model.setTaskHidden(false, for: task.id)
+        #expect(model.switcherEntries(query: "").contains { $0.id == task.id })
+    }
+
     /// The per-task base-branch override is trimmed, persists across a reload,
     /// and an empty value clears it back to the repo default.
     @Test func baseOverrideSetsPersistsAndClears() async throws {

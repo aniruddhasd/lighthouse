@@ -98,11 +98,16 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
     /// longer infers a task's status from agent hooks; whether a SESSION is live
     /// is tracked separately and honestly (AppModel.liveSessions).
     public var status: String
+    /// User-hidden: dropped from the Harbor grid and the ⌘K switcher until
+    /// revealed. Purely a view preference — the task, its worktrees and session
+    /// are untouched. Absent in older configs → decodes to false.
+    public var hidden: Bool
     public var workspaces: [Workspace]
 
     public init(
         id: UUID = UUID(), name: String, branch: String, adapterKind: String,
-        sessionRef: String? = nil, status: String = "", workspaces: [Workspace]
+        sessionRef: String? = nil, status: String = "", hidden: Bool = false,
+        workspaces: [Workspace]
     ) {
         self.id = id
         self.name = name
@@ -110,16 +115,17 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         self.adapterKind = adapterKind
         self.sessionRef = sessionRef
         self.status = status
+        self.hidden = hidden
         self.workspaces = workspaces
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, branch, adapterKind, sessionRef, status, workspaces
+        case id, name, branch, adapterKind, sessionRef, status, hidden, workspaces
     }
 
     /// Custom decode so configs written before free-text status (which carried a
     /// `state` enum instead) still load: the legacy `state` key is ignored and
-    /// `status` defaults to empty. Encode is synthesized (writes `status`).
+    /// `status`/`hidden` default. Encode is synthesized.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -128,6 +134,7 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         adapterKind = try c.decode(String.self, forKey: .adapterKind)
         sessionRef = try c.decodeIfPresent(String.self, forKey: .sessionRef)
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         workspaces = try c.decode([Workspace].self, forKey: .workspaces)
     }
 

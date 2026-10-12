@@ -684,6 +684,16 @@ public final class AppModel {
         try? persist() // best-effort; next save catches up
     }
 
+    /// Hide or show a task — drops it from (or returns it to) the Harbor grid and
+    /// the ⌘K switcher. A pure view preference: the task, its worktrees and its
+    /// session are untouched. Persisted.
+    public func setTaskHidden(_ hidden: Bool, for taskId: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }),
+              tasks[index].hidden != hidden else { return }
+        tasks[index].hidden = hidden
+        try? persist()
+    }
+
     /// Overrides the "vs base" diff base branch for one task's workspace
     /// (identified by its repo). `base` nil/empty reverts to the repo default.
     /// Persisted so the choice survives a relaunch.
@@ -743,8 +753,10 @@ public final class AppModel {
     /// Cmd+K entries: with no query, the standard task order; with a query,
     /// fuzzy-filtered by match quality, then name.
     public func switcherEntries(query: String) -> [TaskRecord] {
-        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return orderedTasks() }
-        let scored: [(TaskRecord, Int)] = tasks.compactMap { task in
+        // Hidden tasks are out of quick-open too (not just the grid).
+        let visible = orderedTasks().filter { !$0.hidden }
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return visible }
+        let scored: [(TaskRecord, Int)] = visible.compactMap { task in
             FuzzyMatcher.score(query: query, candidate: task.name).map { (task, $0) }
         }
         return scored.sorted { lhs, rhs in

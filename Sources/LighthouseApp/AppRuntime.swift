@@ -623,9 +623,27 @@ final class AppRuntime {
 
     // MARK: - Keyboard task navigation
 
+    /// Whether Harbor currently reveals hidden tasks (the "Hidden (N)" toggle).
+    var showHiddenTasks = false
+
     /// The tasks Harbor shows, in order — the single source the grid and the
-    /// keyboard navigation both read, so they never disagree.
-    var visibleHarborTasks: [TaskRecord] { model.orderedTasks() }
+    /// keyboard navigation both read, so they never disagree. Hidden tasks are
+    /// excluded unless `showHiddenTasks` is on.
+    var visibleHarborTasks: [TaskRecord] {
+        model.orderedTasks().filter { showHiddenTasks || !$0.hidden }
+    }
+
+    /// How many tasks are currently hidden — drives the "Hidden (N)" affordance.
+    var hiddenTaskCount: Int { model.tasks.lazy.filter(\.hidden).count }
+
+    /// Hide a shown task / show a hidden one.
+    func toggleTaskHidden(_ task: TaskRecord) {
+        model.setTaskHidden(!task.hidden, for: task.id)
+        // Don't leave the arrow-highlight stranded on a now-hidden card.
+        if task.hidden == false, harborHighlightedTaskId == task.id {
+            harborHighlightedTaskId = nil
+        }
+    }
 
     /// The tasks keyboard navigation steps through — the SAME set Harbor shows.
     var navigableTasks: [TaskRecord] { visibleHarborTasks }

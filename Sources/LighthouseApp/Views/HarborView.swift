@@ -163,6 +163,7 @@ struct HarborView: View {
                     .foregroundStyle(theme.dim)
             }
             Spacer()
+            if runtime.hiddenTaskCount > 0 { hiddenToggle }
             searchButton
             scratchTerminalButton
             newTaskButton
@@ -171,6 +172,23 @@ struct HarborView: View {
         .padding(.trailing, Theme.Metric.gutter)
         .padding(.top, 18)
         .padding(.bottom, 6)
+    }
+
+    /// Reveal / re-hide the hidden tasks. Only shown when some exist.
+    private var hiddenToggle: some View {
+        Button { runtime.showHiddenTasks.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: runtime.showHiddenTasks ? "eye" : "eye.slash")
+                Text("Hidden \(runtime.hiddenTaskCount)").font(LHFont.button)
+            }
+            .foregroundStyle(runtime.showHiddenTasks ? theme.primary : theme.dim)
+            .padding(.horizontal, 12).frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(runtime.showHiddenTasks ? "Re-hide hidden tasks" : "Show hidden tasks")
     }
 
     private var subtitle: String {
@@ -248,6 +266,9 @@ struct HarborView: View {
                     TaskCardView(task: task)
                 }
                 .buttonStyle(.plain)
+                // A hidden task only appears here when "Hidden" is toggled on;
+                // dim it so it reads as hidden-but-revealed.
+                .opacity(task.hidden ? 0.5 : 1)
                 // Arrow-key browse highlight (Return opens it).
                 .overlay {
                     if runtime.harborHighlightedTaskId == task.id {
@@ -502,6 +523,9 @@ private struct TaskContextMenu: ViewModifier {
             } else {
                 if runtime.model.canResume(task) {
                     Button("Resume Session") { runtime.resumeSession(for: task) }
+                }
+                Button(task.hidden ? "Unhide" : "Hide") {
+                    runtime.toggleTaskHidden(task)
                 }
                 Button("Remove Task…", role: .destructive) {
                     runtime.taskPendingRemoval = task
