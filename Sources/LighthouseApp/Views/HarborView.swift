@@ -104,6 +104,24 @@ struct HarborView: View {
     @Environment(\.theme) private var theme
     @Binding var showCreateTask: Bool
 
+    /// Keyboard-focus targets Tab cycles through on Harbor. We hold key focus on
+    /// the whole grid (a focusable container) and track the target ourselves,
+    /// rather than wiring @FocusState into every button — SwiftUI's per-control
+    /// Tab traversal is unreliable for a mixed grid + chrome layout.
+    enum Field: Hashable { case tasks, reposHeader, addRepo, newTask, scratch, search }
+    @State private var field: Field = .tasks
+    @FocusState private var hasKeyFocus: Bool
+
+    /// The targets present right now, in Tab order: the task grid, then the repos
+    /// chevron + Add-repo, then New-task / Scratch / Search.
+    private var tabOrder: [Field] {
+        var order: [Field] = []
+        if !runtime.model.tasks.isEmpty { order.append(.tasks) }
+        if !runtime.model.repos.isEmpty { order += [.reposHeader, .addRepo] }
+        order += [.newTask, .scratch, .search]
+        return order
+    }
+
     var body: some View {
         @Bindable var runtime = runtime
         let cards = runtime.visibleHarborTasks
@@ -127,27 +145,70 @@ struct HarborView: View {
         // A background layer: never affects the grid layout, never intercepts
         // clicks (the beam is allowsHitTesting(false)).
         .background(HarborBackground())
-        // Arrow keys browse the grid (←/↑ previous, →/↓ next), Return opens the
-        // highlighted task. Zero-size hidden buttons, only mounted while Harbor
-        // is on screen, so they never fire in Focus.
-        .background { harborArrowKeys }
-        .onAppear { HarborDebug.emit("rendered-cards=\(cards.count)") }
+        // Hold key focus on the whole Harbor so Tab / arrows / Return reach the
+        // handler below; draw our own per-field ring, not the container's.
+        .focusable()
+        .focused($hasKeyFocus)
+        .focusEffectDisabled()
+        .onKeyPress(phases: .down) { handleKey($0) }
+        .onAppear {
+            hasKeyFocus = true
+            if !tabOrder.contains(field) { field = tabOrder.first ?? .newTask }
+            HarborDebug.emit("rendered-cards=\(cards.count)")
+        }
     }
 
-    @ViewBuilder private var harborArrowKeys: some View {
-        Group {
-            Button("") { runtime.moveHarborHighlight(-1) }
-                .keyboardShortcut(.leftArrow, modifiers: [])
-            Button("") { runtime.moveHarborHighlight(-1) }
-                .keyboardShortcut(.upArrow, modifiers: [])
-            Button("") { runtime.moveHarborHighlight(1) }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-            Button("") { runtime.moveHarborHighlight(1) }
-                .keyboardShortcut(.downArrow, modifiers: [])
-            Button("") { runtime.openHarborHighlight() }
-                .keyboardShortcut(.return, modifiers: [])
+    // MARK: Keyboard focus traversal
+
+    /// Tab / Shift-Tab cycle fields; arrows browse the grid when it's focused,
+    /// else step fields; Return activates the focused field.
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        switch press.key {
+        case .tab:
+            cycleField(press.modifiers.contains(.shift) ? -1 : 1); return .handled
+        case .return:
+            activateField(); return .handled
+        case .leftArrow, .upArrow:
+            if field == .tasks { runtime.moveHarborHighlight(-1) } else { cycleField(-1) }
+            return .handled
+        case .rightArrow, .downArrow:
+            if field == .tasks { runtime.moveHarborHighlight(1) } else { cycleField(1) }
+            return .handled
+        default:
+            return .ignored
         }
-        .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+    }
+
+    private func cycleField(_ delta: Int) {
+        let order = tabOrder
+        guard !order.isEmpty else { return }
+        let i = order.firstIndex(of: field) ?? (delta > 0 ? -1 : 0)
+        field = order[((i + delta) % order.count + order.count) % order.count]
+        // Entering the grid seeds the card highlight; leaving it clears it.
+        if field == .tasks {
+            if runtime.harborHighlightedTaskId == nil { runtime.moveHarborHighlight(1) }
+        } else {
+            runtime.harborHighlightedTaskId = nil
+        }
+    }
+
+    private func activateField() {
+        switch field {
+        case .tasks: runtime.openHarborHighlight()
+        case .reposHeader: runtime.model.setReposCollapsed(!runtime.model.reposCollapsed)
+        case .addRepo: runtime.registerRepoPresented = true
+        case .newTask: showCreateTask = true
+        case .scratch: runtime.promptAndOpenScratchTerminal()
+        case .search: runtime.switcherPresented = true
+        }
+    }
+
+    /// A ring on whichever chrome control is the current Tab target. `radius`
+    /// matches the control's own corner radius so the ring hugs it.
+    @ViewBuilder private func focusRing(_ target: Field, radius: CGFloat = Theme.Radius.search) -> some View {
+        RoundedRectangle(cornerRadius: radius)
+            .strokeBorder(theme.primary, lineWidth: field == target ? 2 : 0)
+            .allowsHitTesting(false)
     }
 
     // MARK: Header
@@ -215,6 +276,7 @@ struct HarborView: View {
                 .strokeBorder(theme.border2, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .overlay { focusRing(.search) }
     }
 
     /// A plain terminal in a chosen directory, with no repo — see
@@ -234,6 +296,7 @@ struct HarborView: View {
                 .strokeBorder(theme.border2, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .overlay { focusRing(.scratch) }
         .help("Open a plain terminal in a chosen directory — no repo needed")
     }
 
@@ -249,6 +312,7 @@ struct HarborView: View {
             .background(theme.primary, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
         }
         .buttonStyle(.plain)
+        .overlay { focusRing(.newTask) }
         .disabled(runtime.model.repos.isEmpty)
         .opacity(runtime.model.repos.isEmpty ? 0.5 : 1)
         .help(runtime.model.repos.isEmpty ? "Register a repo first" : "Create a new task")
@@ -306,6 +370,7 @@ struct HarborView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .overlay { focusRing(.reposHeader, radius: Theme.Radius.chip).padding(-4) }
                     .help(collapsed ? "Show repos" : "Hide repos")
                     Spacer()
                     Button { runtime.registerRepoPresented = true } label: {
@@ -320,6 +385,7 @@ struct HarborView: View {
                             .strokeBorder(theme.border2, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .overlay { focusRing(.addRepo, radius: Theme.Radius.chip) }
                     .help("Register another local repo")
                 }
                 if !collapsed {
