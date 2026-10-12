@@ -221,6 +221,144 @@ struct RemoveTaskSheet: View {
     }
 }
 
+/// UI for removing ONE repo from a task (the inverse of AddToTaskSheet), with
+/// two outcomes the user chooses between:
+///   • Detach — stop tracking it here; the worktree and branch are left on disk
+///     (never destructive, no confirmation).
+///   • Discard — delete the worktree and branch (guardrail-1: unmerged/dirty
+///     work requires typing the repo name).
+/// An in-place or adopted repo (Lighthouse never owned its worktree) can only be
+/// detached, so the choice collapses to that one action.
+struct RemoveWorkspaceSheet: View {
+    @Environment(AppRuntime.self) private var runtime
+    @Environment(\.dismiss) private var dismiss
+    let request: WorkspaceRemovalRequest
+
+    private enum Action: Hashable { case detach, discard }
+    @State private var action: Action = .detach
+    @State private var hazards: [RemovalHazard]?
+    @State private var typedName = ""
+    @State private var working = false
+
+    /// Is the targeted workspace the repo's own checkout / an adopted worktree
+    /// (never deleted), vs a Lighthouse-owned worktree?
+    private var isInPlace: Bool {
+        request.task.workspaces.first { $0.repoId == request.repoId }?.isInPlace ?? false
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Remove \(request.repoName) from “\(request.task.name)”").font(.headline)
+
+            if isInPlace {
+                // Nothing of ours on disk — detach is the only sensible action.
+                Text("This repo was tracked in place. Removing it leaves your repository and branch untouched — Lighthouse just stops tracking it for this task.")
+                actionButtons(primary: "Detach") { _ = runtime.detachWorkspace(
+                    fromTask: request.task.id, repoId: request.repoId) }
+            } else {
+                Picker("What to do", selection: $action) {
+                    Text("Detach (keep files)").tag(Action.detach)
+                    Text("Discard (delete)").tag(Action.discard)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                switch action {
+                case .detach:
+                    Text("Stops tracking this repo for the task. Its worktree and branch stay on disk exactly as they are — nothing is deleted.")
+                    actionButtons(primary: "Detach") { _ = runtime.detachWorkspace(
+                        fromTask: request.task.id, repoId: request.repoId) }
+                case .discard:
+                    discardBody
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .task {
+            // Only the discard path needs the hazard set, but it's cheap and the
+            // result is reused if the user toggles back and forth.
+            do {
+                hazards = try await runtime.model.workspaceRemovalHazards(
+                    for: request.task, repoId: request.repoId)
+            } catch {
+                runtime.lastError = String(describing: error)
+                dismiss()
+            }
+        }
+    }
+
+    @ViewBuilder private var discardBody: some View {
+        if let hazards {
+            if hazards.isEmpty {
+                Text("This repo's worktree is merged into its base branch with no uncommitted changes. Its worktree and branch will be deleted; the rest of the task is untouched.")
+                destroyButtons(
+                    mode: .refuseIfHazards, label: "Delete Worktree & Branch")
+            } else {
+                Label("This will PERMANENTLY DESTROY work:", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                ForEach(hazards, id: \.self) { hazard in
+                    // Untrusted content: repo path / branch render as Text.
+                    Text("• \(hazardDescription(hazard))")
+                        .font(.system(.caption, design: .monospaced))
+                }
+                TextField("Type the repo name to confirm", text: $typedName)
+                destroyButtons(
+                    mode: .destroy(RemovalConfirmation(destroying: hazards)),
+                    label: "Delete and Discard Local Work",
+                    enabled: typedName == request.repoName)
+            }
+        } else {
+            ProgressView("Checking for unmerged or uncommitted work…")
+        }
+    }
+
+    private func hazardDescription(_ hazard: RemovalHazard) -> String {
+        switch hazard {
+        case .unmergedCommits(_, let repoPath, let branch):
+            return "\(repoPath): branch '\(branch)' is not merged into its base branch"
+        case .dirtyWorktree(_, let repoPath, let branch):
+            return "\(repoPath): worktree for '\(branch)' has uncommitted local changes that will be permanently lost"
+        }
+    }
+
+    /// Cancel + a single non-destructive primary (detach).
+    @ViewBuilder
+    private func actionButtons(primary: String, run: @escaping () -> Void) -> some View {
+        HStack {
+            Spacer()
+            Button("Cancel") { dismiss() }
+            Button(working ? "Removing…" : primary) {
+                working = true
+                run()
+                working = false
+                dismiss()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(working)
+        }
+    }
+
+    /// Cancel + the destructive delete (discard), gated on the hazard mode.
+    @ViewBuilder
+    private func destroyButtons(mode: TaskRemovalMode, label: String, enabled: Bool = true) -> some View {
+        HStack {
+            Spacer()
+            Button("Cancel") { dismiss() }
+            Button(working ? "Removing…" : label, role: .destructive) {
+                working = true
+                Task {
+                    _ = await runtime.removeWorkspace(
+                        fromTask: request.task.id, repoId: request.repoId, mode: mode)
+                    working = false
+                    dismiss()
+                }
+            }
+            .disabled(!enabled || working)
+        }
+    }
+}
+
 struct RegisterRepoSheet: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.dismiss) private var dismiss

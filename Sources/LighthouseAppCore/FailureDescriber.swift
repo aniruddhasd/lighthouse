@@ -57,6 +57,8 @@ public enum FailureDescriber {
             return "That task no longer exists (\(id))."
         case .repoAlreadyInTask:
             return "That repo is already part of this task."
+        case .cannotRemoveLastWorkspace:
+            return "This is the task's only repo — remove the task itself instead."
         case .notAGitWorktree(let path):
             return "\(path) is not a git work tree."
         case .notAWorktreeOfRegisteredRepo(let path):

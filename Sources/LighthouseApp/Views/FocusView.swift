@@ -183,6 +183,12 @@ struct BeaconRail: View {
 
 /// The Focus center column: task header (52) · shell-tabs bar · body · footer
 /// (30), with the navigator as a trailing slide-in overlay. Owns the single
+/// Keyboard-focus stops the ⌘⌥→/← cycle moves through on the Focus screen —
+/// the chrome around the terminal (the terminal itself keeps plain Tab for the
+/// agent). File-scope (not nested) so the header and navigator can take the
+/// `@FocusState.Binding` without an awkward qualified name.
+enum ChromeFocus: Hashable { case modeToggle, navigatorToggle, navigator }
+
 /// per-task `WorkbenchModel` — its lifecycle IS the live-diff watcher lifecycle
 /// (created on appear, stopped on background, restarted on foreground, torn down
 /// on task switch via the enclosing `.id(task.id)`).
@@ -193,6 +199,13 @@ struct FocusCenter: View {
     @Environment(\.motionEnabled) private var motionEnabled
     let task: TaskRecord
     @State private var workbench: WorkbenchModel?
+    /// Which chrome control the ⌘⌥→/← ring sits on. A plain @State value drives
+    /// the VISIBLE ring (pure SwiftUI state, so it always moves) — the terminal
+    /// is an AppKit first-responder that SwiftUI's @FocusState can't reliably
+    /// pull focus away from, so the ring can't depend on it. The terminal is NOT
+    /// a stop: plain Tab stays with the agent, and ⌘ beats the terminal for the
+    /// cycle keystroke.
+    @State private var chromeField: ChromeFocus?
 
     var body: some View {
         // ZStack, NOT Group: a Group would re-fire onAppear on a branch switch
@@ -248,7 +261,7 @@ struct FocusCenter: View {
     private func column(_ workbench: WorkbenchModel) -> some View {
         @Bindable var workbench = workbench
         VStack(spacing: 0) {
-            FocusTaskHeader(workbench: workbench, task: task)
+            FocusTaskHeader(workbench: workbench, task: task, chromeField: chromeField)
             if !(runtime.tabs[task.id] ?? []).isEmpty {
                 TerminalTabBar(task: task)
                     .background(theme.chrome)
@@ -271,7 +284,7 @@ struct FocusCenter: View {
                     // Never on a scratch terminal (no workspaces → nothing to
                     // navigate), even if ⌘\ toggles the flag.
                     if workbench.navigatorVisible && !task.workspaces.isEmpty {
-                        NavigatorOverlay(workbench: workbench)
+                        NavigatorOverlay(workbench: workbench, chromeField: chromeField)
                             .padding(.top, workbench.effectiveBody == .viewer
                                      ? FocusBodyView.viewerHeaderHeight : 0)
                             .transition(.move(edge: .trailing))
@@ -296,6 +309,58 @@ struct FocusCenter: View {
             Button("", action: { workbench.navigatorVisible.toggle() })
                 .keyboardShortcut("\\", modifiers: .command)
                 .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            // ⌘⌥→ / ⌘⌥← cycle the chrome focus (the macOS app-switcher owns
+            // ⌘Tab, so this is the ⌘ equivalent). ⌘ reaches the app before the
+            // terminal, so this works even while the agent holds the keyboard;
+            // plain Tab is never touched.
+            Button("", action: { cycleChrome(1) })
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            Button("", action: { cycleChrome(-1) })
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            // ⌘⌥↑ / ⌘⌥↓ OPERATE the highlighted stop. We can't rely on the
+            // control taking real keyboard focus (SwiftUI @FocusState doesn't
+            // pull first-responder off the SwiftTerm NSView), so activation is
+            // its own ⌘ keystroke rather than Return/arrows on a focused control.
+            Button("", action: { activateChrome(-1) })
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            Button("", action: { activateChrome(1) })
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+        }
+    }
+
+    /// Advance the chrome ring: Terminal/Summary toggle → navigator ◨ → the
+    /// navigator's repo picker → wrap. Reaching the navigator stop opens it. A
+    /// scratch terminal has no chrome to cycle.
+    private func cycleChrome(_ delta: Int) {
+        guard !task.workspaces.isEmpty, let workbench else { return }
+        let stops: [ChromeFocus] = [.modeToggle, .navigatorToggle, .navigator]
+        let i = chromeField.flatMap { stops.firstIndex(of: $0) } ?? (delta > 0 ? -1 : 0)
+        let next = stops[((i + delta) % stops.count + stops.count) % stops.count]
+        if next == .navigator { workbench.navigatorVisible = true }
+        chromeField = next
+    }
+
+    /// Operate the highlighted stop with ⌘⌥↑ (dir -1) / ⌘⌥↓ (dir +1):
+    ///   • Terminal/Summary — ↑ Terminal, ↓ Summary.
+    ///   • navigator ◨ — ↑ show, ↓ hide.
+    ///   • repo picker — ↑ previous repo, ↓ next repo (cycles the selection, so
+    ///     the dropdown never has to be opened by keyboard).
+    private func activateChrome(_ dir: Int) {
+        guard let workbench, let field = chromeField else { return }
+        switch field {
+        case .modeToggle:
+            workbench.setBodyMode(dir < 0 ? .terminal : .summary)
+        case .navigatorToggle:
+            workbench.navigatorVisible = dir < 0
+        case .navigator:
+            let n = workbench.review.workspaces.count
+            guard n > 0 else { return }
+            let cur = workbench.selectedWorkspaceIndex
+            workbench.selectedWorkspaceIndex = ((cur + dir) % n + n) % n
         }
     }
 }
@@ -311,6 +376,9 @@ struct FocusTaskHeader: View {
     @Environment(\.theme) private var theme
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
+    /// The ⌘⌥→/← ring position; the mode toggle and navigator toggle are two of
+    /// its stops. Operated by ⌘⌥↑/↓ in FocusCenter, not by focusing the control.
+    let chromeField: ChromeFocus?
 
     private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
@@ -359,6 +427,7 @@ struct FocusTaskHeader: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .fixedSize()
+        .overlay { chromeRing(.modeToggle, radius: Theme.Radius.segment) }
         .help("Switch the center body between the terminal and the task summary")
     }
 
@@ -373,7 +442,18 @@ struct FocusTaskHeader: View {
                     in: RoundedRectangle(cornerRadius: Theme.Radius.tab))
         }
         .buttonStyle(.plain)
+        .overlay { chromeRing(.navigatorToggle, radius: Theme.Radius.tab) }
         .help("Show or hide the navigator (⌘\\)")
+    }
+
+    /// The ⌘⌥ ring indicator on whichever header control is the current chrome
+    /// stop — keyed on the plain-@State ring position (not @FocusState), so it
+    /// reads regardless of the system focus-ring setting or AppKit first
+    /// responder.
+    @ViewBuilder private func chromeRing(_ target: ChromeFocus, radius: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: radius)
+            .strokeBorder(theme.primary, lineWidth: chromeField == target ? 2 : 0)
+            .allowsHitTesting(false)
     }
 
     private var metaLine: String {
@@ -449,9 +529,10 @@ struct FocusFooter: View {
 struct NavigatorOverlay: View {
     @Environment(\.theme) private var theme
     @Bindable var workbench: WorkbenchModel
+    let chromeField: ChromeFocus?
 
     var body: some View {
-        NavigatorView(workbench: workbench)
+        NavigatorView(workbench: workbench, chromeField: chromeField)
             .frame(width: Theme.Metric.navigator)
             .frame(maxHeight: .infinity)
             .background(theme.chrome)

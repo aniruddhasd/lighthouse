@@ -655,6 +655,56 @@ public final class AppModel {
         return report
     }
 
+    // MARK: - Removing one repo (workspace) from a task
+
+    /// Work-losing hazards for just the `repoId` workspace of `task` — the gate
+    /// the remove-repo sheet shows before destroying anything.
+    public func workspaceRemovalHazards(
+        for task: TaskRecord, repoId: UUID
+    ) async throws -> [RemovalHazard] {
+        try await engine.removalHazards(forWorkspaceWithRepoId: repoId, in: task, repos: repos)
+    }
+
+    /// Removes a single repo (workspace) from `task`, leaving the task and its
+    /// other workspaces intact — the inverse of `addWorktree`/`trackInPlace`/
+    /// `adoptWorktree`. Refuses to remove a task's LAST workspace (a task with no
+    /// workspaces can't be sessioned or resumed — remove the task instead).
+    @discardableResult
+    public func removeWorkspace(
+        fromTask taskId: UUID, repoId: UUID, mode: TaskRemovalMode
+    ) async throws -> WorkspaceRemovalOutcome {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else {
+            throw TaskEngineError.unknownTask(taskId: taskId)
+        }
+        let task = tasks[index]
+        guard task.workspaces.count > 1 else {
+            throw TaskEngineError.cannotRemoveLastWorkspace(taskId: taskId)
+        }
+        let outcome = try await engine.removeWorkspace(
+            withRepoId: repoId, from: task, repos: repos, mode: mode)
+        tasks[index].workspaces.removeAll { $0.repoId == repoId }
+        try persist()
+        return outcome
+    }
+
+    /// Detaches a repo (workspace) from `task` WITHOUT touching disk — the
+    /// worktree and branch are left exactly as they are; Lighthouse just stops
+    /// tracking them for this task. The non-destructive sibling of
+    /// `removeWorkspace`. Refuses the task's last workspace, same as removal.
+    public func detachWorkspace(fromTask taskId: UUID, repoId: UUID) throws {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else {
+            throw TaskEngineError.unknownTask(taskId: taskId)
+        }
+        guard tasks[index].workspaces.contains(where: { $0.repoId == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        guard tasks[index].workspaces.count > 1 else {
+            throw TaskEngineError.cannotRemoveLastWorkspace(taskId: taskId)
+        }
+        tasks[index].workspaces.removeAll { $0.repoId == repoId }
+        try persist()
+    }
+
     // MARK: - Session liveness (the one honest, hook-free status signal)
 
     /// Records that a live pty exists for this task (the session layer calls

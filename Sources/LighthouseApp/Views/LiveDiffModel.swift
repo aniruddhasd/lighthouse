@@ -197,6 +197,11 @@ final class ReviewPaneModel {
     func syncWorkspaces(task: TaskRecord, repos: [RepoConfig]) {
         self.task = task
         self.repos = repos
+        // A removed workspace can leave the selection past the end (remove-repo):
+        // clamp it so the picker stays on a real repo and the diff keeps working.
+        if selectedWorkspaceIndex >= task.workspaces.count {
+            selectedWorkspaceIndex = max(0, task.workspaces.count - 1)
+        }
     }
 
     /// Test hook: await the most recent refresh to completion.

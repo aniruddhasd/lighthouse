@@ -211,6 +211,81 @@ final class AppModelTests {
         #expect(reloaded.tasks.isEmpty)
     }
 
+    @Test func removeWorkspaceRefusesTheTasksLastRepo() async throws {
+        let repo = try fixtures.cleanRepo()
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "solo", branch: "task/solo", repoIds: [registered.id])
+
+        await #expect {
+            _ = try await self.model.removeWorkspace(
+                fromTask: task.id, repoId: registered.id, mode: .refuseIfHazards)
+        } throws: { error in
+            guard case .cannotRemoveLastWorkspace(let id) = error as? TaskEngineError else {
+                return false
+            }
+            return id == task.id
+        }
+        // The task and its only workspace are left fully intact.
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.count == 1)
+    }
+
+    @Test func removeWorkspaceDropsOneRepoAndPersists() async throws {
+        let a = try fixtures.cleanRepo()
+        let b = try fixtures.cleanRepo()
+        let ra = try await model.registerRepo(path: a.path, baseBranch: "main")
+        let rb = try await model.registerRepo(path: b.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "pair", branch: "task/pair", repoIds: [ra.id, rb.id])
+        #expect(task.workspaces.count == 2)
+
+        _ = try await model.removeWorkspace(
+            fromTask: task.id, repoId: rb.id, mode: .refuseIfHazards)
+
+        let updated = try #require(model.tasks.first(where: { $0.id == task.id }))
+        #expect(updated.workspaces.map(\.repoId) == [ra.id])
+        // Persisted: a reloaded store drops the same workspace.
+        let reloaded = try ConfigStore(directory: storeDirectory).load()
+        #expect(reloaded.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+    }
+
+    @Test func detachWorkspaceUntracksButKeepsWorktreeAndBranch() async throws {
+        let a = try fixtures.cleanRepo()
+        let b = try fixtures.cleanRepo()
+        let ra = try await model.registerRepo(path: a.path, baseBranch: "main")
+        let rb = try await model.registerRepo(path: b.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "pair-detach", branch: "task/pair-detach", repoIds: [ra.id, rb.id])
+        let bWorktree = try #require(task.workspaces.first { $0.repoId == rb.id }).worktreeURL
+
+        try model.detachWorkspace(fromTask: task.id, repoId: rb.id)
+
+        // Untracked from the task and persisted…
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+        let reloaded = try ConfigStore(directory: storeDirectory).load()
+        #expect(reloaded.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+        // …but NOTHING on disk was deleted: the worktree dir and branch survive.
+        #expect(FileManager.default.fileExists(atPath: bWorktree.path))
+        #expect(try await GitClient().branchExists("task/pair-detach", in: rb.pathURL))
+    }
+
+    @Test func detachRefusesTheTasksLastRepo() async throws {
+        let repo = try fixtures.cleanRepo()
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "solo-detach", branch: "task/solo-detach", repoIds: [registered.id])
+
+        #expect {
+            try self.model.detachWorkspace(fromTask: task.id, repoId: registered.id)
+        } throws: { error in
+            guard case .cannotRemoveLastWorkspace(let id) = error as? TaskEngineError else {
+                return false
+            }
+            return id == task.id
+        }
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.count == 1)
+    }
+
     // MARK: UI preferences (Phase 5 — startView / showBeam setters)
 
     /// The start-view preference persists through ConfigStore and comes back on

@@ -71,6 +71,9 @@ struct ContentView: View {
         .sheet(isPresented: $runtime.registerRepoPresented) { RegisterRepoSheet() }
         .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
         .sheet(item: $runtime.taskPendingAddWorkspace) { task in AddToTaskSheet(task: task) }
+        .sheet(item: $runtime.workspacePendingRemoval) { request in
+            RemoveWorkspaceSheet(request: request)
+        }
         .sheet(isPresented: Binding(
             get: { runtime.setupPresented },
             set: { runtime.setupPresented = $0 })) { SetupView() }

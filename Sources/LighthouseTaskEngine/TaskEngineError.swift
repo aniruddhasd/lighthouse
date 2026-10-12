@@ -26,6 +26,9 @@ public enum TaskEngineError: Error, Sendable {
     /// A repo already has a workspace in this task — one workspace per repo per
     /// task, so it can't be added a second time.
     case repoAlreadyInTask(repoId: UUID)
+    /// Removing a repo was refused because it is the task's only workspace — a
+    /// workspace-less task can't be sessioned or resumed. Remove the task itself.
+    case cannotRemoveLastWorkspace(taskId: UUID)
     /// Adopt-a-worktree: the chosen directory is not a git work tree at all.
     case notAGitWorktree(path: String)
     /// Adopt-a-worktree: the directory is a work tree, but not one belonging to

@@ -52,6 +52,10 @@ final class AppRuntime {
     /// navigator's + button (and any future entry point) can open it for a
     /// specific task without threading a binding down.
     var taskPendingAddWorkspace: TaskRecord?
+    /// Drives the "remove this repo from the task" sheet — the inverse of the
+    /// add-workspace flow. Carries the task AND which repo's workspace is being
+    /// removed (the navigator's selected repo).
+    var workspacePendingRemoval: WorkspaceRemovalRequest?
     /// Drives the Register-Repo sheet. On the runtime (like `switcherPresented`)
     /// so the File menu command AND the Harbor "Add repo" controls can all open
     /// it — the sidebar that used to own this trigger was retired.
@@ -1125,10 +1129,56 @@ final class AppRuntime {
         }
     }
 
+    /// Removes a single repo (workspace) from a task — the inverse of the
+    /// add-repo flow. The engine refuses (and throws) on an unconfirmed hazard,
+    /// exactly like `removeTask`; the open workbench re-syncs itself off the
+    /// task's workspace-count change, so nothing here touches the navigator.
+    func removeWorkspace(
+        fromTask taskId: UUID, repoId: UUID, mode: TaskRemovalMode
+    ) async -> Bool {
+        do {
+            _ = try await model.removeWorkspace(fromTask: taskId, repoId: repoId, mode: mode)
+            return true
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+            return false
+        } catch {
+            lastError = String(describing: error)
+            return false
+        }
+    }
+
+    /// Detach (untrack) a repo from a task without deleting its worktree/branch —
+    /// the non-destructive alternative offered alongside remove. Synchronous
+    /// (no git), but kept here so the sheet drives it the same way.
+    @discardableResult
+    func detachWorkspace(fromTask taskId: UUID, repoId: UUID) -> Bool {
+        do {
+            try model.detachWorkspace(fromTask: taskId, repoId: repoId)
+            return true
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+            return false
+        } catch {
+            lastError = String(describing: error)
+            return false
+        }
+    }
+
     /// Called on the way out (applicationWillTerminate): tear down the wheel
     /// monitor. Ptys die with the app; conversation context survives via
     /// --resume.
     func shutdown() {
         wheelMonitor.stop()
     }
+}
+
+/// Which repo of which task the remove-repo sheet is confirming. Item-based (an
+/// `Identifiable` sheet trigger) so the navigator's − button can open it for the
+/// currently-selected repo without threading a binding down.
+struct WorkspaceRemovalRequest: Identifiable, Equatable {
+    let task: TaskRecord
+    let repoId: UUID
+    let repoName: String
+    var id: String { "\(task.id.uuidString):\(repoId.uuidString)" }
 }
