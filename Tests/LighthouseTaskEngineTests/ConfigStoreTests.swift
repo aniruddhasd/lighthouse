@@ -42,7 +42,7 @@ final class ConfigStoreTests {
         #expect {
             _ = try self.store.load()
         } throws: { error in
-            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 5)
+            error as? ConfigStoreError == .unsupportedSchemaVersion(found: 99, newest: 6)
         }
         // Never silently rewritten: byte-identical after the failed load.
         #expect(try Data(contentsOf: store.fileURL) == futureFile)
@@ -194,7 +194,33 @@ final class ConfigStoreTests {
     @Test func schemaVersionIsWrittenFromDayOne() throws {
         try store.save(.empty)
         let text = String(decoding: try Data(contentsOf: store.fileURL), as: UTF8.self)
-        #expect(text.contains(#""schemaVersion" : 5"#))
+        #expect(text.contains(#""schemaVersion" : 6"#))
+    }
+
+    // MARK: v6 (Harbor "Repos" collapse state)
+
+    /// reposCollapsed round-trips through save/load.
+    @Test func reposCollapsedRoundTrips() throws {
+        try store.save(LighthouseConfig(reposCollapsed: false))
+        #expect(try store.load().reposCollapsed == false)
+        try store.save(LighthouseConfig(reposCollapsed: true))
+        #expect(try store.load().reposCollapsed == true)
+    }
+
+    /// A v5 file (written before the collapse state existed) migrates: the new
+    /// field defaults to collapsed, everything else preserved.
+    @Test func v5FileMigratesToV6DefaultingCollapsed() throws {
+        let v5 = Data(#"""
+        {"schemaVersion":5,"repos":[],"tasks":[],"hasCompletedSetup":true,\#
+        "notificationsHintDismissed":false,"theme":"native","startView":"focus",\#
+        "showBeam":false,"terminalFontSize":15}
+        """#.utf8)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try v5.write(to: store.fileURL)
+        let loaded = try store.load()
+        #expect(loaded.reposCollapsed == true)   // defaulted
+        #expect(loaded.theme == "native")          // preserved
+        #expect(loaded.terminalFontSize == 15)
     }
 
     // MARK: v3 → v4 (theme + start-view + beam preferences)

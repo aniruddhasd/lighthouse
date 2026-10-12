@@ -66,6 +66,8 @@ public final class AppModel {
     public private(set) var theme: String = "beacon"
     public private(set) var startView: String = "harbor"
     public private(set) var showBeam: Bool = true
+    /// Harbor "Repos" section collapsed (config schema v6). Defaults collapsed.
+    public private(set) var reposCollapsed: Bool = true
     /// Terminal font point size (config schema v5), wired to every SwiftTerm
     /// session and adjustable from Preferences. Kept in `terminalFontRange`.
     public private(set) var terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize
@@ -123,6 +125,7 @@ public final class AppModel {
         theme = config.theme
         startView = config.startView
         showBeam = config.showBeam
+        reposCollapsed = config.reposCollapsed
         // Clamp on load too: a hand-edited config can carry an out-of-range size.
         terminalFontSize = config.terminalFontSize.clamped(to: Self.terminalFontRange)
         lastActivity = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, now()) })
@@ -161,6 +164,13 @@ public final class AppModel {
     public func setShowBeam(_ value: Bool) {
         guard showBeam != value else { return }
         showBeam = value
+        try? persist()
+    }
+
+    /// Persists the Harbor "Repos" collapse state. No-op on a redundant set.
+    public func setReposCollapsed(_ value: Bool) {
+        guard reposCollapsed != value else { return }
+        reposCollapsed = value
         try? persist()
     }
 

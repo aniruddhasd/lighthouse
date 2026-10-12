@@ -287,12 +287,26 @@ struct HarborView: View {
     @ViewBuilder
     private var reposSection: some View {
         if !runtime.model.repos.isEmpty {
+            let collapsed = runtime.model.reposCollapsed
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("REPOS")
-                        .font(LHFont.mono(13, .semibold))
-                        .tracking(0.6)
+                    // The whole "REPOS" label toggles the section — it carries
+                    // little action, so it opens collapsed and tucks away.
+                    Button { runtime.model.setReposCollapsed(!collapsed) } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("REPOS").font(LHFont.mono(13, .semibold)).tracking(0.6)
+                            if collapsed {
+                                Text("\(runtime.model.repos.count)")
+                                    .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                            }
+                        }
                         .foregroundStyle(theme.dim)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(collapsed ? "Show repos" : "Hide repos")
                     Spacer()
                     Button { runtime.registerRepoPresented = true } label: {
                         HStack(spacing: 5) {
@@ -308,12 +322,14 @@ struct HarborView: View {
                     .buttonStyle(.plain)
                     .help("Register another local repo")
                 }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
-                    spacing: 16
-                ) {
-                    ForEach(runtime.model.repos) { repo in
-                        RepoCardView(repo: repo, taskCount: taskCount(for: repo))
+                if !collapsed {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
+                        spacing: 16
+                    ) {
+                        ForEach(runtime.model.repos) { repo in
+                            RepoCardView(repo: repo, taskCount: taskCount(for: repo))
+                        }
                     }
                 }
             }

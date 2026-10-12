@@ -35,6 +35,9 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
     /// Terminal font point size (schema v5). Drives the SwiftTerm font in every
     /// session; adjustable from Preferences. Clamped by the app to a sane range.
     public var terminalFontSize: Double
+    /// Harbor "Repos" section collapsed (schema v6). Defaults to collapsed —
+    /// those tiles carry little action, so the grid opens focused on tasks.
+    public var reposCollapsed: Bool
 
     /// The default terminal font size when none is persisted (schema < v5).
     public static let defaultTerminalFontSize: Double = 13
@@ -47,7 +50,8 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
         theme: String = "beacon",
         startView: String = "harbor",
         showBeam: Bool = true,
-        terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize
+        terminalFontSize: Double = LighthouseConfig.defaultTerminalFontSize,
+        reposCollapsed: Bool = true
     ) {
         self.repos = repos
         self.tasks = tasks
@@ -58,6 +62,7 @@ public struct LighthouseConfig: Codable, Sendable, Equatable {
         self.startView = startView
         self.showBeam = showBeam
         self.terminalFontSize = terminalFontSize
+        self.reposCollapsed = reposCollapsed
     }
 
     public static let empty = LighthouseConfig()
@@ -76,7 +81,7 @@ public enum ConfigStoreError: Error, Sendable, Equatable {
 /// same directory, then rename over the target). The directory is injected;
 /// production uses `ConfigStore.defaultDirectory()`, tests use temp dirs.
 public struct ConfigStore: Sendable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
     public static let fileName = "config.json"
 
     public let directory: URL
@@ -176,6 +181,8 @@ public struct ConfigStore: Sendable {
             } catch {
                 throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
             }
+            // v5 → v6: no reposCollapsed recorded yet — the init defaults it
+            // (collapsed). Everything else passes through untouched.
             return LighthouseConfig(
                 repos: stored.repos, tasks: stored.tasks,
                 worktreesRootOverride: stored.worktreesRootOverride,
@@ -185,6 +192,23 @@ public struct ConfigStore: Sendable {
                 startView: stored.startView,
                 showBeam: stored.showBeam,
                 terminalFontSize: stored.terminalFontSize)
+        case 6:
+            let stored: StoredConfigV6
+            do {
+                stored = try decoder.decode(StoredConfigV6.self, from: data)
+            } catch {
+                throw ConfigStoreError.corruptConfig(path: fileURL.path, detail: String(describing: error))
+            }
+            return LighthouseConfig(
+                repos: stored.repos, tasks: stored.tasks,
+                worktreesRootOverride: stored.worktreesRootOverride,
+                hasCompletedSetup: stored.hasCompletedSetup,
+                notificationsHintDismissed: stored.notificationsHintDismissed,
+                theme: stored.theme,
+                startView: stored.startView,
+                showBeam: stored.showBeam,
+                terminalFontSize: stored.terminalFontSize,
+                reposCollapsed: stored.reposCollapsed)
         default:
             throw ConfigStoreError.unsupportedSchemaVersion(
                 found: probe.schemaVersion, newest: Self.currentSchemaVersion)
@@ -192,7 +216,7 @@ public struct ConfigStore: Sendable {
     }
 
     public func save(_ config: LighthouseConfig) throws {
-        let stored = StoredConfigV5(
+        let stored = StoredConfigV6(
             schemaVersion: Self.currentSchemaVersion,
             repos: config.repos,
             tasks: config.tasks,
@@ -202,7 +226,8 @@ public struct ConfigStore: Sendable {
             theme: config.theme,
             startView: config.startView,
             showBeam: config.showBeam,
-            terminalFontSize: config.terminalFontSize)
+            terminalFontSize: config.terminalFontSize,
+            reposCollapsed: config.reposCollapsed)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data: Data
@@ -290,6 +315,22 @@ public struct ConfigStore: Sendable {
         var startView: String
         var showBeam: Bool
         var terminalFontSize: Double
+    }
+
+    /// v6 (2026-10-12): adds the persisted Harbor "Repos" collapse state.
+    /// Everything else carries over from v5 unchanged.
+    private struct StoredConfigV6: Codable {
+        var schemaVersion: Int
+        var repos: [RepoConfig]
+        var tasks: [TaskRecord]
+        var worktreesRootOverride: String?
+        var hasCompletedSetup: Bool
+        var notificationsHintDismissed: Bool
+        var theme: String
+        var startView: String
+        var showBeam: Bool
+        var terminalFontSize: Double
+        var reposCollapsed: Bool
     }
 
     /// v1 → current: same repos/tasks; no override configured; setup treated
