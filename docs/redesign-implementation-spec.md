@@ -6,7 +6,37 @@ Swift/SwiftUI app. The handoff (`design_handoff_lighthouse_ui/README.md` +
 and interactions; this document is the **engineering plan** — what we reuse, what
 we build, in what order, and the one genuinely hard problem.
 
-Status: draft for review. Nothing built yet. Current app tip: `2861765` (workbench).
+Status (updated 2026-10-22): **implemented, with divergences.** Phases 1–5
+shipped (theme, titlebar, Harbor/Focus shell, metadata + lean Summary, motion +
+preferences). The body below is the original plan and is kept as design
+rationale; read this section first for what is different now.
+
+- **Attention removed (2026-07-29, `3bf8660`).** The four automatic statuses
+  (working/needs/idle/stale), the hook pipeline, `AttentionSocketListener`,
+  notifications and the dock badge are gone. A task's status is **user-set
+  free text**; the only automatic signal is **session liveness**. Consequently:
+  the status→accent mapping (§2), the Harbor filter chips and
+  needs→working→idle→stale sort (§3.4, §5.1), and the "needs you" framing no
+  longer exist. Harbor and ⌘K share one order: live sessions first, then most
+  recent activity, then name (`AppModel.orderedTasks`).
+- **Merge to base removed (2026-07-23, `7bec890`)** — §2 "Merge to base",
+  §5.2's promoted Merge button and the conflict flow are not in the app.
+- **Metadata layer (§4) partly dead.** `diffStat` (files, +add/−del) is live.
+  `baked`, `action`, `model` and `ctx%` depended on hook payloads; the
+  `TaskDigest` fields and `TranscriptReader` remain but nothing feeds them.
+  Phase 4b (steps / recap / "Next step") was never built; the Summary shows
+  status, the diff-base picker and stat cards.
+- **Fonts (§3.2/§9.1):** the terminal uses bundled JetBrains Mono (size in
+  Preferences, config schema v5); chrome remains SF Pro.
+- **Config:** schema is v6 (v4 theme/startView/showBeam as planned; v5
+  terminalFontSize; v6 reposCollapsed). Tasks gained `status` and `hidden`;
+  workspaces gained `isInPlace` and `baseOverride`.
+- **Added beyond this spec:** in-place tasks; add/adopt/detach/remove a
+  workspace on a running task; task from a GitHub PR (`gh`); clone-from-URL
+  repo registration; scratch terminals; ⌘P file finder; ⌘F / ⇧⌘F `git grep`;
+  a simple file editor; an uncommitted-only review scope; collapsible diff
+  files; per-task diff-base override; hide tasks; task keyboard navigation
+  (⇧⌘]/⇧⌘[, ⇧⌘H, ⌘⌥ chrome cycling, Harbor Tab/arrow traversal).
 
 ---
 

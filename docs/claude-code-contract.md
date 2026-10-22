@@ -1,5 +1,18 @@
 # Claude Code contract — verified facts
 
+> **Status (updated 2026-10-22):** the hook-based attention system was removed
+> on 2026-07-29 (commit `3bf8660`). Orchestrator phase 1a reinstated a narrower
+> hook path **only for tasks the user opts in to supervising** (observation
+> only; see "Hook re-verification" below and `docs/orchestrator-design.md`).
+> Unsupervised tasks get no hooks and no socket. The **CLI flags**,
+> **multi-account / login shell**, and **transcript JSONL** sections remain
+> live contract. The **hook events / payload / configuration / settings.local.json
+> / live verification** sections are **historical** — facts as verified on
+> 2026-07-09, kept for the day hooks return; they are not exercised by current
+> code and were not re-verified in this update. The launch shape changed too:
+> the `claude` command is now typed into a persistent `$SHELL -l -i`, not run via
+> `-c 'exec claude …'` (see "Multi-account / login shell").
+
 Every fact Lighthouse relies on from the Claude Code CLI, verified against the
 installed binary and the current official docs. Where the CLI and docs
 disagree, the installed CLI wins and the disagreement is flagged. Re-verify
@@ -25,7 +38,47 @@ this file when the CLI is updated; it exists to make contract drift diffable.
 | Session display name | `-n, --name <name>` — shown in prompt box and `/resume` picker (useful in step 4). |
 | Hook kill-switches | `--bare` skips hooks entirely; `--safe-mode` disables hooks; `settings.disableAllHooks`. The pty layer must never pass these. |
 
-## Hook events (docs /en/hooks; full list is ~30 events — the ones we use)
+## Hook re-verification — CLI 2.1.308, `-p` mode (2026-10-22)
+
+Orchestrator phase 1a reinstated hooks for opted-in tasks (see
+`docs/orchestrator-design.md`). Re-checked against the installed CLI
+(`claude --version` → `2.1.308`) with the gated `LiveClaudeHookCaptureTests`
+(`LIGHTHOUSE_LIVE_CLAUDE_TEST=1`, one haiku turn, `CLAUDE_CONFIG_DIR`
+`~/.claude-enterprise`) through the real exec-form curl → unix-socket path:
+
+- Delivered, in order: `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`.
+- Every event echoed the pre-assigned `--session-id` verbatim.
+- `SessionEnd` carries the end reason in **`reason`** (value `other`), as on
+  2.1.205 — not `end_reason`.
+- `Stop` carried `last_assistant_message` plus undocumented/extra keys:
+  `background_tasks, effort, session_crons, stop_hook_active` (`effort` is new
+  since 2.1.205). `SessionStart` carried `source`. Decoders ignore unknown keys.
+- Hooks docs (fetched 2026-10-22; page text was truncated, ~63% unread) list 33
+  events, add `agent_id`/`agent_type` common fields for subagent events, and
+  expand `Notification` types (`permission_prompt`, `idle_prompt`,
+  `agent_needs_input`, `agent_completed`, plus elicitation/quota/plugin types).
+  **Not established:** whether `Stop` fires for real subagent turns.
+- **Interactive observation (2026-10-22, one task, CLI 2.1.308):**
+  - A session **already running** began reporting after hooks were written to
+    `.claude/settings.local.json` mid-session (first event ~70 s after the write);
+    it did not report the `SessionStart` that had already passed. One
+    observation, one task — not a guarantee.
+  - `SessionEnd` carried `reason: prompt_input_exit` on exit; `SessionStart`
+    (`source` key) fired on `--resume` and carried the **same `session_id`**, so
+    the pre-assigned `sessionRef` survives exit/resume.
+  - **`SubagentStop` fires for unprompted helper output with the primary's
+    `session_id`**, `agent_id` set, `agent_type` present but **empty**, and an
+    `agent_transcript_path` key; no matching `SubagentStart` was logged. Observed
+    messages looked like a predicted next user prompt (31 chars) and a session
+    recap (256 chars). Inference from content only; the agent transcripts would
+    confirm. Consumers must not treat a `SubagentStop` as a turn boundary.
+  - Keys seen: `SessionStart`: `source`; `UserPromptSubmit`: `prompt`,
+    `prompt_id`, `permission_mode`, `scratchpad_dir`, `session_title`; `Stop`: also
+    `effort`, `background_tasks`, `session_crons`, `stop_hook_active`.
+
+## Hook events — HISTORICAL (removed from Lighthouse 2026-07-29)
+
+(docs /en/hooks; full list is ~30 events — the ones we used)
 
 | Event | Fires | Lighthouse mapping |
 |---|---|---|
@@ -40,7 +93,7 @@ The spec's hypothesis that `Notification` covers permission/idle was correct
 but incomplete: notification *types* are matchable, so the noisy types never
 reach our socket at all.
 
-## Hook payload (docs /en/hooks; confirmed live — see sample below)
+## Hook payload — HISTORICAL (docs /en/hooks; confirmed live 2026-07-09)
 
 Delivered as JSON on stdin to command hooks. Common fields:
 `session_id`, `prompt_id` (v2.1.196+), `transcript_path`, `cwd`,
@@ -70,7 +123,7 @@ gated `LiveClaudeHookCaptureTests`; home and temp paths shortened):
   `permission_mode`. Decoders must ignore unknown fields and treat
   common fields as optional — ours do.
 
-## Hook configuration shape (docs /en/hooks)
+## Hook configuration shape — HISTORICAL (docs /en/hooks)
 
 Three-level nesting: event name → matcher groups → handlers. A handler with
 `"type": "command"` plus an **`args` array runs in exec form: "command is
@@ -83,7 +136,7 @@ any TCP listener.)
 `async: true` runs the hook in the background without blocking the agent —
 used so a dead listener can never stall a session (spec §8 fail-safe).
 
-## settings.local.json + gitignore (docs /en/settings — SPEC DIVERGENCE)
+## settings.local.json + gitignore — HISTORICAL (docs /en/settings)
 
 - Precedence (highest→lowest): managed policy → CLI args →
   `.claude/settings.local.json` → `.claude/settings.json` → `~/.claude/settings.json`.
@@ -104,13 +157,16 @@ used so a dead listener can never stall a session (spec §8 fail-safe).
 The user's `claude` is a zsh **function** that sets
 `CLAUDE_CONFIG_DIR=$HOME/.claude-enterprise` when `$PWD` is under the work
 directory. Functions come from `.zshrc`, which only interactive shells load —
-so the launch plan runs `$SHELL -l -i -c 'exec claude …'` (login **and**
-interactive; the session lives in a pty anyway, step 4). A plain `-l -c`
-would silently miss `.zshrc`-defined selectors and launch under the wrong
-account. `CLAUDE_CONFIG_DIR` itself is absent from the settings docs page —
+so the launch plan runs a persistent `$SHELL -l -i` (login **and** interactive)
+in the pty and *types* the `claude` command into it (`LaunchPlan.typedCommand`,
+composed by `ShellQuoter`). This replaced `-l -i -c 'exec claude …'` on
+2026-07-13: `exec` made Claude's exit kill the pty, whereas a persistent shell
+drops back to the user's prompt in the worktree with the same account env. A
+plain `-l -c` would silently miss `.zshrc`-defined selectors and launch under
+the wrong account. `CLAUDE_CONFIG_DIR` itself is absent from the settings docs page —
 its per-folder selection is user-side shell logic, not a documented contract.
 
-## Live verification (gated integration test, run once 2026-07-09)
+## Live hook verification — HISTORICAL (gated test, run once 2026-07-09)
 
 `claude -p "Reply with exactly: OK" --model haiku --session-id <uuid>` in a
 temp git fixture, with hooks installed by our HookInstaller into
@@ -164,6 +220,11 @@ windows (verified 2026-07-15 via the `claude-api` skill's model catalog):
 is framed as an **estimate**, and is **omitted** (field stays nil, nothing
 renders) whenever the model id is unknown to that map or the transcript has no
 usable last-usage line — never a fabricated or hand-waved percentage.
+
+> **Current wiring (2026-10-22):** `TranscriptReader` exists and is unit-tested,
+> but nothing in the app calls it since the hooks were removed, and the
+> `baked`/`action` inputs below came from hooks. The ctx%/model schema above is
+> intact; only the feeding is gone.
 
 `baked` (turn duration) does **not** need the transcript: it is wall-clock
 between this task's most recent `UserPromptSubmit` (agentWorking) hook and its

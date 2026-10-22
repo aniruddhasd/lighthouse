@@ -18,6 +18,15 @@ final class AppRuntime {
     /// (baked/action/model/ctx) and Focus entry / Stop (diffStat).
     let digests = TaskDigestCache()
     let registry = SessionRegistry()
+    /// Orchestrator phase 1a (docs/orchestrator-design.md): observation-only log of
+    /// hook events from tasks the user opted in to supervising. The log and its
+    /// durable JSONL sink are always present; the socket listener and the hooks
+    /// exist only while at least one task is supervised.
+    let hookLog: HookEventLog
+    private let hookInstaller: HookInstaller
+    @ObservationIgnored private var hookListener: HookEventListener?
+    @ObservationIgnored private var hookEventTask: Task<Void, Never>?
+    private let configDirectory: URL
     /// Routes wheel events over terminals into mouse reports when the TUI
     /// owns the mouse (see LighthouseTerminalView).
     private let wheelMonitor = WheelReportMonitor()
@@ -81,6 +90,9 @@ final class AppRuntime {
     }
 
     init(configDirectory: URL = AppRuntime.defaultConfigDirectory()) {
+        self.configDirectory = configDirectory
+        hookLog = HookEventLog(sink: HookEventSink(directory: configDirectory))
+        hookInstaller = HookInstaller(git: git)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
             adapter: adapter,
@@ -108,6 +120,11 @@ final class AppRuntime {
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
         setupPresented = model.repos.isEmpty && !model.hasCompletedSetup
+        // Re-arm supervision for tasks opted in last run: the listener is not
+        // persistent, and re-installing repairs a moved socket path.
+        if model.tasks.contains(where: \.supervised) {
+            Task { @MainActor [weak self] in await self?.resumeSupervision() }
+        }
         setUpGeometryProbeIfRequested()
         runDiffRenderCheckIfRequested()
         runFileRenderCheckIfRequested()
@@ -1114,6 +1131,10 @@ final class AppRuntime {
             // digests — a failed removal must leave the task fully intact
             // (session alive, still listed) so the user can retry or cancel.
             _ = try await model.removeTask(task, mode: mode)
+            // In-place workspaces live on in the user's own checkout; take our
+            // hooks out of them (worktrees are gone already — a no-op there).
+            if task.supervised { await uninstallHooks(from: task.workspaces) }
+            hookLog.remove(taskId: task.id)
             registry.discardTask(taskId: task.id)
             tabs[task.id] = nil
             focusedTab[task.id] = nil
@@ -1136,8 +1157,11 @@ final class AppRuntime {
     func removeWorkspace(
         fromTask taskId: UUID, repoId: UUID, mode: TaskRemovalMode
     ) async -> Bool {
+        let leaving = model.tasks.first { $0.id == taskId }?.workspaces
+            .filter { $0.repoId == repoId } ?? []
         do {
             _ = try await model.removeWorkspace(fromTask: taskId, repoId: repoId, mode: mode)
+            await uninstallHooks(from: leaving)
             return true
         } catch let error as TaskEngineError {
             lastError = FailureDescriber.describe(error)
@@ -1153,8 +1177,12 @@ final class AppRuntime {
     /// (no git), but kept here so the sheet drives it the same way.
     @discardableResult
     func detachWorkspace(fromTask taskId: UUID, repoId: UUID) -> Bool {
+        let leaving = model.tasks.first { $0.id == taskId }?.workspaces
+            .filter { $0.repoId == repoId } ?? []
         do {
             try model.detachWorkspace(fromTask: taskId, repoId: repoId)
+            // Detach keeps the worktree on disk — don't leave our hooks in it.
+            Task { await uninstallHooks(from: leaving) }
             return true
         } catch let error as TaskEngineError {
             lastError = FailureDescriber.describe(error)
@@ -1170,6 +1198,108 @@ final class AppRuntime {
     /// --resume.
     func shutdown() {
         wheelMonitor.stop()
+        hookEventTask?.cancel()
+        hookListener?.stop()
+    }
+
+    // MARK: - Supervision (orchestrator phase 1a — observation only)
+
+    /// Opt a task in or out of supervision. Opting IN starts the hook socket (if
+    /// not running) and installs the observation hooks in every workspace; the
+    /// flag is persisted only once ALL installs succeeded, and a partial failure
+    /// is rolled back so nothing is left half-wired. Opting OUT persists first
+    /// (so a failed uninstall can't leave the task looking supervised) and then
+    /// removes our hooks.
+    ///
+    /// Claude Code reads hook settings when a session starts, so a session that
+    /// is ALREADY running will not report until it is resumed (unverified against
+    /// the CLI — the UI says so rather than promise otherwise).
+    func setSupervised(_ on: Bool, for task: TaskRecord) async {
+        if !on {
+            model.setTaskSupervised(false, for: task.id)
+            await uninstallHooks(from: task.workspaces)
+            if !model.tasks.contains(where: \.supervised) { stopHookListener() }
+            return
+        }
+        guard !task.workspaces.isEmpty else {
+            lastError = "\(task.name) has no workspaces to supervise."
+            return
+        }
+        var installed: [Workspace] = []
+        do {
+            let socket = try await ensureHookListener()
+            for workspace in task.workspaces {
+                try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+                installed.append(workspace)
+            }
+            model.setTaskSupervised(true, for: task.id)
+        } catch {
+            await uninstallHooks(from: installed)
+            if !model.tasks.contains(where: \.supervised) { stopHookListener() }
+            lastError = "Could not enable supervision: \(describeHookError(error))"
+        }
+    }
+
+    /// Launch-time re-arm for tasks that were supervised last run.
+    private func resumeSupervision() async {
+        do {
+            let socket = try await ensureHookListener()
+            for task in model.tasks where task.supervised {
+                for workspace in task.workspaces {
+                    try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+                }
+            }
+        } catch {
+            lastError = "Could not re-arm supervision: \(describeHookError(error))"
+        }
+    }
+
+    private func ensureHookListener() async throws -> URL {
+        if let listener = hookListener { return listener.socketURL }
+        let listener = HookEventListener(directory: configDirectory)
+        let url = try await listener.start()
+        let stream = await listener.events()
+        hookListener = listener
+        hookEventTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.hookLog.record(event, tasks: self.model.tasks)
+            }
+        }
+        return url
+    }
+
+    private func stopHookListener() {
+        hookEventTask?.cancel()
+        hookEventTask = nil
+        hookListener?.stop()
+        hookListener = nil
+    }
+
+    /// Best-effort removal of our hooks; a failure is surfaced but never blocks
+    /// the removal/opt-out that triggered it (our handlers are inert without the
+    /// listener — async curl to a missing socket just fails quietly).
+    private func uninstallHooks(from workspaces: [Workspace]) async {
+        for workspace in workspaces {
+            do { try await hookInstaller.uninstall(from: workspace.worktreeURL) }
+            catch { lastError = "Could not remove supervision hooks: \(describeHookError(error))" }
+        }
+    }
+
+    private func describeHookError(_ error: Error) -> String {
+        switch error {
+        case let e as HookInstallerError:
+            switch e {
+            case .existingSettingsInvalid(let path, let detail):
+                return "\(path) is not valid JSON (\(detail)); left untouched."
+            case .ioFailure(let path, let detail):
+                return "I/O failure at \(path): \(detail)"
+            }
+        case let e as HookSocketError:
+            return "hook socket: \(e)"
+        default:
+            return String(describing: error)
+        }
     }
 }
 

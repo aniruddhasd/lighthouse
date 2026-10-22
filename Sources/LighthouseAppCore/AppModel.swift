@@ -754,6 +754,16 @@ public final class AppModel {
         try? persist()
     }
 
+    /// Opts a task in or out of supervision (orchestrator phase 1a). Persisted.
+    /// This only records the choice — installing/removing the hooks is the app
+    /// layer's job (it owns the socket path), done after this returns.
+    public func setTaskSupervised(_ supervised: Bool, for taskId: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }),
+              tasks[index].supervised != supervised else { return }
+        tasks[index].supervised = supervised
+        try? persist()
+    }
+
     /// Overrides the "vs base" diff base branch for one task's workspace
     /// (identified by its repo). `base` nil/empty reverts to the repo default.
     /// Persisted so the choice survives a relaunch.

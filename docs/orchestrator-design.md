@@ -1,0 +1,207 @@
+# Orchestrator (supervisor) — design
+
+Status: **phase 1a implemented (observation only); not yet observed in real
+use.** Written and built 2026-10-22. Phases 1b and 2 are unbuilt.
+
+### Phase 1a — what exists
+
+- `TaskRecord.supervised` (default false; persisted; absent in old configs → false).
+- `LighthouseAdapter`: `HookEvent` + `ClaudeHookParser` (total, bounded; keeps
+  `payloadKeys`), `HookInstaller` (restored; wide event set; `Notification`
+  unfiltered; install *replaces* stale handlers from the removed attention
+  system; refuses invalid JSON), `HookEventListener` (restored socket, 0600,
+  `hooks.sock` in the config dir, yields unattributed parsed events in order).
+- `LighthouseAppCore`: `HookAttributor` (primary / otherSessionInTask /
+  unattributed — path-boundary + `..` safe), `HookEventLog` (bounded, per task)
+  and `HookEventSink` (JSONL `hook-events.jsonl`, 0600, rotates at 5 MB).
+- `AppRuntime.setSupervised`: starts the listener, installs hooks in every
+  workspace (flag persisted only if all installs succeed; partial failure rolls
+  back), re-arms at launch, removes hooks on opt-out / task removal / detach.
+- UI: a **Supervision** card on the Summary tab — toggle plus the last 30
+  events, with non-primary attribution flagged.
+- Tests: parser, installer (incl. stale-handler replacement), listener
+  (hostile input, ordering, real-curl transport, slow-loris), attribution, log
+  bounds, sink permissions/rotation, config round-trip; plus the gated live
+  `-p` capture (CLI 2.1.308: see the contract doc).
+
+### Phase 1a — first observations (2026-10-22, one task)
+
+- Hooks written to a **running** session were honored (it missed only its own
+  `SessionStart`); resume reuses `session_id`; exit reports
+  `SessionEnd · prompt_input_exit`.
+- **`SubagentStop` is not a turn.** Helper subagents (empty `agent_type`) emit
+  `SubagentStop` after the real `Stop`, with the primary's session id and text
+  that looks like a suggested next prompt or a recap. Design rule hardened: only
+  a `Stop` with **no `agent_id`** is a turn boundary. (Inference from content —
+  confirm via `agent_transcript_path`.)
+- The card now shows `SessionStart` `source`, keeps an empty `agent_type`, and
+  labels anything with an `agent_id` "not a turn".
+
+Known gaps in 1a: a workspace added to an already-supervised task is not wired
+until the flag is toggled; hooks are not installed into worktrees of tasks
+created later; mid-session pickup is observed once, not proven; interactive-mode
+behaviour is exactly what the observation week is for. Leftovers: old attention hooks already
+sitting in existing worktrees stay inert until that task is supervised (install
+replaces them) or never (they curl a dead socket, async, harmlessly).
+
+## 1. Goal
+
+A central **supervisor** that talks to the agent sessions in selected Harbor
+tiles. The user leaves standing instructions in natural language ("once A
+finishes the migration, tell B to start the API changes"); the supervisor
+watches the tasks, judges what happened, and does the follow-up.
+
+Not in scope: a rigid rules schema (rejected — the completion condition is
+semantic), supervising every session by default, multiple Claude sessions per
+tile (phase 2), any auto-send without confirmation (until phase 1a evidence
+supports it).
+
+## 2. The central problem: "turn ended" is not "task done"
+
+An agent can end a turn cleanly while having failed ("looks like the VPN is
+down, I couldn't complete the request"). A hook `Stop` is structurally
+identical for success, failure and a question. Therefore:
+
+- **Hooks are a deterministic event source** — they say *when* to look and carry
+  the agent's actual reply text.
+- **The supervisor LLM is the judge** — it reads the reply and classifies it.
+- **Default is hold.** Unclear classification → flag to the user, never advance.
+
+## 3. Signal source: Claude Code hooks
+
+From `docs/claude-code-contract.md` (CLI 2.1.205, verified 2026-07-09 —
+**must be re-verified on the current CLI before relying on it**):
+
+| Event | Meaning | Use |
+|---|---|---|
+| `Stop` | turn finished; payload has `last_assistant_message` | judge: done / blocked / question |
+| `Notification` (matchers `permission_prompt`, `idle_prompt`, `agent_needs_input`) | agent blocked on a human | structural "needs a human"; never advance |
+| `StopFailure` | turn ended on an API error | never "done" |
+| `SessionEnd` | session terminated | mark target unavailable |
+| `UserPromptSubmit` | a turn started | target is busy |
+
+Every payload carries `session_id` and `transcript_path`. Hook config shape,
+exec-form `args`, `async: true`, and the gitignore mechanism
+(`.claude/settings.local.json` + the repo's shared `info/exclude`) are recorded
+in that file's historical sections. `--bare` / `--safe-mode` disable hooks; the
+pty layer must never pass them.
+
+### Why the previous signals mismatched (unknown)
+
+The attention system was removed in `3bf8660` (2026-07-29) without recorded
+reasons beyond "replace with session liveness and freetext status". The user
+recalls signals that "did not match the activity inside the session".
+
+**Ruled out by reading the old code:** cwd-based attribution. The old listener
+already attributed by `session_id` (`registrations[sessionRef]`), so a second
+`claude` in the same worktree was dropped as "unknown session", not credited to
+the primary. Remaining candidates (all unverified): the old *mapping* of events
+to a state (`Notification` `idle_prompt`/`agent_completed` → needs-input/stopped,
+`Stop` → stopped regardless of content), events from subagents, resumed/forked
+sessions arriving under a new `session_id`, and delivery latency/ordering.
+Phase 1a records `agent_id`, `session_id` and attribution per event precisely so
+these can be told apart.
+
+## 4. Architecture
+
+```
+claude (primary session of an opted-in tile)
+  └─ hook (exec-form, async) ─▶ local Unix socket (0600) ─▶ EventLog (per task)
+                                                              │
+        supervisor (a Claude session) ◀── tool surface ───────┘
+              tools: list_tasks · read_turn · read_transcript_tail
+                     · propose_send · hold · ask_user
+                                  │
+                                  ▼
+            confirm (UI) ─▶ SessionRegistry.typeIntoSession(taskId:text:)
+```
+
+- **Opt-in per tile.** A `supervised` flag on `TaskRecord` (alongside `status`,
+  `hidden`; absent → false). Un-supervised tiles get no hook wiring, so they emit
+  nothing and are unreachable by the supervisor. This is also a security
+  boundary.
+- **Event log** (`LighthouseAppCore`, pure + testable): append-only per task;
+  stores type, `session_id`, timestamp, and the **full** `last_assistant_message`
+  for `Stop`. Memory-bounded; no secrets in config.
+- **Transport**: Unix socket listener, 0600, size-capped, hostile-input
+  hardened (the removed `AttentionSocketListener` is the prior art — see git
+  history before `3bf8660`). macOS `sun_path` limit ≈ 103 bytes.
+- **Supervisor**: a long-lived Claude session holding the user's standing
+  instructions, given a narrow tool surface (MCP server is the likely fit;
+  **unverified** how to wire one into a pty-hosted session). Woken only on
+  `Stop`, `Notification`, `StopFailure` — not every event — to bound cost.
+- **Delivery**: existing `SessionRegistry.typeIntoSession` (`SessionRegistry.swift:106`).
+
+### Boundaries (per the project's design constraints)
+
+Event log + classification inputs are pure `AppCore`; the socket and pty live in
+the app layer; the supervisor is behind a protocol so its transport (MCP, CLI)
+is replaceable. The adapter stays the only place that knows Claude CLI facts —
+hook installation belongs in `ClaudeCodeAdapter`'s side of the seam.
+
+## 5. Behaviour rules
+
+1. **Classify each `Stop`** as `done` / `blocked-or-failed` / `question` /
+   `unclear`. Only `done` may advance a standing instruction.
+2. `Notification` and `StopFailure` never advance.
+3. **Deliver only to an idle target** (last event for it was `Stop` or
+   `idle_prompt`, not `UserPromptSubmit`) — typing into a busy agent or
+   permission prompt can answer a prompt by accident.
+4. **Every send requires user confirmation** in phase 1b. Composition: the
+   supervisor sends text *it* wrote; it never forwards raw agent output into
+   another session.
+5. **Single-shot with a hop limit**; persist "fired" before sending
+   (idempotent across restart); no A→B→A loops.
+6. Fail closed on any parse/delivery error; surface the typed error.
+
+## 6. Security
+
+- Agent output, transcripts and repo content are **untrusted**; the supervisor
+  is a prompt-injection target with write access to other sessions. Mitigations:
+  opt-in scope, no raw forwarding, mandatory confirmation, allowlisted tools,
+  hop limit.
+- Socket: 0600, owner-only parent dir, size-capped reads, input validated at the
+  boundary; decoders ignore unknown fields and treat common fields as optional
+  (the CLI added undocumented fields before).
+- Hook delivery is exec-form (no shell). No secrets in hook payload handling,
+  logs or the event log beyond what the agent itself said — treat the log as
+  sensitive and keep it out of git and `/tmp`.
+
+## 7. Multiple sessions per tile
+
+A tile's extra tabs are plain shell tabs. If the user runs `claude` in one,
+Lighthouse does not know its `session_id` (the CLI assigns it), yet the
+worktree's hooks fire for it too. Handling of unknown `session_id` in a
+supervised tile:
+
+1. **Phase 1:** ignore (optionally log as `unregistered`, never act on it).
+2. **Phase 2:** a "New Claude tab" action that launches through the adapter with
+   a pre-assigned `--session-id`, registers it as a named child session of the
+   tile, and makes it an addressable supervisor target. Requires a session
+   registry carrying `(taskId, tabId, sessionId, role)` and delivery by tab
+   (today's `typeIntoSession` takes only a task id).
+
+Phase 1 event records carry `session_id` and tab id now so phase 2 is not a
+schema change.
+
+## 8. Phasing
+
+| Phase | Scope | Exit criterion |
+|---|---|---|
+| 1a | Opt-in flag, hook install, socket, EventLog keyed by `session_id`; **observation only**, no actions | Logged events match terminal activity over ~1 week: no missed/duplicate `Stop`, no cross-session attribution, acceptable latency |
+| 1b | Supervisor reads events + `last_assistant_message`, classifies, **proposes** sends; user confirms | Classification judged correct on real turns, incl. the blocked-by-environment case |
+| 2 | Launchable tab sessions with pre-assigned ids; per-session targets | — |
+
+Re-verify the hook contract against the installed CLI at the start of 1a and
+update `docs/claude-code-contract.md`.
+
+## 9. Open questions
+
+- What exactly failed in the old hook pipeline (delivery, attribution, false
+  "done")? Phase 1a answers this with evidence; the git history before
+  `3bf8660` holds the old code.
+- How does the supervisor get its tools (MCP server vs a CLI it shells out to)?
+- Where does the supervisor session live — a dedicated tile, or a separate
+  surface? Does it count as a "supervised" session itself?
+- Cost ceiling: supervisor wakes per `Stop` per supervised tile.
+- UI: where proposed sends and held items surface in Harbor.

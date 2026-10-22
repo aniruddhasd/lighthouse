@@ -416,6 +416,25 @@ final class AppModelTests {
         #expect(reloaded.tasks.first { $0.id == task.id }?.status == "waiting on review")
     }
 
+    /// Supervision is opt-in (default off), persists across a reload, and a
+    /// pre-feature config (no `supervised` key) decodes as unsupervised.
+    @Test func supervisedDefaultsOffPersistsAndLegacyDecodesOff() async throws {
+        let task = try await makeTask()
+        #expect(task.supervised == false)
+        model.setTaskSupervised(true, for: task.id)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.first { $0.id == task.id }?.supervised == true)
+
+        let legacy = Data(#"""
+        {"id":"\#(UUID().uuidString)","name":"n","branch":"b","adapterKind":"claude-code","workspaces":[]}
+        """#.utf8)
+        #expect(try JSONDecoder().decode(TaskRecord.self, from: legacy).supervised == false)
+    }
+
     /// Hiding a task drops it from ⌘K, persists across a reload, and unhiding
     /// brings it back.
     @Test func hidingExcludesFromSwitcherAndPersists() async throws {

@@ -23,7 +23,8 @@ From `cdn.jsdelivr.net/npm/diff2html@3.4.56/bundles/`, committed at
 The canonical sha256 checksums live in
 `Sources/LighthouseApp/Resources/diff2html/SHA256SUMS` — the single source of
 truth, asserted on every build by `Scripts/verify-vendored-assets.sh` (run
-from `make-app.sh` and `smoke-run.sh`). They are deliberately NOT duplicated
+from `make-app.sh` and `smoke-run.sh`). The bundled JetBrains Mono fonts
+(`Resources/fonts/`) are checked the same way against their own `SHA256SUMS`. They are deliberately NOT duplicated
 here; read that file for the exact hashes.
 
 The base bundle is used (not `diff2html-ui`, which pulls highlight.js) —
@@ -71,3 +72,13 @@ rendered as added-file patches via `git diff --no-index -- /dev/null <path>`
 (exit 1 = differences, per --exit-code semantics) — agents write new files
 without staging them, so hiding untracked files would hide most in-flight
 work. Untracked files over the cap are stubbed by size before reading.
+
+## Review scopes (added after this doc's first draft)
+
+The Changes tab offers two scopes: **vs base** (the merge-base diff above) and
+**uncommitted** (`GitClient.uncommittedDiff` — working tree vs its own HEAD).
+The "vs base" branch defaults to the repo's registered base branch and can be
+overridden per task and workspace from the Summary tab
+(`Workspace.baseOverride`). Diff files render collapsible, and the file
+viewer (`FilePageBuilder`) uses the same WKWebView lockdown with a stricter
+CSP (`default-src 'none'; script-src 'nonce-…'; style-src 'unsafe-inline'`).

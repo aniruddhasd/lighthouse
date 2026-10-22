@@ -102,12 +102,17 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
     /// revealed. Purely a view preference — the task, its worktrees and session
     /// are untouched. Absent in older configs → decodes to false.
     public var hidden: Bool
+    /// Opted in to supervision (orchestrator phase 1a, docs/orchestrator-design.md):
+    /// Lighthouse installs observation hooks in this task's workspaces and logs the
+    /// agent's hook events. Off by default; an unsupervised task is never wired and
+    /// emits nothing. Absent in older configs → decodes to false.
+    public var supervised: Bool
     public var workspaces: [Workspace]
 
     public init(
         id: UUID = UUID(), name: String, branch: String, adapterKind: String,
         sessionRef: String? = nil, status: String = "", hidden: Bool = false,
-        workspaces: [Workspace]
+        supervised: Bool = false, workspaces: [Workspace]
     ) {
         self.id = id
         self.name = name
@@ -116,11 +121,12 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         self.sessionRef = sessionRef
         self.status = status
         self.hidden = hidden
+        self.supervised = supervised
         self.workspaces = workspaces
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, branch, adapterKind, sessionRef, status, hidden, workspaces
+        case id, name, branch, adapterKind, sessionRef, status, hidden, supervised, workspaces
     }
 
     /// Custom decode so configs written before free-text status (which carried a
@@ -135,6 +141,7 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
         sessionRef = try c.decodeIfPresent(String.self, forKey: .sessionRef)
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        supervised = try c.decodeIfPresent(Bool.self, forKey: .supervised) ?? false
         workspaces = try c.decode([Workspace].self, forKey: .workspaces)
     }
 

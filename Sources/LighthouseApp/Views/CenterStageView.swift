@@ -243,6 +243,7 @@ struct SummaryPaneView: View {
                 actionLine
                 if !task.workspaces.isEmpty { diffBaseSection }
                 statCards
+                if !task.workspaces.isEmpty { SupervisionCard(task: task) }
                 // Phase 4b will add the rich transcript-derived Summary here:
                 // "What the agent did" (✓ per steps[]) and the amber "Next step"
                 // callout (next). Until then the deterministic cards + action
