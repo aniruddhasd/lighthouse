@@ -68,10 +68,15 @@ Orchestrator phase 1a reinstated hooks for opted-in tasks (see
     the pre-assigned `sessionRef` survives exit/resume.
   - **`SubagentStop` fires for unprompted helper output with the primary's
     `session_id`**, `agent_id` set, `agent_type` present but **empty**, and an
-    `agent_transcript_path` key; no matching `SubagentStart` was logged. Observed
-    messages looked like a predicted next user prompt (31 chars) and a session
-    recap (256 chars). Inference from content only; the agent transcripts would
-    confirm. Consumers must not treat a `SubagentStop` as a turn boundary.
+    `agent_transcript_path` key; no matching `SubagentStart` was logged.
+    **Confirmed by the user's observation (2026-10-22):** the ~2 s-after-`Stop`
+    `SubagentStop` carries the suggested next-prompt placeholder shown in the
+    prompt box ("go ahead with change 1 on a branch"), seen on three turns. A
+    separate ~3 min-later `SubagentStop` (256 chars, "…Next, decide whether…")
+    looked like a session recap — inferred from content only, not confirmed. The
+    mechanism is not documented in what was read of the hooks reference. Consumers
+    must not treat a `SubagentStop` as a turn boundary; its text is untrusted
+    model output derived from the conversation.
   - Keys seen: `SessionStart`: `source`; `UserPromptSubmit`: `prompt`,
     `prompt_id`, `permission_mode`, `scratchpad_dir`, `session_title`; `Stop`: also
     `effort`, `background_tasks`, `session_crons`, `stop_hook_active`.

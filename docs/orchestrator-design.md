@@ -31,9 +31,11 @@ use.** Written and built 2026-10-22. Phases 1b and 2 are unbuilt.
   `SessionEnd · prompt_input_exit`.
 - **`SubagentStop` is not a turn.** Helper subagents (empty `agent_type`) emit
   `SubagentStop` after the real `Stop`, with the primary's session id and text
-  that looks like a suggested next prompt or a recap. Design rule hardened: only
-  a `Stop` with **no `agent_id`** is a turn boundary. (Inference from content —
-  confirm via `agent_transcript_path`.)
+  that is the suggested-next-prompt placeholder (user-confirmed, ~2 s after the
+  `Stop`) or, separately, a recap (inferred). Design rule hardened: only a `Stop`
+  with **no `agent_id`** is a turn boundary. The suggestion is a possible *hint*
+  of what the agent expects next, but it is untrusted model output — never an
+  instruction to act on.
 - The card now shows `SessionStart` `source`, keeps an empty `agent_type`, and
   labels anything with an `agent_id` "not a turn".
 
