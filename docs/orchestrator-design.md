@@ -162,8 +162,8 @@ claude (primary session of an opted-in tile)
   hardened (the removed `AttentionSocketListener` is the prior art — see git
   history before `3bf8660`). macOS `sun_path` limit ≈ 103 bytes.
 - **Supervisor**: a long-lived Claude session holding the user's standing
-  instructions, given a narrow tool surface (MCP server is the likely fit;
-  **unverified** how to wire one into a pty-hosted session). Woken only on
+  instructions, given a narrow tool surface (MCP server: spike-verified in `-p` mode, see §10; interactive pty-hosted
+  attach still untested). Woken only on
   `Stop`, `Notification`, `StopFailure` — not every event — to bound cost.
 - **Delivery**: existing `SessionRegistry.typeIntoSession` (`SessionRegistry.swift:106`).
 
@@ -240,3 +240,44 @@ update `docs/claude-code-contract.md`.
   surface? Does it count as a "supervised" session itself?
 - Cost ceiling: supervisor wakes per `Stop` per supervised tile.
 - UI: where proposed sends and held items surface in Harbor.
+
+## 10. Spike: supervisor tool surface (2026-10-23, CLI 2.1.308)
+
+Question: can the supervisor be given *only* Lighthouse's tools — no shell, no
+other MCP servers — and can it call them? Method: a throwaway stdio MCP server
+(one tool, `ping`, logging every call to a file) launched through the real CLI in
+`-p` mode with haiku, `CLAUDE_CONFIG_DIR=~/.claude-enterprise`, in an empty
+non-git directory. Evidence is the init message's `tools` / `mcp_servers`, the
+stub's call log, and a side-effect file. Five single-turn runs.
+
+| Run | Flags | Result |
+|---|---|---|
+| A | `--tools "" --strict-mcp-config --mcp-config <ours> --allowedTools mcp__lh__ping` | tools = `[mcp__lh__ping]` only; server `connected`; the tool was called (stub log has the call); asked to run a shell command, the model said it had no such tool and the side-effect file was **not** created |
+| B | as A without `--strict-mcp-config` (control) | same — this account has no other MCP servers, so the control proved **nothing** about strictness |
+| C | as A without `--allowedTools` | model attempted the call; it was **denied** (`permission_denials: [mcp__lh__ping]`); the stub never ran |
+| D | project `.mcp.json` declaring a second server, no `--strict-mcp-config` | tools = both `mcp__intruder__ping` and `mcp__lh__ping` |
+| E | same `.mcp.json`, **with** `--strict-mcp-config` | tools = `[mcp__lh__ping]` only |
+
+Findings
+- **`--tools ""` removes every built-in tool**, Bash included (A). Stricter than
+  `--restricted`, which per `--help` removes only the code-running tools and
+  `WebFetch` and also ignores user/project/local settings files.
+- **`--strict-mcp-config` isolates the session to our `--mcp-config`** (D vs E).
+  Without it a repo's `.mcp.json` **adds tools to the session** — so the
+  supervisor must run in a controlled working directory *and* strict.
+- **An MCP tool needs an explicit allowlist to run unattended** (C): list ours in
+  `--allowedTools`; in `-p` mode an unlisted call is denied. Interactively it
+  would prompt a human instead (untested).
+- Together: supervisor surface = exactly our tools, nothing else. This supports
+  the MCP choice **for the narrow surface**, not for the protocol.
+
+Not covered
+- **Interactive (pty) mode** — flag behaviour was observed in `-p` only. The
+  supervisor need not be a pty tile at all: a headless `-p` / SDK-driven process
+  fits "wake on event, judge, propose" and avoids typing into a TUI.
+- **The real server.** The stub proves the attach mechanism, not Lighthouse's
+  tools: the real one is a separate process spawned by `claude`, so it must reach
+  the app over a local channel (socket) and enforce validation there — the app,
+  not the MCP process, owns the propose/confirm queue.
+- Behaviour under a hostile tool result or repo content (prompt injection).
+- Cost: each supervisor wake is a model call.
