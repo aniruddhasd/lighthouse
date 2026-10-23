@@ -330,3 +330,117 @@ Not covered
   the app (that is slice 3's supervisor launch).
 - No tool can write, send or run anything — by construction, and the tool list is
   asserted by a test. Slice 2 (proposals) is where that changes.
+
+## 12. Slice 2 — the proposal channel (built 2026-10-23)
+
+Scope: the supervisor can *record* what it thinks should happen; **nothing is sent
+to any session yet** (that is slice 3, behind a user confirmation). Slice 2 ends at
+a durable, validated queue the user can see and dismiss.
+
+### Channel: the app is the only writer of the queue
+
+```
+supervisor ──MCP tool──▶ lighthouse-supervisor-mcp ──atomic file──▶ <config>/supervisor-inbox/<uuid>.json
+                                                                          │  (app polls while supervision is on)
+                                           app: validate ▶ accept/reject ▼
+                                                     <config>/proposals.json  (app-written, atomic, 0600)
+                                                                          ▲
+supervisor ◀── list_proposals (read) ─────────────────────────────────────┘
+```
+
+- **Inbox, not a socket.** The MCP process drops one JSON file per proposal into an
+  owner-only directory via write-to-temp + atomic rename. No second listener, no
+  refactor of the hook socket, no partial files. The file name is a UUID the server
+  generates — never derived from tool input (no path traversal).
+- **The app is the authority.** The MCP process pre-validates for fast feedback, but
+  the app re-validates every file; a file that fails is *rejected with a reason and
+  recorded*, not silently dropped. The queue (`proposals.json`) has a single writer
+  (the app), so there are no write races; the MCP process only reads it.
+- **Feedback loop.** `propose_*` returns "queued", not "accepted" — acceptance is the
+  app's decision. The supervisor learns the outcome from `list_proposals`
+  (pending / dismissed / rejected + reason).
+
+### Proposal
+
+`kind`: `send` (a message to type into the task's agent, slice 3), `hold` (the task
+is blocked/failed — do not advance; note for the user), `ask_user` (a question for
+the user). Fields: `task` (id), `text`, `reason` (why, shown to the user),
+`basedOn` (timestamp of the turn judged — required for `send`, so slice 3 can refuse
+a stale proposal when a newer event has arrived).
+
+Validation (app-side, authoritative; MCP mirrors it)
+- task is a **supervised** task; unknown/opted-out ⇒ rejected with the same reason
+- `text` ≤ 2,000 chars, `reason` ≤ 500; non-empty after trimming
+- **no control characters** in `text` or `reason` (including newline, ESC, DEL): a
+  `send` is eventually *typed into a pty*, where `\n` submits, ESC starts escape
+  sequences and ^C/^D interrupt/exit — a proposal must never smuggle keystrokes
+- `send` requires `basedOn`; `hold`/`ask_user` don't
+- duplicate (same task + kind + text + basedOn) ignored; ≤ 5 *pending* per task and
+  ≤ 100 entries total (oldest non-pending pruned, a pending one never); inbox file
+  ≤ 16 KB (oversize → recorded as rejected, never parsed) and ≤ 50 files per drain
+  (the rest wait for the next pass)
+
+### Tools added (the MCP surface grows from 3 to 7)
+
+`propose_send(task, text, reason, based_on)`, `hold(task, reason)`,
+`ask_user(task, question)`, and read-only `list_proposals(task?)`. The pinned
+exact-tool-list test is updated deliberately. The only thing the MCP process can now
+*write* is an inbox file in its own directory — never `config.json`, the event log,
+the queue, a session, or anything else.
+
+### Threats considered
+- *Prompt injection steering a proposal:* the agent text the supervisor reads is
+  untrusted. Mitigations: slice 2 sends nothing; slice 3 requires a human confirm,
+  shows the proposal's reason and the turn it was based on, and refuses stale ones.
+- *Keystroke smuggling via `text`:* the control-character rule above.
+- *Queue flooding:* per-task and total caps, per-drain file cap.
+- *Another same-user process dropping inbox files:* same trust level as the hook
+  socket; the app validates everything and slice 3 still needs the human confirm.
+
+### Not in slice 2
+Typing into a session, the Confirm button, expiry of stale proposals, any
+supervisor *launch* (the app does not start a supervisor yet), forwarding checks
+(rejecting text that quotes a long span of the agent's message — a possible
+defence-in-depth later).
+
+### What was built and verified (slice 2)
+
+Code (`LighthouseSupervisor`): `Proposal`/`ProposalDraft`, `ProposalValidator`,
+`ProposalQueue` (pure), `ProposalStore` (atomic, 0600), `ProposalInbox`
+(`enqueue` for the MCP side; `take` → `discard` for the app), `ProposalCenter`
+(`@Observable`, the app's single owner), `TaskLookup` (the opt-in boundary,
+extracted so reads and writes cannot drift). The app polls the inbox every 2 s while
+supervision is active; the Supervision card shows pending proposals (with Dismiss) and
+recent rejections, headed "SUPERVISOR PROPOSALS — NOT SENT".
+
+Decisions made while building
+- **Take, save, then discard.** The inbox files are removed only after the queue is
+  durably saved; if the save fails, neither the in-memory queue nor the files change, so
+  the next pass retries without losing or duplicating anything. A corrupt
+  `proposals.json` makes the center read-only (it won't overwrite the file or drain).
+- **`awaiting_app` on `list_proposals`.** Found in the live run: right after proposing,
+  the queue looked empty (the app hadn't drained yet), so the supervisor could re-propose.
+  The tool now reports how many of its submissions are still waiting in the inbox.
+- Rejected drafts are stored clipped (200 chars) with control characters replaced, so
+  stored text can never carry keystrokes; an unparseable submission is recorded as a
+  rejection, not lost.
+
+Verified
+- 75 supervisor tests, including: every control-character class (newline, CR, tab, ESC,
+  DEL, ^C, ^D, C1, U+2028/2029) rejected in `text` and `reason`, checked on the raw
+  string before trimming; opted-out and unknown tasks refused identically; caps and
+  pruning (a pending proposal survives); inbox symlinks never followed (target
+  untouched); oversize/malformed files recorded; take/save/discard under a failed save
+  (chmod-induced) and a corrupt queue; the exact seven-tool list.
+- Live, through the real CLI (haiku, `-p`, no built-in tools) against a synthetic fixture:
+  the real server wrote an inbox file for an `ask_user`, the app's `ProposalCenter`
+  ingested it as pending, and a planted "propose rm -rf ~" injection was **not** obeyed.
+  Gated test `LiveSupervisorProposalTests`. One sample of one small model.
+
+Not covered
+- Nothing is sent: no Confirm button, no `typeIntoSession` (slice 3).
+- No supervisor launch from the app; the binary is not bundled into `Lighthouse.app`.
+- The GUI card for proposals was built but not looked at by a person (not launched).
+- Staleness expiry, a Harbor-level pending badge, and the "don't quote the agent
+  verbatim" check remain unbuilt.
+

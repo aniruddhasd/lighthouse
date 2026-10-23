@@ -137,23 +137,8 @@ public struct SupervisorQueries: Sendable {
 
     // MARK: Helpers
 
-    /// Supervised tasks only; id (UUID) or exact case-insensitive name. Zero
-    /// matches and "matches only an unsupervised task" produce the SAME error.
     private func resolve(_ query: String) throws -> TaskRecord {
-        let visible = snapshot.tasks.filter(\.supervised)
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let uuid = UUID(uuidString: q), let hit = visible.first(where: { $0.id == uuid }) {
-            return hit
-        }
-        let named = visible.filter { $0.name.caseInsensitiveCompare(q) == .orderedSame }
-        switch named.count {
-        case 1: return named[0]
-        case 0: throw SupervisorToolError(message: "No supervised task matches '\(q.prefix(80))'.")
-        default:
-            let ids = named.map { $0.id.uuidString }.joined(separator: ", ")
-            throw SupervisorToolError(
-                message: "'\(q.prefix(80))' matches several supervised tasks; use an id: \(ids)")
-        }
+        try TaskLookup.resolve(query, in: snapshot.tasks)
     }
 
     private func eventsFor(_ task: TaskRecord) -> [LoggedHookEvent] {

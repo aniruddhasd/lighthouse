@@ -5,6 +5,7 @@ import SwiftUI
 import LighthouseAdapter
 import LighthouseAppCore
 import LighthouseGit
+import LighthouseSupervisor
 import LighthouseTaskEngine
 
 /// Composition root: builds the model, the attention socket, and the session
@@ -23,6 +24,10 @@ final class AppRuntime {
     /// durable JSONL sink are always present; the socket listener and the hooks
     /// exist only while at least one task is supervised.
     let hookLog: HookEventLog
+    /// Orchestrator slice 2 (docs/orchestrator-design.md §12): the app-owned queue of
+    /// what the supervisor proposed. Nothing in it is ever sent to a session yet.
+    let proposals: ProposalCenter
+    @ObservationIgnored private var proposalTask: Task<Void, Never>?
     private let hookInstaller: HookInstaller
     @ObservationIgnored private var hookListener: HookEventListener?
     @ObservationIgnored private var hookEventTask: Task<Void, Never>?
@@ -92,6 +97,7 @@ final class AppRuntime {
     init(configDirectory: URL = AppRuntime.defaultConfigDirectory()) {
         self.configDirectory = configDirectory
         hookLog = HookEventLog(sink: HookEventSink(directory: configDirectory))
+        proposals = ProposalCenter(directory: configDirectory)
         hookInstaller = HookInstaller(git: git)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
@@ -1202,6 +1208,7 @@ final class AppRuntime {
     func shutdown() {
         wheelMonitor.stop()
         hookEventTask?.cancel()
+        proposalTask?.cancel()
         hookListener?.stop()
     }
 
@@ -1278,6 +1285,7 @@ final class AppRuntime {
         let url = try await listener.start()
         let stream = await listener.events()
         hookListener = listener
+        startProposalPolling()
         hookEventTask = Task { @MainActor [weak self] in
             for await event in stream {
                 guard let self else { return }
@@ -1287,7 +1295,22 @@ final class AppRuntime {
         return url
     }
 
+    /// While supervision is active, pick up supervisor submissions every couple of
+    /// seconds. Cheap when the inbox is empty (one directory listing).
+    private func startProposalPolling() {
+        guard proposalTask == nil else { return }
+        proposalTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.proposals.drain(tasks: self.model.tasks)
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
     private func stopHookListener() {
+        proposalTask?.cancel()
+        proposalTask = nil
         hookEventTask?.cancel()
         hookEventTask = nil
         hookListener?.stop()

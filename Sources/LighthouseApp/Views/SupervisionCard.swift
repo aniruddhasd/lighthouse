@@ -1,6 +1,7 @@
 import SwiftUI
 import LighthouseAdapter
 import LighthouseAppCore
+import LighthouseSupervisor
 import LighthouseTaskEngine
 
 /// Orchestrator phase 1a (docs/orchestrator-design.md): the per-task opt-in and
@@ -56,6 +57,7 @@ struct SupervisionCard: View {
                         .font(LHFont.metaFaint).foregroundStyle(theme.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                proposalsSection
                 if events.isEmpty {
                     Text("No events yet.").font(LHFont.meta).foregroundStyle(theme.dim)
                 } else {
@@ -70,6 +72,60 @@ struct SupervisionCard: View {
         .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card)
             .strokeBorder(theme.border, lineWidth: 1))
+    }
+
+    // MARK: Proposals (slice 2) — what the supervisor suggested. Nothing here has been
+    // sent anywhere; confirming a send arrives in slice 3.
+
+    @ViewBuilder private var proposalsSection: some View {
+        let center = runtime.proposals
+        let pending = center.pending(for: task.id)
+        let rejected = center.recentRejected(for: task.id)
+        if let error = center.loadError ?? center.persistenceError {
+            Text(error).font(LHFont.metaFaint).foregroundStyle(theme.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if !pending.isEmpty || !rejected.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SUPERVISOR PROPOSALS — NOT SENT")
+                    .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                ForEach(pending) { proposalRow($0) }
+                ForEach(rejected) { rejectedRow($0) }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func proposalRow(_ p: Proposal) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(kindLabel(p.kind)).font(LHFont.mono(12, .medium)).foregroundStyle(theme.text)
+                Spacer()
+                Button("Dismiss") { runtime.proposals.dismiss(p.id) }
+                    .buttonStyle(.plain).font(LHFont.metaFaint).foregroundStyle(theme.primary)
+            }
+            // Supervisor-written text: rendered inert, never interpreted.
+            Text(p.text).font(LHFont.secondary).foregroundStyle(theme.text)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Text("why: \(p.reason)").font(LHFont.metaFaint).foregroundStyle(theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(theme.bg, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func rejectedRow(_ p: Proposal) -> some View {
+        Text("rejected — \(p.rejectionReason ?? "invalid")")
+            .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func kindLabel(_ kind: ProposalKind) -> String {
+        switch kind {
+        case .send: return "Suggested message"
+        case .hold: return "Hold — do not advance"
+        case .askUser: return "Question for you"
+        }
     }
 
     private func row(_ logged: LoggedHookEvent) -> some View {

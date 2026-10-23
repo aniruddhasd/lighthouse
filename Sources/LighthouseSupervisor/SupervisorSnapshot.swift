@@ -7,11 +7,24 @@ import LighthouseTaskEngine
 public struct SupervisorSnapshot: Sendable {
     public let tasks: [TaskRecord]
     public let events: [LoggedHookEvent]
+    /// The app-owned proposal queue as last written. Empty when there is none yet.
+    public let proposals: [Proposal]
+    /// Set when the queue file exists but could not be read. A bad queue must not take
+    /// the read tools down, but it must not look like "no proposals" either.
+    public let proposalsError: String?
+    /// Submissions in the inbox the app has not drained yet.
+    public let proposalsAwaitingApp: Int
     public let now: Date
 
-    public init(tasks: [TaskRecord], events: [LoggedHookEvent], now: Date = Date()) {
+    public init(
+        tasks: [TaskRecord], events: [LoggedHookEvent], proposals: [Proposal] = [],
+        proposalsError: String? = nil, proposalsAwaitingApp: Int = 0, now: Date = Date()
+    ) {
         self.tasks = tasks
         self.events = events
+        self.proposals = proposals
+        self.proposalsError = proposalsError
+        self.proposalsAwaitingApp = proposalsAwaitingApp
         self.now = now
     }
 }
@@ -51,6 +64,17 @@ public struct FileSnapshotSource: SupervisorSnapshotSource {
         // "no tasks": an empty answer would look like a clean, quiet system.
         let config = try ConfigStore(directory: directory).load()
         let events = try HookEventSink(directory: directory).loadRecent(limit: Self.eventLimit)
-        return SupervisorSnapshot(tasks: config.tasks, events: events)
+        let queue: ProposalQueue
+        var queueError: String?
+        do {
+            queue = try ProposalStore(directory: directory).load()
+        } catch {
+            queue = ProposalQueue()
+            queueError = "The proposal queue could not be read: \(error)"
+        }
+        return SupervisorSnapshot(
+            tasks: config.tasks, events: events, proposals: queue.entries,
+            proposalsError: queueError,
+            proposalsAwaitingApp: ProposalInbox(configDirectory: directory).pendingCount())
     }
 }

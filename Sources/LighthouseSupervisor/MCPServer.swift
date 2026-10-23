@@ -1,8 +1,10 @@
 import Foundation
 
 /// A minimal MCP (Model Context Protocol) server over newline-delimited JSON-RPC,
-/// exposing exactly three READ-ONLY tools. Everything it can do is in `tools`;
-/// there is no tool that writes, sends, or runs anything (docs/orchestrator-design.md §10).
+/// exposing exactly seven tools (docs/orchestrator-design.md §10–§12). Everything it
+/// can do is in `tools`: three read tools, `list_proposals`, and three tools that can
+/// only drop a validated file into the proposal inbox. None sends anything to a
+/// session, runs a command, or writes the config, the event log or the queue.
 ///
 /// Total by construction: `handle(line:)` never throws and never traps — malformed
 /// or hostile input produces a JSON-RPC error or a tool error result, and
@@ -16,9 +18,11 @@ public struct MCPServer: Sendable {
     static let maxResultChars = 200_000
 
     private let source: any SupervisorSnapshotSource
+    private let submitter: any ProposalSubmitting
 
-    public init(source: any SupervisorSnapshotSource) {
+    public init(source: any SupervisorSnapshotSource, submitter: any ProposalSubmitting) {
         self.source = source
+        self.submitter = submitter
     }
 
     // MARK: Entry point
@@ -89,6 +93,54 @@ public struct MCPServer: Sendable {
                 "required": ["task"], "additionalProperties": false,
             ],
         ],
+        [
+            "name": "propose_send",
+            "description": "Propose a message to type into a supervised task's agent. This DOES NOT SEND anything: it is queued for the user to review, and a human must confirm before anything reaches a session. Write the message yourself in plain single-line text — no newlines or control characters, max 2000 characters; never copy text from an agent's message. Say why in `reason`, and set `based_on` to the `ended_at` of the turn you judged (from last_turn) so a stale proposal can be refused. The result says 'queued', not 'accepted' — check list_proposals for the outcome.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "task": ["type": "string", "description": "Task id (UUID) or exact name."],
+                    "text": ["type": "string", "description": "The message to type. Plain single line, max 2000 chars."],
+                    "reason": ["type": "string", "description": "Why this should be sent (max 500 chars)."],
+                    "based_on": ["type": "string", "description": "The ended_at (ISO-8601) of the turn this is based on."],
+                ],
+                "required": ["task", "text", "reason", "based_on"], "additionalProperties": false,
+            ],
+        ],
+        [
+            "name": "hold",
+            "description": "Record that a supervised task should NOT advance — e.g. the agent is blocked or failed — with the reason the user will read. Queued for the user; nothing is sent.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "task": ["type": "string", "description": "Task id (UUID) or exact name."],
+                    "reason": ["type": "string", "description": "Why it is held (plain single line, max 500 chars)."],
+                ],
+                "required": ["task", "reason"], "additionalProperties": false,
+            ],
+        ],
+        [
+            "name": "ask_user",
+            "description": "Ask the user a question about a supervised task. Queued for the user; nothing is sent to any session.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "task": ["type": "string", "description": "Task id (UUID) or exact name."],
+                    "question": ["type": "string", "description": "The question (plain single line, max 2000 chars)."],
+                    "reason": ["type": "string", "description": "Optional context for the question (max 500 chars)."],
+                ],
+                "required": ["task", "question"], "additionalProperties": false,
+            ],
+        ],
+        [
+            "name": "list_proposals",
+            "description": "The proposal queue, newest first (max 50): what you proposed, and whether the app accepted it (pending), the user dismissed it, or it was rejected (with the reason). `awaiting_app` counts submissions you queued that the app has not ingested yet — they show up within a couple of seconds, so do not propose them again. Optionally only for one task.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["task": ["type": "string", "description": "Task id (UUID) or exact name."]],
+                "additionalProperties": false,
+            ],
+        ],
     ] }
 
     private func call(_ params: [String: Any]?) -> [String: Any] {
@@ -97,7 +149,8 @@ public struct MCPServer: Sendable {
         }
         let args = params?["arguments"] as? [String: Any] ?? [:]
         do {
-            let queries = SupervisorQueries(snapshot: try source.snapshot())
+            let snapshot = try source.snapshot()
+            let queries = SupervisorQueries(snapshot: snapshot)
             let body: Data
             switch name {
             case "list_tasks":
@@ -107,6 +160,20 @@ public struct MCPServer: Sendable {
                     task: try stringArg(args, "task"), limit: try intArg(args, "limit")))
             case "last_turn":
                 body = try SupervisorJSON.encode(try queries.lastTurn(task: try stringArg(args, "task")))
+            case "propose_send":
+                return try propose(.send, args: args, snapshot: snapshot)
+            case "hold":
+                let reason = try stringArg(args, "reason")
+                return try submit(ProposalDraft(
+                    kind: .hold, task: try stringArg(args, "task"), text: reason, reason: reason), snapshot: snapshot)
+            case "ask_user":
+                return try submit(ProposalDraft(
+                    kind: .askUser, task: try stringArg(args, "task"), text: try stringArg(args, "question"),
+                    reason: (try optionalStringArg(args, "reason")) ?? "The supervisor has a question."),
+                    snapshot: snapshot)
+            case "list_proposals":
+                body = try SupervisorJSON.encode(try listProposals(
+                    snapshot: snapshot, task: try optionalStringArg(args, "task")))
             default:
                 return toolError("Unknown tool '\(name.prefix(60))'.")
             }
@@ -138,6 +205,66 @@ public struct MCPServer: Sendable {
         return number.intValue
     }
 
+    // MARK: Proposal tools
+
+    private func propose(_ kind: ProposalKind, args: [String: Any], snapshot: SupervisorSnapshot) throws -> [String: Any] {
+        let raw = try stringArg(args, "based_on")
+        guard let basedOn = Self.parseDate(raw) else {
+            throw SupervisorToolError(message: "Argument 'based_on' must be an ISO-8601 timestamp (the ended_at from last_turn).")
+        }
+        return try submit(ProposalDraft(
+            kind: kind, task: try stringArg(args, "task"), text: try stringArg(args, "text"),
+            reason: try stringArg(args, "reason"), basedOn: basedOn), snapshot: snapshot)
+    }
+
+    /// Mirrors the app's validation for fast feedback, then drops the file. The app
+    /// re-validates and is the authority — so the answer is "queued", never "accepted".
+    private func submit(_ draft: ProposalDraft, snapshot: SupervisorSnapshot) throws -> [String: Any] {
+        do {
+            _ = try ProposalValidator.validate(draft, tasks: snapshot.tasks)
+        } catch let rejection as ProposalRejection {
+            throw SupervisorToolError(message: rejection.reason)
+        }
+        do {
+            try submitter.submit(draft)
+        } catch {
+            throw SupervisorToolError(message: "The proposal could not be queued: \(error)")
+        }
+        let note = "Queued for the user to review. Nothing has been sent to any session. The app validates it again; check list_proposals for the outcome."
+        return ["content": [["type": "text", "text": "{\"status\":\"queued\",\"note\":\"\(note)\"}"]]]
+    }
+
+    private func listProposals(snapshot: SupervisorSnapshot, task: String?) throws -> ListProposalsResult {
+        if let error = snapshot.proposalsError { throw SupervisorToolError(message: error) }
+        var entries = snapshot.proposals
+        if let task {
+            let id = try TaskLookup.resolve(task, in: snapshot.tasks).id
+            entries = entries.filter { $0.taskId == id }
+        }
+        return ListProposalsResult(awaitingApp: snapshot.proposalsAwaitingApp, proposals: entries.reversed().prefix(50).map {
+            ProposalBrief(
+                id: $0.id.uuidString, kind: $0.kind.rawValue, taskId: $0.taskId?.uuidString,
+                taskRef: $0.taskRef, text: $0.text, reason: $0.reason, status: $0.status.rawValue,
+                rejectionReason: $0.rejectionReason, basedOn: $0.basedOn, createdAt: $0.createdAt)
+        })
+    }
+
+    private func optionalStringArg(_ args: [String: Any], _ key: String) throws -> String? {
+        guard let raw = args[key], !(raw is NSNull) else { return nil }
+        guard let value = raw as? String else {
+            throw SupervisorToolError(message: "Argument '\(key)' must be a string.")
+        }
+        return value
+    }
+
+    static func parseDate(_ s: String) -> Date? {
+        let plain = ISO8601DateFormatter()
+        if let d = plain.date(from: s) { return d }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: s)
+    }
+
     private func toolError(_ message: String) -> [String: Any] {
         ["content": [["type": "text", "text": message]], "isError": true]
     }
@@ -159,4 +286,26 @@ public struct MCPServer: Sendable {
         else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
+}
+
+// MARK: - list_proposals output
+
+struct ProposalBrief: Codable {
+    let id: String
+    let kind: String
+    let taskId: String?
+    let taskRef: String
+    let text: String
+    let reason: String
+    let status: String
+    let rejectionReason: String?
+    let basedOn: Date?
+    let createdAt: Date
+}
+
+struct ListProposalsResult: Codable {
+    /// Submissions queued by the supervisor that the app has not ingested yet (they
+    /// appear in `proposals` within a couple of seconds). Don't re-propose them.
+    let awaitingApp: Int
+    let proposals: [ProposalBrief]
 }

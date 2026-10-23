@@ -43,6 +43,7 @@ let package = Package(
             name: "LighthouseApp",
             dependencies: [
                 "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
+                "LighthouseSupervisor",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             // Vendored diff renderer (docs/diff-renderer.md) — fully offline.

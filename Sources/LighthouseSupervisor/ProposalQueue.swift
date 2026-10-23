@@ -1,0 +1,155 @@
+import Foundation
+import LighthouseTaskEngine
+
+/// The app-owned proposal queue: a pure value (single writer — the app), so every
+/// rule here is unit-tested without files or UI.
+public struct ProposalQueue: Codable, Equatable, Sendable {
+    public static let maxPendingPerTask = 5
+    public static let maxEntries = 100
+    /// Rejected drafts are stored clipped and sanitized: they came from an untrusted
+    /// submission and are only kept so the user (and the supervisor) can see why.
+    static let maxStoredRejectedChars = 200
+
+    public private(set) var entries: [Proposal]
+
+    public init(entries: [Proposal] = []) {
+        self.entries = entries
+    }
+
+    public func pending(for taskId: UUID) -> [Proposal] {
+        entries.filter { $0.taskId == taskId && $0.status == .pending }
+    }
+
+    /// Validates and records a draft. Always returns the recorded entry — pending, or
+    /// rejected with a reason; nothing is silently dropped. An identical pending
+    /// proposal is returned as-is instead of being added again.
+    @discardableResult
+    public mutating func ingest(_ draft: ProposalDraft, tasks: [TaskRecord], now: Date) -> Proposal {
+        let validated: ValidatedProposal
+        do {
+            validated = try ProposalValidator.validate(draft, tasks: tasks)
+        } catch let rejection as ProposalRejection {
+            return record(rejected: draft, reason: rejection.reason, tasks: tasks, now: now)
+        } catch {
+            return record(rejected: draft, reason: "Invalid proposal.", tasks: tasks, now: now)
+        }
+        let d = validated.draft
+        if let existing = entries.first(where: {
+            $0.status == .pending && $0.taskId == validated.taskId && $0.kind == d.kind
+                && $0.text == d.text && $0.basedOn == d.basedOn
+        }) {
+            return existing
+        }
+        if pending(for: validated.taskId).count >= Self.maxPendingPerTask {
+            return record(
+                rejected: draft,
+                reason: "Too many pending proposals for this task (max \(Self.maxPendingPerTask)); dismiss some first.",
+                tasks: tasks, now: now)
+        }
+        let proposal = Proposal(
+            id: UUID(), taskId: validated.taskId, taskRef: String(d.task.prefix(80)), kind: d.kind,
+            text: d.text, reason: d.reason, basedOn: d.basedOn, createdAt: now,
+            status: .pending, rejectionReason: nil)
+        entries.append(proposal)
+        prune()
+        return proposal
+    }
+
+    /// A submission that could not even be parsed (oversize, malformed, not a regular
+    /// file): kept as a rejected entry so it is visible, never silently lost.
+    @discardableResult
+    public mutating func recordInvalidSubmission(reason: String, now: Date) -> Proposal {
+        let proposal = Proposal(
+            id: UUID(), taskId: nil, taskRef: "", kind: .hold, text: "", reason: "",
+            basedOn: nil, createdAt: now, status: .rejected, rejectionReason: Self.clipped(reason))
+        entries.append(proposal)
+        prune()
+        return proposal
+    }
+
+    /// Pending → dismissed. False for an unknown id or one that is not pending.
+    @discardableResult
+    public mutating func dismiss(_ id: UUID) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == id && $0.status == .pending })
+        else { return false }
+        entries[index].status = .dismissed
+        return true
+    }
+
+    // MARK: Helpers
+
+    private mutating func record(
+        rejected draft: ProposalDraft, reason: String, tasks: [TaskRecord], now: Date
+    ) -> Proposal {
+        let proposal = Proposal(
+            id: UUID(), taskId: try? TaskLookup.resolve(draft.task, in: tasks).id,
+            taskRef: String(Self.sanitized(draft.task).prefix(80)), kind: draft.kind,
+            text: Self.clipped(draft.text), reason: Self.clipped(draft.reason),
+            basedOn: draft.basedOn, createdAt: now, status: .rejected, rejectionReason: reason)
+        entries.append(proposal)
+        prune()
+        return proposal
+    }
+
+    /// Past the cap, drop the oldest NON-pending entries first. A pending proposal is
+    /// never pruned (it is something the user has not yet seen resolved).
+    private mutating func prune() {
+        while entries.count > Self.maxEntries,
+              let index = entries.firstIndex(where: { $0.status != .pending }) {
+            entries.remove(at: index)
+        }
+    }
+
+    private static func clipped(_ s: String) -> String {
+        String(sanitized(s).prefix(maxStoredRejectedChars))
+    }
+
+    /// Control characters → U+FFFD, so stored text can never carry keystrokes.
+    private static func sanitized(_ s: String) -> String {
+        String(String.UnicodeScalarView(s.unicodeScalars.map {
+            switch $0.properties.generalCategory {
+            case .control, .lineSeparator, .paragraphSeparator: return "\u{FFFD}"
+            default: return $0
+            }
+        }))
+    }
+}
+
+/// Atomic JSON persistence for the queue. The app is the only writer; the MCP
+/// process only reads it.
+public struct ProposalStore: Sendable {
+    public static let fileName = "proposals.json"
+    private let directory: URL
+
+    public init(directory: URL) {
+        self.directory = directory
+    }
+
+    public var url: URL { directory.appendingPathComponent(Self.fileName) }
+
+    /// A missing file is an empty queue; a corrupt one THROWS (an empty answer would
+    /// silently discard what the user has not yet handled).
+    public func load() throws -> ProposalQueue {
+        guard FileManager.default.fileExists(atPath: url.path) else { return ProposalQueue() }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ProposalQueue.self, from: Data(contentsOf: url))
+    }
+
+    public func save(_ queue: ProposalQueue) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let data = try encoder.encode(queue)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        // Temp file created 0600 first, then renamed over: owner-only at every instant
+        // and never a truncated file if we crash mid-write.
+        let temp = directory.appendingPathComponent(".\(Self.fileName).tmp-\(UUID().uuidString)")
+        guard FileManager.default.createFile(
+            atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600])
+        else { throw CocoaError(.fileWriteUnknown) }
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
+    }
+}
