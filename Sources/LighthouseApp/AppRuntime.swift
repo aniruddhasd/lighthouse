@@ -120,6 +120,9 @@ final class AppRuntime {
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
         setupPresented = model.repos.isEmpty && !model.hasCompletedSetup
+        // Bring back the recent hook-event history so the card isn't blank after a
+        // restart (read-only: nothing is re-written to the file).
+        hookLog.restore(tasks: model.tasks)
         // Re-arm supervision for tasks opted in last run: the listener is not
         // persistent, and re-installing repairs a moved socket path.
         if model.tasks.contains(where: \.supervised) {
@@ -1240,6 +1243,18 @@ final class AppRuntime {
         }
     }
 
+    /// A workspace was added to a task that is already supervised: wire it too, or
+    /// that repo's agent would silently go unobserved. A no-op for unsupervised tasks.
+    func superviseNewWorkspace(_ workspace: Workspace, taskId: UUID) async {
+        guard model.tasks.first(where: { $0.id == taskId })?.supervised == true else { return }
+        do {
+            let socket = try await ensureHookListener()
+            try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+        } catch {
+            lastError = "Could not enable supervision for the new workspace: \(describeHookError(error))"
+        }
+    }
+
     /// Launch-time re-arm for tasks that were supervised last run.
     private func resumeSupervision() async {
         do {
@@ -1256,7 +1271,10 @@ final class AppRuntime {
 
     private func ensureHookListener() async throws -> URL {
         if let listener = hookListener { return listener.socketURL }
-        let listener = HookEventListener(directory: configDirectory)
+        let log = hookLog
+        let listener = HookEventListener(
+            directory: configDirectory,
+            onDrop: { reason in Task { @MainActor in log.recordDrop(reason) } })
         let url = try await listener.start()
         let stream = await listener.events()
         hookListener = listener

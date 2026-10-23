@@ -61,11 +61,17 @@ public enum HookAttributor {
 public final class HookEventLog {
     public static let maxPerTask = 300
     public static let maxUnattributed = 100
+    /// Cap on the stored drop reason (reasons can echo attacker-influenced text).
+    public static let maxDropReasonChars = 200
 
     public private(set) var byTask: [UUID: [LoggedHookEvent]] = [:]
     public private(set) var unattributed: [LoggedHookEvent] = []
     /// Set when the durable sink failed — surfaced, never swallowed silently.
     public private(set) var persistenceError: String?
+    /// Deliveries the socket listener rejected (oversized, malformed, slow, …).
+    /// Surfaced so a missing event can be traced to the transport and not the CLI.
+    public private(set) var droppedCount = 0
+    public private(set) var lastDropReason: String?
 
     private let sink: HookEventSink?
 
@@ -93,6 +99,39 @@ public final class HookEventLog {
             catch { persistenceError = String(describing: error) }
         }
         return logged
+    }
+
+    public func recordDrop(_ reason: String) {
+        droppedCount += 1
+        lastDropReason = String(reason.prefix(Self.maxDropReasonChars))
+    }
+
+    /// Reloads recent history from the durable sink so the card survives a
+    /// restart. Read-only with respect to the file (nothing is re-appended), bounded
+    /// like live recording, and events of tasks that no longer exist are dropped.
+    /// A sink that cannot be read is surfaced, never fatal.
+    public func restore(tasks: [TaskRecord]) {
+        guard let sink else { return }
+        let known = Set(tasks.map(\.id))
+        do {
+            let recent = try sink.loadRecent(limit: Self.maxPerTask * 2 + Self.maxUnattributed)
+            for logged in recent {
+                if let id = logged.taskId {
+                    guard known.contains(id) else { continue }
+                    byTask[id, default: []].append(logged)
+                } else {
+                    unattributed.append(logged)
+                }
+            }
+            for (id, list) in byTask where list.count > Self.maxPerTask {
+                byTask[id] = Array(list.suffix(Self.maxPerTask))
+            }
+            if unattributed.count > Self.maxUnattributed {
+                unattributed = Array(unattributed.suffix(Self.maxUnattributed))
+            }
+        } catch {
+            persistenceError = "Could not reload event history: \(error)"
+        }
     }
 
     public func events(for taskId: UUID) -> [LoggedHookEvent] { byTask[taskId] ?? [] }
@@ -124,6 +163,27 @@ public final class HookEventSink: @unchecked Sendable {
     }
 
     public var url: URL { fileURL }
+
+    /// The newest `limit` events, oldest first, read from the rotated file then
+    /// the current one so a rotation doesn't erase recent history. A missing file
+    /// is simply empty; a line that doesn't decode (torn write, hand edit) is
+    /// skipped without costing the rest.
+    public func loadRecent(limit: Int) throws -> [LoggedHookEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var events: [LoggedHookEvent] = []
+        for url in [fileURL.appendingPathExtension("1"), fileURL] {
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let data = try Data(contentsOf: url)
+            for line in data.split(separator: 0x0A) where !line.isEmpty {
+                if let logged = try? decoder.decode(LoggedHookEvent.self, from: Data(line)) {
+                    events.append(logged)
+                }
+            }
+        }
+        return Array(events.suffix(max(limit, 0)))
+    }
 
     public func append(_ logged: LoggedHookEvent) throws {
         lock.lock(); defer { lock.unlock() }

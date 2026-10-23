@@ -81,6 +81,13 @@ private enum RawSocketClient {
     }
 }
 
+private final class DropBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reasons: [String] = []
+    func add(_ r: String) { lock.lock(); reasons.append(r); lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return reasons.count }
+}
+
 @Suite("HookEventListener", .serialized)
 final class HookEventListenerTests {
     private let directory: URL
@@ -223,6 +230,18 @@ final class HookEventListenerTests {
         } throws: { error in
             error as? HookSocketError == .alreadyStarted
         }
+    }
+
+    @Test func dropCallbackFiresForEveryDrop() async throws {
+        let seen = DropBox()
+        let l = HookEventListener(
+            directory: directory.appendingPathComponent("cb"), onDrop: { seen.add($0) })
+        let url = try await l.start()
+        defer { l.stop() }
+        _ = RawSocketClient.post(json: "not json", to: url.path)
+        _ = RawSocketClient.post(json: "[1]", to: url.path)
+        for _ in 0..<100 where seen.count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(seen.count == 2)
     }
 
     // MARK: Event delivery

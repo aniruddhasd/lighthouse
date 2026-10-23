@@ -16,6 +16,12 @@ struct SupervisionCard: View {
     @Environment(\.theme) private var theme
     let task: TaskRecord
 
+    /// Rows whose full message is open. A long `Stop` can hold its question deep
+    /// in the text (a 2,486-char one was seen), so the preview can't be the only view.
+    @State private var expanded: Set<UUID> = []
+    /// Roughly three lines of the card's width; longer messages get a toggle.
+    private let previewChars = 200
+
     /// Events shown (newest first). The full bounded history stays in the log and
     /// in the JSONL file; the card only needs the recent window to compare.
     private let shown = 30
@@ -43,6 +49,12 @@ struct SupervisionCard: View {
                 if let error = runtime.hookLog.persistenceError {
                     Text("Event file not writable: \(error)")
                         .font(LHFont.metaFaint).foregroundStyle(theme.dim)
+                }
+                if runtime.hookLog.droppedCount > 0 {
+                    Text("\(runtime.hookLog.droppedCount) delivery(s) dropped by the socket"
+                         + (runtime.hookLog.lastDropReason.map { " — last: \($0)" } ?? ""))
+                        .font(LHFont.metaFaint).foregroundStyle(theme.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if events.isEmpty {
                     Text("No events yet.").font(LHFont.meta).foregroundStyle(theme.dim)
@@ -72,10 +84,17 @@ struct SupervisionCard: View {
                     .foregroundStyle(logged.attribution == .primary ? theme.dim : theme.primary)
             }
             if let message = e.lastAssistantMessage {
+                let open = expanded.contains(logged.id)
                 Text(message)
                     .font(LHFont.secondary).foregroundStyle(theme.dim)
-                    .lineLimit(3).textSelection(.enabled)
+                    .lineLimit(open ? nil : 3).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                if message.count > previewChars {
+                    Button(open ? "Show less" : "Show all \(message.count) characters") {
+                        if open { expanded.remove(logged.id) } else { expanded.insert(logged.id) }
+                    }
+                    .buttonStyle(.plain).font(LHFont.metaFaint).foregroundStyle(theme.primary)
+                }
             }
         }
     }

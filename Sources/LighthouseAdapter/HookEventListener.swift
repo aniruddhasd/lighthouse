@@ -34,6 +34,7 @@ public actor HookEventListener {
 
     private let directory: URL
     private let deadlineInterval: TimeInterval
+    private let onDrop: (@Sendable (String) -> Void)?
     private let core = ListenerCore()
 
     /// Observability for tests and debugging — how many payloads were
@@ -48,14 +49,19 @@ public actor HookEventListener {
     /// - Parameters:
     ///   - directory: injected socket location (prod: app container; tests:
     ///     temp dir). Never a shared world-writable path.
+    ///   - onDrop: called (from the actor) with the reason for every dropped
+    ///     delivery, so the app can surface a missing event instead of only
+    ///     writing to stderr.
     ///   - requestDeadline: whole-request wall-clock cap; the default is the
     ///     production value, overridable so tests can drive it fast.
     public init(
         directory: URL,
-        requestDeadline: TimeInterval = HookEventListener.requestDeadline
+        requestDeadline: TimeInterval = HookEventListener.requestDeadline,
+        onDrop: (@Sendable (String) -> Void)? = nil
     ) {
         self.directory = directory
         self.deadlineInterval = requestDeadline
+        self.onDrop = onDrop
     }
 
     deinit {
@@ -190,6 +196,7 @@ public actor HookEventListener {
     private func recordDrop(_ reason: String) {
         droppedCount += 1
         lastDropReason = reason
+        onDrop?(reason)
         FileHandle.standardError.write(Data("[lighthouse hook-socket] dropped: \(reason)\n".utf8))
     }
 

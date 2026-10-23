@@ -109,4 +109,90 @@ struct HookEventLogTests {
         let size = try #require((try FileManager.default.attributesOfItem(atPath: sink.url.path))[.size] as? Int)
         #expect(size <= 600)
     }
+
+    // MARK: Restore from the durable file (history survives a restart)
+
+    private func task(_ ref: String) -> TaskRecord {
+        TaskRecord(name: "t", branch: "b", adapterKind: "c", sessionRef: ref,
+            workspaces: [Workspace(repoId: UUID(), worktreePath: "/w/a", mergeState: .unmerged)])
+    }
+
+    @Test func loadRecentOnMissingFileIsEmptyNotAnError() throws {
+        let dir = tempDir()
+        #expect(try HookEventSink(directory: dir).loadRecent(limit: 10).isEmpty)
+    }
+
+    @Test func loadRecentSkipsMalformedLinesAndKeepsNewestInOrder() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sink = HookEventSink(directory: dir)
+        for i in 0..<5 {
+            try sink.append(LoggedHookEvent(taskId: nil, attribution: .unattributed, event: ev(i)))
+        }
+        // Corrupt the middle: a torn write / hand edit must not cost the rest.
+        var text = try String(contentsOf: sink.url, encoding: .utf8)
+        text += "{ not json\n\n"
+        try text.write(to: sink.url, atomically: true, encoding: .utf8)
+        try sink.append(LoggedHookEvent(taskId: nil, attribution: .unattributed, event: ev(9)))
+
+        let recent = try sink.loadRecent(limit: 3)
+        #expect(recent.map(\.event.receivedAt.timeIntervalSince1970) == [3, 4, 9])
+    }
+
+    @Test func loadRecentReadsTheRotatedFileFirstSoRotationDoesNotLoseHistory() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sink = HookEventSink(directory: dir, maxBytes: 600)
+        for i in 0..<10 {
+            try sink.append(LoggedHookEvent(taskId: nil, attribution: .unattributed, event: ev(i)))
+        }
+        let times = try sink.loadRecent(limit: 50).map(\.event.receivedAt.timeIntervalSince1970)
+        #expect(times == times.sorted())
+        #expect(times.last == 9)
+        #expect(times.count > 1)
+    }
+
+    @Test func restorePopulatesBoundedHistoryWithoutRewritingTheFile() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let t = task("p")
+        let sink = HookEventSink(directory: dir)
+        for i in 0..<5 {
+            try sink.append(LoggedHookEvent(taskId: t.id, attribution: .primary, event: ev(i)))
+        }
+        let before = try Data(contentsOf: sink.url)
+
+        let log = MainActorBox.make(sink: sink)
+        log.restore(tasks: [t])
+        #expect(log.events(for: t.id).count == 5)
+        #expect(try Data(contentsOf: sink.url) == before, "restore must not append to the file")
+    }
+
+    @Test func restoreDropsEventsOfTasksThatNoLongerExist() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let gone = UUID(), kept = task("p")
+        let sink = HookEventSink(directory: dir)
+        try sink.append(LoggedHookEvent(taskId: gone, attribution: .primary, event: ev(1)))
+        try sink.append(LoggedHookEvent(taskId: kept.id, attribution: .primary, event: ev(2)))
+        try sink.append(LoggedHookEvent(taskId: nil, attribution: .unattributed, event: ev(3)))
+
+        let log = MainActorBox.make(sink: sink)
+        log.restore(tasks: [kept])
+        #expect(log.byTask[gone] == nil)
+        #expect(log.events(for: kept.id).count == 1)
+        #expect(log.unattributed.count == 1)
+    }
+
+    // MARK: Drop counter
+
+    @Test func dropsAreCountedWithTheLastReasonBounded() {
+        let log = HookEventLog()
+        #expect(log.droppedCount == 0 && log.lastDropReason == nil)
+        log.recordDrop("first")
+        log.recordDrop(String(repeating: "x", count: 5_000))
+        #expect(log.droppedCount == 2)
+        #expect((log.lastDropReason?.count ?? 0) <= HookEventLog.maxDropReasonChars)
+    }
+}
+
+/// Builds a main-actor log from a (nonisolated) test helper context.
+@MainActor private enum MainActorBox {
+    static func make(sink: HookEventSink) -> HookEventLog { HookEventLog(sink: sink) }
 }

@@ -65,12 +65,19 @@ Full dated evidence lives in `docs/hook-observations.md`; the summary here is fo
   preview. The card truncates to 3 lines — fine for comparison with the terminal,
   not for judging.
 
-Known gaps in 1a: a workspace added to an already-supervised task is not wired
-until the flag is toggled; hooks are not installed into worktrees of tasks
-created later; mid-session pickup is observed once, not proven; interactive-mode
-behaviour is exactly what the observation week is for. Leftovers: old attention hooks already
-sitting in existing worktrees stay inert until that task is supervised (install
-replaces them) or never (they curl a dead socket, async, harmlessly).
+### Phase 1a hardening (2026-10-23)
+
+Done after the observation runs: recent events reload from `hook-events.jsonl` at
+launch (bounded, read-only, events of deleted tasks dropped); the card shows a
+count and last reason for deliveries the socket dropped; a workspace added to an
+already-supervised task is wired immediately; long messages expand in the card.
+
+Known gaps in 1a: mid-session pickup is observed, not proven in general;
+`idle_prompt` / `agent_needs_input`, a real subagent with a non-empty `agent_type`
+and a second session in another tab have not been exercised. Leftovers: old
+attention hooks already sitting in existing worktrees stay inert until that task
+is supervised (install replaces them) or never (they curl a dead socket, async,
+harmlessly).
 
 ## 1. Goal
 

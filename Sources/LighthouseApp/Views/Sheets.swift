@@ -673,17 +673,19 @@ struct AddToTaskSheet: View {
         working = true
         Task {
             do {
+                let workspace: Workspace
                 switch mode {
                 case .newWorktree:
-                    _ = try await runtime.model.addWorktree(
+                    workspace = try await runtime.model.addWorktree(
                         toTask: task.id, repoId: selectedRepoId!, branch: branch)
                 case .trackInPlace:
-                    _ = try await runtime.model.trackInPlace(
+                    workspace = try await runtime.model.trackInPlace(
                         toTask: task.id, repoId: selectedRepoId!)
                 case .adopt:
-                    _ = try await runtime.model.adoptWorktree(
+                    workspace = try await runtime.model.adoptWorktree(
                         toTask: task.id, directory: adoptDir!)
                 }
+                await runtime.superviseNewWorkspace(workspace, taskId: task.id)
                 dismiss()
             } catch let error as TaskEngineError {
                 runtime.lastError = FailureDescriber.describe(error)

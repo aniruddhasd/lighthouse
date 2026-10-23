@@ -226,10 +226,8 @@ any time from **Help → Run Setup Checks**.
   did", "next step") was never built.
 - `Scripts/smoke-run.sh` still asserts the removed `attention.sock` (the new
   socket is `hooks.sock`, and only exists while a task is supervised).
-- Supervision (phase 1a) has one real interactive observation so far (see
-  `docs/orchestrator-design.md`): the gated live test covers `-p` mode only, and a
-  workspace added to an already-supervised task isn't wired until the toggle is
-  cycled.
+- Supervision (phase 1a) rests on a handful of real interactive runs (see
+  `docs/hook-observations.md`); the gated live test covers `-p` mode only.
 - Stale wording remains in comments and UI strings (e.g. the RemoveTaskSheet
   in-place text mentions "attention hooks"; `AppRuntime`/`SetupView` doc
   comments describe the socket and hook self-test).
