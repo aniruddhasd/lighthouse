@@ -210,6 +210,8 @@ any time from **Help → Run Setup Checks**.
 - `docs/claude-code-contract.md` — verified Claude Code CLI facts (flags, launch
   shell, transcript schema). Hook sections are retained as history; see its
   status banner.
+- `docs/orchestrator-design.md` and `docs/hook-observations.md` — the supervisor
+  design (phase 1a built) and the dated evidence log from real hook runs.
 - `docs/diff-renderer.md` — diff2html choice, vendoring, checksum and pin gates,
   and the diff-pane security posture.
 - `docs/redesign-implementation-spec.md` — the Harbor/Focus redesign plan, with a

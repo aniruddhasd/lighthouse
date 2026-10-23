@@ -41,6 +41,11 @@ public struct HookInstaller: Sendable {
         ("SubagentStop", nil),
         ("Notification", nil),
         ("PermissionRequest", nil),
+        // Experiment: does the questionnaire tool's completion fire PostToolUse (an
+        // "unblocked" signal)? Matched to that ONE tool — unfiltered it would fire
+        // after every tool call. Docs: fires only after a tool *succeeds*, so a
+        // cancelled questionnaire may stay silent.
+        ("PostToolUse", "AskUserQuestion"),
         ("SessionEnd", nil),
     ]
 

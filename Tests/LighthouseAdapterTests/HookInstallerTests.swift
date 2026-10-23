@@ -98,6 +98,17 @@ final class HookInstallerTests {
         #expect(handler["async"] as? Bool == true)
     }
 
+    /// The "unblocked" experiment: PostToolUse is installed ONLY for the questionnaire
+    /// tool — an unfiltered PostToolUse would fire after every tool call.
+    @Test func postToolUseIsMatchedToAskUserQuestionOnly() async throws {
+        let repo = try fixtures.cleanRepo()
+        try await installer.install(in: repo.path, socketPath: socket)
+        let hooks = try #require(try readJSON(settingsURL(repo))["hooks"] as? [String: Any])
+        let groups = try #require(hooks["PostToolUse"] as? [[String: Any]])
+        #expect(groups.count == 1)
+        #expect(groups[0]["matcher"] as? String == "AskUserQuestion")
+    }
+
     @Test func existingUserHooksSurviveMerge() async throws {
         let repo = try fixtures.cleanRepo()
         let url = settingsURL(repo)

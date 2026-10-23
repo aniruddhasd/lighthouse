@@ -98,4 +98,37 @@ struct ClaudeHookParserTests {
             #"{"session_id":"s","hook_event_name":"SessionStart","source":3}"#))
         #expect(e.source == nil)
     }
+
+    // MARK: Failure + tool fields seen live (2026-10-22, second observation)
+
+    @Test func stopFailureCarriesStructuredErrorAndMessage() throws {
+        let e = try #require(parse(
+            #"{"session_id":"s","hook_event_name":"StopFailure","error":"unknown","last_assistant_message":"API Error: Can't reach the API server"}"#))
+        #expect(e.error == "unknown")
+        #expect(e.lastAssistantMessage == "API Error: Can't reach the API server")
+    }
+
+    @Test func permissionRequestKeepsToolNameButNeverToolInput() throws {
+        let e = try #require(parse(
+            #"{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"secret?"}]}}"#))
+        #expect(e.toolName == "AskUserQuestion")
+        // tool_input (commands/args/answers) is sensitive + untrusted: its KEY is
+        // recorded for drift-spotting, its VALUE is never retained.
+        #expect(e.payloadKeys.contains("tool_input"))
+        let encoded = String(decoding: try JSONEncoder().encode(e), as: UTF8.self)
+        #expect(!encoded.contains("secret?"))
+    }
+
+    @Test func toolResponseAndPromptValuesAreNeverRetained() throws {
+        let e = try #require(parse(
+            #"{"session_id":"s","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_response":"the-answers","prompt":"my private prompt"}"#))
+        let encoded = String(decoding: try JSONEncoder().encode(e), as: UTF8.self)
+        #expect(!encoded.contains("the-answers") && !encoded.contains("my private prompt"))
+    }
+
+    @Test func wrongTypedErrorAndToolNameBecomeNil() throws {
+        let e = try #require(parse(
+            #"{"session_id":"s","hook_event_name":"StopFailure","error":{"x":1},"tool_name":9}"#))
+        #expect(e.error == nil && e.toolName == nil)
+    }
 }

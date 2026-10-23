@@ -77,7 +77,17 @@ Orchestrator phase 1a reinstated hooks for opted-in tasks (see
     mechanism is not documented in what was read of the hooks reference. Consumers
     must not treat a `SubagentStop` as a turn boundary; its text is untrusted
     model output derived from the conversation.
-  - Keys seen: `SessionStart`: `source`; `UserPromptSubmit`: `prompt`,
+  - **`StopFailure`** (observed on a network failure): own event instead of
+    `Stop`; payload has `error` plus `last_assistant_message` carrying the error
+    text. **`PermissionRequest`**: `tool_name`, `tool_input`; fired for an
+    `AskUserQuestion` call. **No hook fired when the questionnaire was answered.**
+    A mid-turn user message fires `UserPromptSubmit` at enqueue time and gets no
+    `Stop` of its own. Experiment: `PostToolUse` matched to `AskUserQuestion`
+    (docs: matches by tool name, fires after a tool succeeds; not stated for
+    `AskUserQuestion`). See `docs/hook-observations.md`.
+  - Keys seen: `SessionStart`: `source`, `context_tokens`,
+    `seconds_since_last_response`, `prompt_cache_likely_expired`,
+    `estimated_cache_write_usd`, `session_title`; `UserPromptSubmit`: `prompt`,
     `prompt_id`, `permission_mode`, `scratchpad_dir`, `session_title`; `Stop`: also
     `effort`, `background_tasks`, `session_crons`, `stop_hook_active`.
 

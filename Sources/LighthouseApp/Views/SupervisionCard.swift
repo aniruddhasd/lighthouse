@@ -80,9 +80,20 @@ struct SupervisionCard: View {
         }
     }
 
+    /// A readable state per event: failures, "waiting on you" and "unblocked"
+    /// read as states; everything else shows its event name plus any qualifier.
     private func label(_ e: HookEvent) -> String {
-        [e.eventName, e.source, e.notificationType, e.endReason]
-            .compactMap { $0 }.joined(separator: " · ")
+        switch e.eventName {
+        case "StopFailure":
+            return "StopFailure · failed" + (e.error.map { " (\($0))" } ?? "")
+        case "PermissionRequest":
+            return "PermissionRequest · waiting on you" + (e.toolName.map { " (\($0))" } ?? "")
+        case "PostToolUse":
+            return "PostToolUse · unblocked" + (e.toolName.map { " (\($0))" } ?? "")
+        default:
+            return [e.eventName, e.source, e.notificationType, e.endReason]
+                .compactMap { $0 }.joined(separator: " · ")
+        }
     }
 
     /// `primary` is the quiet case; everything else is flagged because mismatched

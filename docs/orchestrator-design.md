@@ -26,6 +26,8 @@ use.** Written and built 2026-10-22. Phases 1b and 2 are unbuilt.
 
 ### Phase 1a — first observations (2026-10-22, one task)
 
+Full dated evidence lives in `docs/hook-observations.md`; the summary here is for decisions.
+
 - Hooks written to a **running** session were honored (it missed only its own
   `SessionStart`); resume reuses `session_id`; exit reports
   `SessionEnd · prompt_input_exit`.
@@ -38,6 +40,22 @@ use.** Written and built 2026-10-22. Phases 1b and 2 are unbuilt.
   instruction to act on.
 - The card now shows `SessionStart` `source`, keeps an empty `agent_type`, and
   labels anything with an `agent_id` "not a turn".
+
+- **Failure and questions are structural.** An API/network failure ends a turn with
+  `StopFailure` (own `error` key), not `Stop`; a questionnaire waiting on the user
+  is a `PermissionRequest` (`tool_name`) with no `Stop`; answering it emits no
+  event in the installed set. A `PostToolUse` matched to `AskUserQuestion` is
+  installed as experiment E1 to find an "unblocked" signal. Prompts and `Stop`s
+  do not pair one-to-one (a mid-turn message fires `UserPromptSubmit` and gets no
+  `Stop` of its own). The parser keeps `error` and `tool_name` but never
+  `tool_input` / `tool_response` / `prompt` values.
+
+- **A turn can end with no hook at all.** Esc-interrupting a turn emitted nothing
+  (no `Stop`/`StopFailure`/`SessionEnd`), leaving a dangling `PermissionRequest`
+  (observed once). 1b therefore needs a liveness/idle fallback (pty state, idle
+  timeout, transcript `turn_duration`) and must never treat "no event" as "still
+  waiting" or "done". `Notification` is unreliable (seen once, 6 s after a
+  questionnaire; absent in another) — not a dependable "waiting" signal.
 
 Known gaps in 1a: a workspace added to an already-supervised task is not wired
 until the flag is toggled; hooks are not installed into worktrees of tasks

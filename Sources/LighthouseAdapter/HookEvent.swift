@@ -23,6 +23,13 @@ public struct HookEvent: Sendable, Equatable, Codable {
     /// `SessionStart` only: why it started (docs: `startup`, `resume`, `clear`,
     /// `compact`, `fork`). Kept verbatim — unknown values pass through.
     public let source: String?
+    /// `StopFailure`: the structured failure type (a separate field from the
+    /// human-readable `lastAssistantMessage`).
+    public let error: String?
+    /// `PermissionRequest` / `PostToolUse`: which tool. NAME ONLY — `tool_input`
+    /// and `tool_response` hold commands, arguments and the user's answers, so
+    /// their values are never retained (their keys still appear in `payloadKeys`).
+    public let toolName: String?
     /// `Notification` only: the notification type (`permission_prompt`, …).
     public let notificationType: String?
     /// `SessionEnd`: the end reason. The CLI has used `reason` while docs said
@@ -39,7 +46,8 @@ public struct HookEvent: Sendable, Equatable, Codable {
 
     public init(
         receivedAt: Date, eventName: String, sessionId: String, agentId: String? = nil,
-        agentType: String? = nil, source: String? = nil, notificationType: String? = nil, endReason: String? = nil,
+        agentType: String? = nil, source: String? = nil, error: String? = nil, toolName: String? = nil,
+        notificationType: String? = nil, endReason: String? = nil,
         cwd: String? = nil, transcriptPath: String? = nil, lastAssistantMessage: String? = nil,
         payloadKeys: [String] = []
     ) {
@@ -49,6 +57,8 @@ public struct HookEvent: Sendable, Equatable, Codable {
         self.agentId = agentId
         self.agentType = agentType
         self.source = source
+        self.error = error
+        self.toolName = toolName
         self.notificationType = notificationType
         self.endReason = endReason
         self.cwd = cwd
@@ -82,6 +92,7 @@ public enum ClaudeHookParser {
         return HookEvent(
             receivedAt: receivedAt, eventName: name, sessionId: sessionId,
             agentId: string("agent_id"), agentType: stringKeepingEmpty("agent_type"), source: string("source"),
+            error: string("error"), toolName: string("tool_name"),
             notificationType: string("notification_type"),
             endReason: string("reason") ?? string("end_reason"),
             cwd: string("cwd"), transcriptPath: string("transcript_path"),
