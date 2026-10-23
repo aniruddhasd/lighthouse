@@ -44,8 +44,9 @@ Full dated evidence lives in `docs/hook-observations.md`; the summary here is fo
 - **Failure and questions are structural.** An API/network failure ends a turn with
   `StopFailure` (own `error` key), not `Stop`; a questionnaire waiting on the user
   is a `PermissionRequest` (`tool_name`) with no `Stop`; answering it emits no
-  event in the installed set. A `PostToolUse` matched to `AskUserQuestion` is
-  installed as experiment E1 to find an "unblocked" signal. Prompts and `Stop`s
+  event in the installed set. A `PostToolUse` matched to `AskUserQuestion` (experiment E1) **does** fire when
+  a questionnaire is answered — an "unblocked" signal for that case (observed
+  once, run 4); an Esc-cancelled one still emits nothing. Prompts and `Stop`s
   do not pair one-to-one (a mid-turn message fires `UserPromptSubmit` and gets no
   `Stop` of its own). The parser keeps `error` and `tool_name` but never
   `tool_input` / `tool_response` / `prompt` values.
@@ -54,8 +55,15 @@ Full dated evidence lives in `docs/hook-observations.md`; the summary here is fo
   (no `Stop`/`StopFailure`/`SessionEnd`), leaving a dangling `PermissionRequest`
   (observed once). 1b therefore needs a liveness/idle fallback (pty state, idle
   timeout, transcript `turn_duration`) and must never treat "no event" as "still
-  waiting" or "done". `Notification` is unreliable (seen once, 6 s after a
-  questionnaire; absent in another) — not a dependable "waiting" signal.
+  waiting" or "done". `Notification` `permission_prompt` came ~6 s after 3 of the 4
+  questionnaires left open ≥6 s, but not in one 51 s wait (unexplained) — a hint, not a dependable
+  "waiting" signal.
+
+- **A question can arrive as a plain `Stop`** (observed, run 4 addendum): same
+  event as "done", only the text differs, and the question may be deep in a long
+  message. Classification must read the full `last_assistant_message`, not a
+  preview. The card truncates to 3 lines — fine for comparison with the terminal,
+  not for judging.
 
 Known gaps in 1a: a workspace added to an already-supervised task is not wired
 until the flag is toggled; hooks are not installed into worktrees of tasks

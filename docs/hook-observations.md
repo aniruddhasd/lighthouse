@@ -110,24 +110,82 @@ Findings
 - **Answering emits no event** *(observed, 2nd time)* — still true without E1.
 - A turn can run for minutes with no `Stop`: 08:49:19 → 08:55:30 here.
 
+## Run 4 — 2026-10-23, 09:07–09:09 (E1 build: Esc first, then answered)
+
+Build `f32a87d` (has the `PostToolUse` hook, `error`/`tool_name` capture, state labels).
+
+| Time | Event | Notes |
+|---|---|---|
+| 09:07:41 | `SessionStart` `source=resume` | |
+| 09:07:53 | `UserPromptSubmit` | asked for a questionnaire |
+| 09:08:02 | `PermissionRequest` (`AskUserQuestion`) | round 1 |
+| 09:08:08 | `Notification` `permission_prompt` | +6 s |
+| *(~09:08:1x)* | *(no hook event)* | **Esc** on round 1 |
+| 09:08:17 | `UserPromptSubmit` | round 2 |
+| 09:08:29 | `PermissionRequest` (`AskUserQuestion`) | |
+| 09:08:35 | `Notification` `permission_prompt` | +6 s |
+| 09:09:01 | **`PostToolUse` (`AskUserQuestion`)** | **answered**, 32 s after the request; keys `duration_ms`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id` |
+| 09:09:14 | `Stop` | turn complete |
+| 09:09:16 | `SubagentStop` | next-prompt suggestion, +2 s after `Stop` |
+
+Findings
+- **E1 result: positive for the answered case** *(observed, once)*. Answering an
+  `AskUserQuestion` fires `PostToolUse` with `tool_name=AskUserQuestion`, so
+  "waiting on you" (`PermissionRequest`) now has a matching "unblocked"
+  (`PostToolUse`) when the user answers.
+- **Esc still emits nothing** *(observed, 2nd time)*: round 1 produced no
+  `PostToolUse` and no `Stop`; the next event was the next prompt. This matches the
+  docs ("`PostToolUse` fires after a tool *succeeds*"). A dangling
+  `PermissionRequest` can still mean "interrupted"; the unblock signal covers only
+  the answered case.
+- **`Notification` `permission_prompt` fired ~6 s after a still-open
+  `PermissionRequest` in 3 of the 4 questionnaires that stayed open at least 6 s**
+  *(observed)*: run 3 round 1 and both run 4 rounds. A fifth (run 3 round 2) was
+  Esc'd after ~2 s, before the 6 s mark, and got none — consistent. **The exception
+  is run 2:** a questionnaire open for 51 s with no `Notification`, still
+  unexplained. Treat it as a hint, never a requirement.
+- **`PostToolUse` carries `duration_ms`**, which for this tool presumably includes
+  the time the user took to answer *(unverified — not stored)*. Its
+  `tool_response` holds the answers; never retained.
+- A questionnaire turn completes normally afterwards (`Stop`, then the
+  `SubagentStop` suggestion).
+
+### Run 4 addendum — a `Stop` that is really a question (09:09:14)
+
+The turn after the answered questionnaire ended with an ordinary `Stop`
+(2,486 chars, no `agent_id`). Its opening says the agent has not written any code
+and needs to check something with the user first — i.e. **it is asking, not
+done**. The `SubagentStop` suggestion 2 s later (33 chars) reads like a predicted
+*answer* to that, not a next task.
+
+- **A "question" `Stop` is structurally identical to a "done" `Stop`** *(observed)*:
+  same event, no `error`, no pending `PermissionRequest`/tool, nothing in the
+  payload keys that differs. Only the text says the agent is waiting on the user.
+  This is the case a hook-driven rule engine would get wrong, and it is why the
+  done / blocked / question judgment has to read `last_assistant_message`.
+- **The question may sit anywhere in a long message** — here 2,486 chars, of which
+  the card shows ~3 lines. A classifier must be given the whole message (or at
+  least its tail), not a preview. (The full text is in the JSONL, capped at 8,000
+  chars by the parser; the tail was not examined for this record.)
+- **The suggestion may track the agent's state** *(one case, inferred)*: a predicted
+  answer after a question, a predicted next task after finished work. Untrusted
+  model output; at most a corroborating hint.
+
 ## Still unseen / open
 - `Notification` `idle_prompt` / `agent_needs_input` — not yet seen (only
-  `permission_prompt`, once; see run 3).
-- A plain-text question at the end of an ordinary `Stop` (no tool involved).
+  `permission_prompt`; runs 3–4).
+- Why run 2's 51 s questionnaire produced no `Notification` (see run 4).
 - A genuine subagent's `Stop`/`SubagentStop` (Task tool) with a non-empty
   `agent_type`.
-- Esc on a questionnaire: now seen (run 3) — it emits **no** event. Whether
-  `PostToolUse` fires on a *successful* answer is still E1.
+- Esc on a questionnaire: emits **no** event (runs 3 and 4).
 - Second `claude` session in another tab of a supervised tile
   (`otherSessionInTask` attribution) — not yet exercised.
 
 ## Experiments in flight
 
 **E1 — "unblocked" signal via `PostToolUse` matched to `AskUserQuestion`.**
-Installed 2026-10-22 (after run 2). Question: does answering a questionnaire fire
-`PostToolUse` with `tool_name=AskUserQuestion`? Docs say `PostToolUse` matches by
-tool name and fires after a tool completes successfully; they do **not** say it
-fires for `AskUserQuestion`. Its payload carries `tool_response` (the user's
-answers) — the parser never retains it. *Result: **not yet run** (run 3 used the pre-E1 build; no `PostToolUse` hook was
-installed). Re-run after relaunching on the new build; a cancelled (Esc) questionnaire
-is already known to emit nothing.*
+*Result (run 4): works for an answered questionnaire; silent on Esc.* Installed
+2026-10-22 (first run on 2026-10-23, build `f32a87d`). Docs say `PostToolUse`
+matches by tool name and fires after a tool succeeds; they do not say it fires for
+`AskUserQuestion` — observed that it does. One observation; its payload's
+`tool_response` (the answers) is never retained.
