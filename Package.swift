@@ -10,7 +10,9 @@ let package = Package(
         .library(name: "LighthouseAdapter", targets: ["LighthouseAdapter"]),
         .library(name: "LighthouseAppCore", targets: ["LighthouseAppCore"]),
         .library(name: "LighthouseFixtures", targets: ["LighthouseFixtures"]),
+        .library(name: "LighthouseSupervisor", targets: ["LighthouseSupervisor"]),
         .executable(name: "Lighthouse", targets: ["LighthouseApp"]),
+        .executable(name: "lighthouse-supervisor-mcp", targets: ["LighthouseSupervisorMCP"]),
     ],
     dependencies: [
         // Terminal emulation + local pty (spec §4 consumed contracts).
@@ -26,6 +28,16 @@ let package = Package(
         .target(
             name: "LighthouseAppCore",
             dependencies: ["LighthouseGit", "LighthouseTaskEngine", "LighthouseAdapter"]),
+        // Supervisor tool surface (docs/orchestrator-design.md §10): read-only queries
+        // over the app's own persisted state, and the MCP protocol that exposes them.
+        // Pure Foundation — no UI, no network, no writes.
+        .target(
+            name: "LighthouseSupervisor",
+            dependencies: ["LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine"]),
+        // Thin stdio entry point: spawned by `claude --mcp-config`, never by the app.
+        .executableTarget(
+            name: "LighthouseSupervisorMCP",
+            dependencies: ["LighthouseSupervisor", "LighthouseTaskEngine"]),
         // The macOS app: SwiftUI views, SwiftTerm embedding, wiring only.
         .executableTarget(
             name: "LighthouseApp",
@@ -54,6 +66,12 @@ let package = Package(
             dependencies: [
                 "LighthouseAppCore", "LighthouseAdapter", "LighthouseTaskEngine", "LighthouseGit",
                 "LighthouseFixtures",
+            ]),
+        .testTarget(
+            name: "LighthouseSupervisorTests",
+            dependencies: [
+                "LighthouseSupervisor", "LighthouseAppCore", "LighthouseAdapter",
+                "LighthouseTaskEngine",
             ]),
         .testTarget(
             name: "LighthouseAppTests",

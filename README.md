@@ -82,6 +82,10 @@ drives it.
   running while unfocused and survive Harbor ⇄ Focus flips. The diff renderer is
   vendored diff2html (`docs/diff-renderer.md`) — fully offline. The terminal font
   is a bundled JetBrains Mono.
+- `Sources/LighthouseSupervisor` + `Sources/LighthouseSupervisorMCP` — orchestrator
+  slice 1: a read-only MCP server (`lighthouse-supervisor-mcp`) exposing
+  `list_tasks`, `recent_events` and `last_turn` over supervised tasks, reading the
+  app's own `config.json` and `hook-events.jsonl`. See `docs/orchestrator-design.md` §11.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway git
   repositories with known state. Never touches global git config or the network.
   A separate target so fixtures can never ship inside an app target.
