@@ -152,37 +152,17 @@ public struct ProposalQueue: Codable, Equatable, Sendable {
 /// process only reads it.
 public struct ProposalStore: Sendable {
     public static let fileName = "proposals.json"
-    private let directory: URL
+    private let file: OwnerOnlyJSONFile<ProposalQueue>
 
     public init(directory: URL) {
-        self.directory = directory
+        file = OwnerOnlyJSONFile(directory: directory, fileName: Self.fileName)
     }
 
-    public var url: URL { directory.appendingPathComponent(Self.fileName) }
+    public var url: URL { file.url }
 
     /// A missing file is an empty queue; a corrupt one THROWS (an empty answer would
     /// silently discard what the user has not yet handled).
-    public func load() throws -> ProposalQueue {
-        guard FileManager.default.fileExists(atPath: url.path) else { return ProposalQueue() }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(ProposalQueue.self, from: Data(contentsOf: url))
-    }
+    public func load() throws -> ProposalQueue { try file.load() ?? ProposalQueue() }
 
-    public func save(_ queue: ProposalQueue) throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(queue)
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        // Temp file created 0600 first, then renamed over: owner-only at every instant
-        // and never a truncated file if we crash mid-write.
-        let temp = directory.appendingPathComponent(".\(Self.fileName).tmp-\(UUID().uuidString)")
-        guard FileManager.default.createFile(
-            atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600])
-        else { throw CocoaError(.fileWriteUnknown) }
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
-    }
+    public func save(_ queue: ProposalQueue) throws { try file.save(queue) }
 }

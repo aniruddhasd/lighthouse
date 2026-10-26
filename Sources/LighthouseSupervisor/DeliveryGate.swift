@@ -140,14 +140,11 @@ public enum DeliveryGate {
         guard let basedOn = c.proposal.basedOn else { return .unknownTurn }
         let second = Int(basedOn.timeIntervalSince1970)
         guard let index = c.events.lastIndex(where: { logged in
-            logged.attribution == .primary && logged.event.agentId == nil
-                && (logged.event.eventName == "Stop" || logged.event.eventName == "StopFailure")
+            TurnOrdering.isTurnEnd(logged)
                 && Int(logged.event.receivedAt.timeIntervalSince1970) == second
         }) else { return .unknownTurn }
 
-        let newer = c.events[(index + 1)...].first {
-            $0.attribution == .primary && $0.event.agentId == nil && $0.event.eventName != "Notification"
-        }
+        let newer = c.events[(index + 1)...].first(where: TurnOrdering.isMaterial)
         if let newer {
             return .stale("Overtaken by a newer \(newer.event.eventName) event; the agent has moved on since this was proposed.")
         }

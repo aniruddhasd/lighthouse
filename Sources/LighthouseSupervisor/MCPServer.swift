@@ -65,6 +65,10 @@ public struct MCPServer: Sendable {
 
     // MARK: Tools
 
+    /// The names the server exposes — the supervisor's allowlist is derived from these,
+    /// never typed a second time.
+    public static var toolNames: [String] { tools.compactMap { $0["name"] as? String } }
+
     /// Computed (not stored): a stored `[String: Any]` global is not Sendable-safe.
     static var tools: [[String: Any]] { [
         [

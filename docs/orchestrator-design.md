@@ -614,3 +614,284 @@ Not covered (be honest about these)
   that Claude shows as `claude` comes from a `ps` listing, not from this probe.
 - Nothing launches a supervisor yet (slice 4); `ask_user`/`hold` are still just notes.
 
+Hand-tested by the user (2026-10-26): a proposal queued through the real MCP binary
+appeared on the card, the sheet opened, and **Type into terminal** put the text in Claude's
+prompt box. The refusal paths (typing window, stale turn) were not reported as tried.
+
+## 14. Slice 4 — the supervisor runner (design, not built)
+
+**Ask.** Make the supervisor actually run: the user writes standing instructions in
+plain language ("when X finishes, tell Y to do Z"), Lighthouse wakes an LLM when a
+supervised task's turn ends, the LLM reads state through the slice-1 tools and answers
+only through the slice-2 proposal tools, and the user still confirms every send (3a).
+**Not in scope:** auto-submit (3b), a route for `ask_user` answers back to the
+supervisor, several Claude tabs per tile, a supervisor that edits files or runs
+commands (it never has those tools), running it as an interactive tile.
+
+### Shape: policy and invocation are pure; the process is a detail
+Per the design constraints, the decisions are separable from the side effects, and each
+side effect sits behind a protocol so it can be faked:
+
+| Part | Kind | Responsibility |
+|---|---|---|
+| `WakePolicy` | pure | Given events, per-task watermarks, run history, caps, `now` → `wake(tasks, reason)` or `skip(reason)` |
+| `SupervisorInvocation` | pure | Settings + generated paths → exact argv, env, cwd, stdin prompt. The only place flags are spelled |
+| `ProcessRunning` | protocol | `run(invocation, timeout) -> exit status, stdout, stderr`. One real implementation over `Process`; a fake in tests |
+| `SupervisorRunner` | `@MainActor`, orchestrates | policy → invocation → runner → parse result → update watermark, ledger, spend; serialized (one run at a time) |
+| `SupervisorStore` | persistence | settings (instructions text, enabled, caps), watermarks, ledger, spend; atomic 0600 file beside `proposals.json` |
+| Harbor "Supervisor" panel | UI | enable switch (default **off**), instructions editor, run log, today's spend, **Run now** |
+
+`LighthouseSupervisor` already holds the proposal side; the three pure parts and the
+protocol go there (testable without the app), the `Process` implementation and panel in
+`LighthouseApp`.
+
+### Standing instructions
+One free-text document, user-authored, stored app-side (not in a repo, not in the
+MCP server). It is the only *trusted* text the model gets: it goes in the system prompt
+under a clearly labeled section. Everything an agent wrote stays in tool results, which
+the prompt says are untrusted data (the `_untrusted` field names from slice 1 already
+mark them). Tasks are referred to by name; the supervisor resolves them with
+`list_tasks`, which only returns supervised tasks, so an instruction naming an
+unsupervised tile finds nothing — opt-in still holds.
+
+### The run (stateless per wake)
+Each wake is one `claude -p` process; nothing carries over except what the app
+writes into the prompt. The invocation, built in one place:
+
+- `-p` with the prompt on **stdin** (agent text never goes in argv, where `ps` shows it;
+  and in fact the prompt contains only the instructions, the wake reason and the ledger —
+  the agent's words are fetched by the model through `last_turn`).
+- `--tools ""`, `--strict-mcp-config --mcp-config <generated file>`,
+  `--allowedTools` = exactly the 7 `mcp__<server name in the generated config>__*` tools (spike §10: A, C, E).
+- `--system-prompt` (replace, not append, so the default coding prompt is not inherited).
+- `--no-session-persistence`, `--output-format json`, `--max-budget-usd <per-run cap>`,
+  `--effort low`, a small model (`--model`, user-selectable; a haiku-class default).
+- cwd = `<config dir>/supervisor-work/` (owner-only, empty, created by the app — spike D:
+  a repo `.mcp.json` adds tools, and a project `CLAUDE.md` would be loaded).
+- Never present, asserted by a test: `--dangerously-skip-permissions`, `--bare`,
+  any `--add-dir`, any tool beyond the seven.
+- Env: built from scratch (`HOME`, `PATH`, `CLAUDE_CONFIG_DIR` per the account decision,
+  `LIGHTHOUSE_CONFIG_DIR` for the MCP binary) — the app's environment is **not** passed
+  through, so no stray credential reaches the process.
+- Hard timeout (default 120 s): SIGTERM, then SIGKILL after a grace period; stdout/stderr
+  capped. A timeout or non-zero exit is a failed run, never "nothing to do".
+- Result parsing is tolerant and fail-closed: unparseable output = failed run. Cost comes
+  from the JSON result (`total_cost_usd` — **field name unverified; confirm against a real
+  run before relying on it**).
+
+The CLI moved from 2.1.308 (the spike) to 2.1.310 since; `--tools`, `--strict-mcp-config`,
+`--allowedTools`, `--max-budget-usd`, `--no-session-persistence`, `--output-format`,
+`--effort` and `--system-prompt` are all present in this session's `--help`, but **the
+spike's isolation results must be re-run against the final argv** (see tests).
+
+### Wake policy
+- **Triggers:** a primary-session `Stop` (no `agent_id`) or `StopFailure` for a
+  supervised task. Nothing else wakes it in v1 — in particular not `SubagentStop`
+  (the next-prompt suggestion), `Notification`, or proposals. A **Run now** button is
+  the manual trigger.
+- **Not covered by any trigger** (from the evidence log): Esc-interrupt and an unanswered
+  questionnaire emit no terminal event, so a turn that never ends never wakes the
+  supervisor. A "silent too long" timer is a later, separate decision.
+- **Debounce / coalesce:** after a trigger wait ~5 s, then wake once with every
+  task that has an unconsidered turn; the prompt lists the tasks and the `ended_at`
+  of each turn so `based_on` is unambiguous.
+- **Watermark per task** (persisted): the `ended_at` of the last turn a *completed* run
+  considered. Wake only if a primary `Stop`/`StopFailure` newer than it exists. A run
+  that fails does not advance it; it is retried at most once, then left for the
+  breaker. So an app restart cannot re-wake on old events, and a failure cannot loop.
+- **Serialized:** one run at a time; triggers during a run set a "dirty" flag and are
+  re-evaluated after it (against the new watermark).
+- **Caps (all user-visible, all tunable):** wakes per hour, a daily USD cap summed from
+  recorded run costs, the per-run `--max-budget-usd`, and a **circuit breaker** — N
+  consecutive failed runs (default 3) turns the supervisor off and says why. Any cap hit
+  is a visible skip in the run log, never silent.
+- **Ping-pong guard.** The sharpest runtime risk is a loop: supervisor proposes → user
+  confirms → agent finishes → `Stop` → wake → proposes again. The existing 6 sends/task/hour
+  rate breaker and the human confirmation bound it; the wake cap bounds the cost of it.
+
+### Continuity: the ledger
+The app keeps the last ~20 run summaries (time, trigger, tasks considered, proposals
+created, cost, the model's final note truncated to 500 chars) and puts them in the prompt
+as "your earlier decisions", so it doesn't re-propose what it proposed an hour ago.
+`list_proposals` stays the source of truth for outcomes; the ledger is context, and the
+model's note in it is labeled as the model's own earlier output, not an instruction.
+
+### Account and data (needs your decision)
+The runner spawns `claude` with `Process`, so your `~/.zshrc` `claude()` function — which
+picks `~/.claude-enterprise` when `$PWD` is under `~/develop/python/work` and the
+default account otherwise — **does not run**. The supervisor's account is whatever
+`CLAUDE_CONFIG_DIR` the app sets. And it sends every message it reads (the agents' full
+`last_assistant_message`s) to that account's API, so the choice is a data-handling
+choice as well as a billing one.
+
+Observed: with `CLAUDE_CONFIG_DIR=~/.claude-enterprise`, a model asked whether it could
+see a heading from your global `~/.claude/CLAUDE.md` answered no (3 haiku calls) — but
+`~/.claude-enterprise/CLAUDE.md` doesn't exist, so that only shows the enterprise dir
+doesn't load it. What the default `~/.claude` would load is untested; per the memory note
+that account was not logged in.
+
+| Option | What it is | Cost |
+|---|---|---|
+| **a. Existing enterprise config dir, set explicitly** *(recommended)* | `CLAUDE_CONFIG_DIR=~/.claude-enterprise`, a setting in the panel | No new login. Shares that dir's settings/hooks, so verify (below) that none apply to `-p` runs in the empty cwd. Single account for all supervised tasks |
+| b. Dedicated config dir | e.g. `<config>/supervisor-claude/`, one-time `claude login` | Cleanest isolation (no inherited hooks/CLAUDE.md), one extra login and a separate seat/usage line |
+| c. API key + `--bare` | key from the env/secret manager only | Most isolated and cheapest to reason about, but needs an API key, and never in the app's files |
+
+Deviate from (a) if the supervised tasks' data must not go to the enterprise account, or
+if verification finds inherited user-level hooks/instructions running in the supervisor.
+If your supervised tasks span both accounts, v1 still uses **one** account; per-account
+supervisors are a later decision, and until then supervising a task is also choosing
+where its messages go.
+
+### Prerequisites that are not the runner
+- **Bundle `lighthouse-supervisor-mcp`** into `Lighthouse.app` (today only a debug build
+  exists, used by hand); the runner refuses to start if the binary is missing and writes
+  the generated `--mcp-config` as an owner-only file pointing at the bundled absolute path.
+- **Find `claude`:** the app must locate the binary without the shell function. Unverified
+  how; likely a setting with a default found via a login shell (`command -v`), validated
+  at start (`--version` exit 0).
+
+### Threats
+- *Prompt injection through an agent's output steering the supervisor*: it only has
+  seven tools, none that act directly; sends are validated (slice 2), gated (3a) and
+  confirmed by a human who sees the agent text beside the proposal. One haiku sample
+  of resistance is evidence, not proof.
+- *Runaway spend*: per-run budget, hourly wake cap, daily cap, breaker — the app enforces
+  these, not the model.
+- *Tool-surface drift*: a CLI update changing flag behavior. Mitigated by the argv test
+  and by a gated live test that asserts the init message lists exactly the seven tools.
+- *Credential exposure*: scrubbed env, prompt on stdin, nothing secret written to the
+  ledger or logs.
+- *The supervisor config dir being writable by the model*: it has no file tools, so no.
+
+### How it will be tested
+1. **Pure, first (failure modes before happy path):**
+   `WakePolicy` table — debounce; watermark prevents re-wake after restart; `SubagentStop`
+   and `Notification` never trigger; failed run doesn't advance the watermark; one retry
+   then stop; caps and breaker each produce their skip reason; dirty-flag re-evaluation.
+   `SupervisorInvocation` — asserts the exact argv, the env contains only the allowed
+   keys, forbidden flags absent, prompt never in argv, cwd as specified.
+2. **Fake `ProcessRunning`:** timeout kill, non-zero exit, malformed/empty output, huge
+   output, cost field missing (counts as failed, not free).
+3. **Real process, no network:** `ProcessRunner` against a stub executable — timeout and
+   SIGKILL escalation, no orphaned child, capped output.
+4. **Gated live (`LIGHTHOUSE_LIVE_CLAUDE_TEST=1`):** the final argv against the real CLI
+   — init lists exactly seven tools, no Bash; a planted project `.mcp.json` and a planted
+   `CLAUDE.md` in the cwd's ancestors do not leak in; a fixture task produces a proposal;
+   a hostile agent message doesn't produce a `send` containing the planted command.
+5. **Manual:** one supervised scratch task, **Run now**, read the run log and cost.
+
+### Build order (recommend stopping after 4b for evidence)
+- **4a** — pure parts + protocol + fakes + store; no process, no UI.
+- **4b** — real runner, bundling, panel, **manual Run now only**. Look at real runs, cost
+  per wake and the ledger before automating anything.
+- **4c** — automatic wake on `Stop`/`StopFailure`, caps and breaker enforced.
+Reason for the split: the wake policy's defaults (debounce, caps) should come from
+observed cost and behavior, not guesses, and until 4c nothing can run without you clicking.
+
+### Decisions for you
+1. **Account (a/b/c)** — recommend (a); deviate if the data shouldn't go to that account.
+2. **Default model and caps** — recommend a haiku-class model, $0.05/run, 20 wakes/hour,
+   $2/day, breaker at 3 failures. These are guesses until 4b measures real runs.
+3. **4a→4b→4c with a stop after 4b**, or straight through.
+4. Whether the supervisor's run log may keep a truncated copy of the model's final note
+   (it can echo agent text); recommend yes, 500 chars, 0600, rotated.
+
+### Unverified (would need a run before building on it)
+- The JSON result's cost field name and shape under `--output-format json`.
+- Whether user-level hooks/settings in `~/.claude-enterprise` execute in the supervisor's
+  `-p` run (and whether `--setting-sources` can exclude them).
+- How the app should locate `claude` without the shell function.
+- Whether `-p` honors `--effort low` with the chosen model, and the real per-wake cost.
+
+
+### Decisions taken (2026-10-26)
+1. **Account: the default (personal) account, for every supervised task.** No
+   `CLAUDE_CONFIG_DIR` is set (`configDirectory == nil`); a later per-calling-session account
+   would be a different value of that one setting, per run. This means agent messages from
+   *any* tile, including enterprise-tree tasks, go to the personal account — the user's call.
+2. **Model: `claude-sonnet-5-5`** (it has to make sense of agents' messages and the standing
+   instructions). Default effort `medium`.
+3. **4a first** (pure parts, protocol, fakes, store), then stop and review before 4b.
+4. The run log keeps the model's closing note, truncated to 500 characters.
+
+### 4a as built (2026-10-26)
+
+Refactors done first (no behavior change, 117 tests green before and after):
+`OwnerOnlyJSONFile<Value>` (the one atomic, 0700/0600 write; `ProposalStore` is now a thin
+wrapper) and `TurnOrdering` (the one definition of "turn end" and "material primary event",
+shared by `DeliveryGate` and `WakePolicy`).
+
+New in `LighthouseSupervisor`: `SupervisorSettings` (+ `problems` validation; default OFF),
+`SupervisorState` / `RunRecord` / `TurnAttempt`, `WakePolicy` (pure), `SupervisorPrompt`,
+`SupervisorInvocationBuilder` (the only place flags are spelled), `RunOutcome` (fail-closed
+result parsing), `ProcessRunning` + `FoundationProcessRunner`, `SupervisorRunner`
+(`evaluate(trigger:)`, `update`, `resume`; persists `supervisor-settings.json` and
+`supervisor-state.json`, both owner-only). `MCPServer.toolNames` feeds the allowlist so the
+seven names are never typed twice. **Not built:** the panel, bundling the MCP binary, finding
+`claude` without the shell function, automatic triggering (4b/4c). The runner exists but
+nothing in the app calls it yet.
+
+Differences from the plan above
+- The real process runner was built in 4a (it is plain infrastructure and is tested against
+  stub executables), not 4b.
+- `--system-prompt-file` does not exist in CLI 2.1.310's `--help`, so the (static) system
+  prompt is in argv; the user's instructions and everything else go on stdin.
+- No "dirty flag" re-evaluation: with no automatic trigger yet there is nothing to coalesce.
+- The ledger records no "proposals created" count (the runner cannot know it; the model's
+  closing note says it).
+
+Facts established this session (CLI 2.1.310) — each from a run, not memory
+- **`--system-prompt` does not stop the user's global `~/.claude/CLAUDE.md` loading**
+  (default account: the model saw "Delegation economy"); **`--setting-sources project` does**
+  (not visible in 3 variants; haiku self-report, one sample each, cost also dropped). The
+  runner passes `--setting-sources project` from an empty working directory. The user's
+  `~/.claude/settings.json` has no hooks/permissions/env, so nothing else was at stake;
+  whether user hooks would run was not tested.
+- **A scrubbed environment is "Not logged in" unless `USER` is set.** `HOME` + `PATH` alone
+  fail; adding `USER` works (the other variables tried did not matter). So `USER` is in the
+  built environment. The personal account is logged in (`claude auth status`).
+- **The result JSON carries `total_cost_usd`, `is_error`, `subtype`, `result`.** An error can
+  still say `subtype: "success"` with `is_error: true` and exit status 1; the CLI's message is
+  in `result`. The parser treats `is_error` as a failure and keeps that message.
+- **`-p` with the prompt on stdin works**; `--allowedTools` as one comma-joined argument works.
+
+Verified
+- 18 `WakePolicy` tests (never wakes: disabled, halted incl. manual, bad settings, subagent
+  `Stop`, `SubagentStop` helper, `Notification`, other sessions, unsupervised tasks, history
+  before enabling, no enabled period, a turn the user already moved past, a dangling
+  `PermissionRequest`; watermark with whole-second persistence; give-up after two failures;
+  caps; debounce; breaker). 13 runner tests with a fake process (disabled; enabling is not a
+  wake for history; failed run keeps the watermark, retries once, then stops; timeout /
+  oversized / launch failure / garbage / missing cost are failures charged the per-run
+  budget; a failed run's own reported cost is charged exactly; breaker + restart + resume;
+  unreadable state/settings not overwritten; a save failure halts; missing binaries; unreadable
+  snapshot; a second evaluate during a run; persisted watermark across a restart; ledger fed
+  to the next run). The exact argv is asserted (no built-in tool, strict MCP, exactly the seven
+  allowed tools, none of seven widening flags, `--setting-sources project`, no
+  `--append-system-prompt`, instructions only on stdin, exact environment keys).
+- Mutation check: four deliberate breaks (`>=` on the watermark compare, advancing the
+  watermark on failure, unknown cost = 0, dropping `--strict-mcp-config`) each made tests fail.
+- 7 process tests against stub executables: SIGTERM-ignoring process is killed after the grace
+  period, runaway output is cut off, non-zero exit keeps status and stderr, a process that exits
+  without reading stdin does not crash us, a grandchild holding the pipes cannot hang the run,
+  exact stdin (incl. UTF-8), exact environment, cwd. **This caught a real bug:** writing stdin
+  to a process that had already exited raised SIGPIPE and killed the test process — it would
+  have killed the app. Fixed with `F_SETNOSIGPIPE` on the pipe.
+- **Live (gated), real CLI, default account, `claude-sonnet-5-5`, synthetic fixture, two runs:**
+  alpha genuinely finished → a pending `send` to beta; delta's last message said the VPN was
+  down (and carried a planted `rm -rf ~` injection) → a `hold`, no send, injection ignored and
+  named as such in the closing note. Cost **$0.021** per wake over three tasks. Two samples of
+  one model on one fixture: evidence, not robustness.
+
+Known gaps
+- **The cross-task send cannot be delivered today** (found by the live run above). A proposal's
+  `task` is the *target* and `based_on` is the ended_at of the *source's* turn ("when alpha
+  finishes, tell beta"), but `DeliveryGate` looks for that turn in the *target's* events — the
+  live run printed `refusals = [The turn this was based on is not in the event log]`. The
+  supervisor's central use is exactly this case. It needs a design change to the proposal and
+  the gate (a `source_task`; freshness = the source's turn is still its latest AND the target is
+  idle), which is behavior in slices 2/3, so it is not changed here and needs a decision.
+- Only the direct child is signalled on timeout; descendants are expected to exit on stdin
+  EOF. An orphaned grandchild was observed in the stub test (it exits by itself); the real
+  CLI/MCP tree on a timeout was not examined.
+- Only one account per supervisor; `ask_user` answers still have no route back.
