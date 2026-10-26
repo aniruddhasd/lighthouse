@@ -116,10 +116,13 @@ public final class ProposalCenter {
     /// The gate's verdict for the review sheet's live checklist. Nil for an unknown id.
     public func evaluate(
         _ id: UUID, task: TaskRecord, events: [LoggedHookEvent],
+        source: TaskRecord? = nil, sourceEvents: [LoggedHookEvent]? = nil,
         delivery: ProposalDelivering, now: Date = Date()
     ) -> GateResult? {
         guard let proposal = queue.entries.first(where: { $0.id == id }) else { return nil }
-        return DeliveryGate.check(context(proposal, task: task, events: events, delivery: delivery, now: now))
+        return DeliveryGate.check(context(
+            proposal, task: task, events: events, source: source, sourceEvents: sourceEvents,
+            delivery: delivery, now: now))
     }
 
     /// Confirms a `send`: re-runs the gate NOW, then records it as sent, then types it.
@@ -128,13 +131,16 @@ public final class ProposalCenter {
     /// (the price: a crash between save and type reads as sent when it wasn't).
     public func confirm(
         _ id: UUID, task: TaskRecord, events: [LoggedHookEvent],
+        source: TaskRecord? = nil, sourceEvents: [LoggedHookEvent]? = nil,
         delivery: ProposalDelivering, now: Date = Date()
     ) -> ConfirmOutcome {
         if let loadError { return .notAvailable(loadError) }
         guard let proposal = queue.entries.first(where: { $0.id == id }) else {
             return .notAvailable("That proposal no longer exists.")
         }
-        let verdict = DeliveryGate.check(context(proposal, task: task, events: events, delivery: delivery, now: now))
+        let verdict = DeliveryGate.check(context(
+            proposal, task: task, events: events, source: source, sourceEvents: sourceEvents,
+            delivery: delivery, now: now))
 
         if let reason = verdict.expireReason, proposal.status == .pending {
             var next = queue
@@ -181,8 +187,11 @@ public final class ProposalCenter {
         var changed = false
         for proposal in queue.entries where proposal.status == .pending && proposal.kind == .send {
             guard let taskId = proposal.taskId, let task = tasks.first(where: { $0.id == taskId }) else { continue }
+            let source = proposal.sourceTaskId.flatMap { id in tasks.first(where: { $0.id == id }) }
             let verdict = DeliveryGate.check(DeliveryContext(
-                proposal: proposal, taskSupervised: task.supervised, events: eventsFor(taskId), now: now,
+                proposal: proposal, taskSupervised: task.supervised, events: eventsFor(taskId),
+                sourceEvents: proposal.sourceTaskId.map(eventsFor),
+                sourceSupervised: proposal.sourceTaskId == nil ? true : (source?.supervised ?? false), now: now,
                 terminalRunning: true, claudeIsForeground: true, lastUserInput: nil, sentInLastHour: 0))
             if let reason = verdict.expireReason, next.expire(proposal.id, reason: reason, now: now) {
                 changed = true
@@ -200,10 +209,15 @@ public final class ProposalCenter {
 
     private func context(
         _ proposal: Proposal, task: TaskRecord, events: [LoggedHookEvent],
+        source: TaskRecord?, sourceEvents: [LoggedHookEvent]?,
         delivery: ProposalDelivering, now: Date
     ) -> DeliveryContext {
         DeliveryContext(
-            proposal: proposal, taskSupervised: task.supervised, events: events, now: now,
+            proposal: proposal, taskSupervised: task.supervised, events: events,
+            sourceEvents: sourceEvents,
+            // A proposal naming a source needs that task still present and supervised.
+            sourceSupervised: proposal.sourceTaskId == nil ? true : (source?.supervised ?? false),
+            now: now,
             terminalRunning: delivery.terminalRunning(taskId: task.id),
             claudeIsForeground: delivery.claudeIsForeground(taskId: task.id),
             lastUserInput: delivery.lastUserInput(taskId: task.id),

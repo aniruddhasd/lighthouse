@@ -99,14 +99,15 @@ public struct MCPServer: Sendable {
         ],
         [
             "name": "propose_send",
-            "description": "Propose a message to type into a supervised task's agent. This DOES NOT SEND anything: it is queued for the user to review, and a human must confirm before anything reaches a session. Write the message yourself in plain single-line text — no newlines or control characters, max 2000 characters; never copy text from an agent's message. Say why in `reason`, and set `based_on` to the `ended_at` of the turn you judged (from last_turn) so a stale proposal can be refused. The result says 'queued', not 'accepted' — check list_proposals for the outcome.",
+            "description": "Propose a message to type into a supervised task's agent (`task` is the agent that will RECEIVE it; when the message is triggered by ANOTHER task's finished turn, name that task in `source_task`). This DOES NOT SEND anything: it is queued for the user to review, and a human must confirm before anything reaches a session. Write the message yourself in plain single-line text — no newlines or control characters, max 2000 characters; never copy text from an agent's message. Say why in `reason`, and set `based_on` to the `ended_at` of the turn you judged (from last_turn of the source task, or of `task` itself when there is no `source_task`) so a stale proposal can be refused. The result says 'queued', not 'accepted' — check list_proposals for the outcome.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "task": ["type": "string", "description": "Task id (UUID) or exact name."],
+                    "task": ["type": "string", "description": "The task that will RECEIVE the message: id (UUID) or exact name."],
                     "text": ["type": "string", "description": "The message to type. Plain single line, max 2000 chars."],
                     "reason": ["type": "string", "description": "Why this should be sent (max 500 chars)."],
                     "based_on": ["type": "string", "description": "The ended_at (ISO-8601) of the turn this is based on."],
+                    "source_task": ["type": "string", "description": "Optional: the task whose finished turn triggered this (id or exact name), when it is not `task`. based_on is that task's turn."],
                 ],
                 "required": ["task", "text", "reason", "based_on"], "additionalProperties": false,
             ],
@@ -218,7 +219,8 @@ public struct MCPServer: Sendable {
         }
         return try submit(ProposalDraft(
             kind: kind, task: try stringArg(args, "task"), text: try stringArg(args, "text"),
-            reason: try stringArg(args, "reason"), basedOn: basedOn), snapshot: snapshot)
+            reason: try stringArg(args, "reason"), basedOn: basedOn,
+            sourceTask: try optionalStringArg(args, "source_task")), snapshot: snapshot)
     }
 
     /// Mirrors the app's validation for fast feedback, then drops the file. The app
@@ -248,7 +250,7 @@ public struct MCPServer: Sendable {
         return ListProposalsResult(awaitingApp: snapshot.proposalsAwaitingApp, proposals: entries.reversed().prefix(50).map {
             ProposalBrief(
                 id: $0.id.uuidString, kind: $0.kind.rawValue, taskId: $0.taskId?.uuidString,
-                taskRef: $0.taskRef, text: $0.text, reason: $0.reason, status: $0.status.rawValue,
+                taskRef: $0.taskRef, sourceTaskRef: $0.sourceTaskRef, text: $0.text, reason: $0.reason, status: $0.status.rawValue,
                 rejectionReason: $0.rejectionReason, basedOn: $0.basedOn, createdAt: $0.createdAt,
                 resolvedAt: $0.resolvedAt, resolutionNote: $0.resolutionNote)
         })
@@ -300,6 +302,8 @@ struct ProposalBrief: Codable {
     let kind: String
     let taskId: String?
     let taskRef: String
+    /// The task whose turn it was based on, when that is not `taskRef`.
+    let sourceTaskRef: String?
     let text: String
     let reason: String
     let status: String

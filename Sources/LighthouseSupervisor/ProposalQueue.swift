@@ -37,6 +37,7 @@ public struct ProposalQueue: Codable, Equatable, Sendable {
         if let existing = entries.first(where: {
             $0.status == .pending && $0.taskId == validated.taskId && $0.kind == d.kind
                 && $0.text == d.text && $0.basedOn == d.basedOn
+                && $0.sourceTaskId == validated.sourceTaskId
         }) {
             return existing
         }
@@ -46,10 +47,12 @@ public struct ProposalQueue: Codable, Equatable, Sendable {
                 reason: "Too many pending proposals for this task (max \(Self.maxPendingPerTask)); dismiss some first.",
                 tasks: tasks, now: now)
         }
-        let proposal = Proposal(
+        var proposal = Proposal(
             id: UUID(), taskId: validated.taskId, taskRef: String(d.task.prefix(80)), kind: d.kind,
             text: d.text, reason: d.reason, basedOn: d.basedOn, createdAt: now,
             status: .pending, rejectionReason: nil)
+        proposal.sourceTaskId = validated.sourceTaskId
+        proposal.sourceTaskRef = validated.sourceTaskId == nil ? nil : d.sourceTask.map { String(Self.sanitized($0).prefix(80)) }
         entries.append(proposal)
         prune()
         return proposal
@@ -114,11 +117,12 @@ public struct ProposalQueue: Codable, Equatable, Sendable {
     private mutating func record(
         rejected draft: ProposalDraft, reason: String, tasks: [TaskRecord], now: Date
     ) -> Proposal {
-        let proposal = Proposal(
+        var proposal = Proposal(
             id: UUID(), taskId: try? TaskLookup.resolve(draft.task, in: tasks).id,
             taskRef: String(Self.sanitized(draft.task).prefix(80)), kind: draft.kind,
             text: Self.clipped(draft.text), reason: Self.clipped(draft.reason),
             basedOn: draft.basedOn, createdAt: now, status: .rejected, rejectionReason: reason)
+        proposal.sourceTaskRef = draft.sourceTask.map { String(Self.sanitized($0).prefix(80)) }
         entries.append(proposal)
         prune()
         return proposal

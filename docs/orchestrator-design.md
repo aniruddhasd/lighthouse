@@ -884,14 +884,61 @@ Verified
   one model on one fixture: evidence, not robustness.
 
 Known gaps
-- **The cross-task send cannot be delivered today** (found by the live run above). A proposal's
-  `task` is the *target* and `based_on` is the ended_at of the *source's* turn ("when alpha
-  finishes, tell beta"), but `DeliveryGate` looks for that turn in the *target's* events — the
-  live run printed `refusals = [The turn this was based on is not in the event log]`. The
-  supervisor's central use is exactly this case. It needs a design change to the proposal and
-  the gate (a `source_task`; freshness = the source's turn is still its latest AND the target is
-  idle), which is behavior in slices 2/3, so it is not changed here and needs a decision.
+- ~~The cross-task send cannot be delivered today~~ — **fixed, see "Cross-task sends" below.**
 - Only the direct child is signalled on timeout; descendants are expected to exit on stdin
   EOF. An orphaned grandchild was observed in the stub test (it exits by itself); the real
   CLI/MCP tree on a timeout was not examined.
 - Only one account per supervisor; `ask_user` answers still have no route back.
+
+### Cross-task sends (built 2026-10-26)
+
+The finding above — "when alpha finishes, tell beta" was refused by the gate because it looked
+for alpha's turn in beta's events — is fixed.
+
+Design (decision 2 from the user: a busy target is **refused**, not waited for)
+- A `send` may name a `source_task`: `task` is the agent that RECEIVES the message,
+  `source_task` is the task whose finished turn triggered it, and `based_on` is that task's
+  `ended_at`. Absent (or equal to `task`) = the target's own turn, exactly as before.
+  Only a `send` may name one; the source must be a supervised task (else the proposal is
+  rejected with the lookup's message rather than a bare "Invalid proposal").
+- `DeliveryGate`, for a proposal with a source: (1) the SOURCE's turn must be found in the
+  source's events and still be the end of its story (same order-based rule as before, via the
+  shared `TurnFreshness.assess`); proven overtaken → **expire**, unknown → **refuse**, source
+  no longer supervised → refuse + expire, source events not supplied → refuse (fail closed);
+  (2) the TARGET must be idle at a prompt (`TargetState.assess`: last material event is
+  `Stop`, `StopFailure` or `SessionStart`; mid-turn, a tool just finished, a dangling
+  `PermissionRequest`, a session end, or no events at all → `targetBusy`) — **refused, never
+  expired**, so the proposal stays pending and can be retried. Rate limit and typing window
+  stay per target.
+- For a proposal with no source, behaviour is unchanged (the target-idle check is skipped
+  because freshness already implies it).
+- Surfaces: `list_proposals` shows `source_task_ref`; the review sheet says the proposal was
+  "triggered by the finished turn of X" and shows X's message; the supervisor's system prompt
+  and the `propose_send` schema explain `source_task`.
+
+Refactor first, then behaviour: the freshness check was extracted from the gate into
+`TurnFreshness.assess(events:basedOn:)` (175 supervisor tests green before and after).
+
+Verified
+- 15 gate tests (cross-task happy path; source moved on / session ended / unsupervised /
+  turn only in the target's log / missing source events; target mid-turn, questionnaire,
+  interrupted, tool just finished, session ended, never seen; target just started or failed;
+  helper `SubagentStop`, `Notification` and another session's events do not count; same-task
+  unchanged) and 14 proposal/MCP/center tests (source validation, queue dedupe by source,
+  rejected entries still show the source, a queue file from before sources loads, the tool
+  passes `source_task` through and refuses an unsupervised one, confirm types into the TARGET,
+  a busy target refuses and stays pending, a vanished source expires, `expireStale` retires on
+  the source moving on but not on a busy target and leaves an unknown turn alone).
+- Mutation checks on the new gate: removing the target-idle check, making a busy target expire,
+  and treating `PermissionRequest` as idle each fail tests. A fourth mutation (falling back to
+  the target's events when source events are missing) **survived** the first version of the
+  test — its fixture had no Stop at the named second in the target's log — so the test was
+  tightened and the mutation now fails it.
+- **Live (gated), real CLI, default account, Sonnet 5.5:** with the updated prompt the model
+  proposed `send -> beta` with `source_task = alpha`, held delta (VPN down) and the gate said
+  `allowed = true` for the alpha→beta send. Cost $0.030. One sample.
+
+Not covered
+- The review sheet and card changes compile but were not looked at by a person.
+- Nothing yet rate-limits by SOURCE (a flapping source could keep proposing to a target; the
+  per-target limit of 6/hour, the pending cap of 5 per task and the human confirmation bound it).

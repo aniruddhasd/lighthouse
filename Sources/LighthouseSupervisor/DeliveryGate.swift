@@ -7,8 +7,13 @@ import LighthouseAppCore
 public struct DeliveryContext: Sendable {
     public let proposal: Proposal
     public let taskSupervised: Bool
-    /// This task's logged hook events, in arrival order.
+    /// The TARGET task's logged hook events, in arrival order.
     public let events: [LoggedHookEvent]
+    /// The source task's events, for a proposal based on another task's turn. Nil when
+    /// the proposal has a source but its events were not supplied (the gate fails closed).
+    public let sourceEvents: [LoggedHookEvent]?
+    /// Whether the source task is still supervised (only consulted when there is one).
+    public let sourceSupervised: Bool
     public let now: Date
     public let terminalRunning: Bool
     /// Whether `claude` is what is running in the tab. nil = could not tell.
@@ -17,12 +22,15 @@ public struct DeliveryContext: Sendable {
     public let sentInLastHour: Int
 
     public init(
-        proposal: Proposal, taskSupervised: Bool, events: [LoggedHookEvent], now: Date,
+        proposal: Proposal, taskSupervised: Bool, events: [LoggedHookEvent],
+        sourceEvents: [LoggedHookEvent]? = nil, sourceSupervised: Bool = true, now: Date,
         terminalRunning: Bool, claudeIsForeground: Bool?, lastUserInput: Date?, sentInLastHour: Int
     ) {
         self.proposal = proposal
         self.taskSupervised = taskSupervised
         self.events = events
+        self.sourceEvents = sourceEvents
+        self.sourceSupervised = sourceSupervised
         self.now = now
         self.terminalRunning = terminalRunning
         self.claudeIsForeground = claudeIsForeground
@@ -35,6 +43,10 @@ public enum GateRefusal: Equatable, Sendable, CustomStringConvertible {
     case notPending
     case notASend
     case taskNotSupervised
+    /// The task whose turn this was based on is no longer supervised.
+    case sourceNotSupervised
+    /// The task being messaged is not idle at a prompt (a reason to show).
+    case targetBusy(String)
     /// `based_on` matches no turn the log knows about.
     case unknownTurn
     case staleTurn(String)
@@ -49,6 +61,8 @@ public enum GateRefusal: Equatable, Sendable, CustomStringConvertible {
         case .notPending: return "This proposal is no longer pending."
         case .notASend: return "Only a send proposal can be delivered."
         case .taskNotSupervised: return "The task is no longer supervised."
+        case .sourceNotSupervised: return "The task this was based on is no longer supervised."
+        case .targetBusy(let why): return "The task to message is not ready: \(why)"
         case .unknownTurn: return "The turn this was based on is not in the event log."
         case .staleTurn(let why): return why
         case .noTerminal: return "The task has no running terminal."
@@ -87,13 +101,25 @@ public enum DeliveryGate {
             expire = "The task is no longer supervised."
         }
 
-        // Freshness: the world must not have moved since the turn this was judged from.
-        switch freshness(c) {
-        case .fresh: break
-        case .unknownTurn: refusals.append(.unknownTurn)
-        case .stale(let why):
-            refusals.append(.staleTurn(why))
-            expire = expire ?? why
+        // Freshness: the world must not have moved since the turn this was judged from —
+        // the SOURCE task's turn, which is the target's own unless the proposal names another.
+        if c.proposal.sourceTaskId != nil, !c.sourceSupervised {
+            refusals.append(.sourceNotSupervised)
+            expire = expire ?? "The task this was based on is no longer supervised."
+        } else {
+            switch freshness(c) {
+            case .fresh: break
+            case .unknownTurn: refusals.append(.unknownTurn)
+            case .stale(let why):
+                refusals.append(.staleTurn(why))
+                expire = expire ?? why
+            }
+        }
+
+        // A message to ANOTHER task must find that task idle at a prompt. (For a task's own
+        // turn this is implied by freshness.) Refused, never expired: it can be retried.
+        if c.proposal.sourceTaskId != nil, case .busy(let why) = TargetState.assess(events: c.events) {
+            refusals.append(.targetBusy(why))
         }
 
         if !c.terminalRunning { refusals.append(.noTerminal) }
@@ -130,24 +156,12 @@ public enum DeliveryGate {
 
     // MARK: Freshness
 
-    private enum Freshness { case fresh, unknownTurn, stale(String) }
-
-    /// Order-based, not time-based: find the turn-ending event `basedOn` names, then ask
-    /// whether any MATERIAL primary-session event came after it. Material = any event
-    /// with no `agent_id` except `Notification`. Subagent events (the next-prompt helper
-    /// always trails a Stop), other sessions and notifications never count.
-    private static func freshness(_ c: DeliveryContext) -> Freshness {
-        guard let basedOn = c.proposal.basedOn else { return .unknownTurn }
-        let second = Int(basedOn.timeIntervalSince1970)
-        guard let index = c.events.lastIndex(where: { logged in
-            TurnOrdering.isTurnEnd(logged)
-                && Int(logged.event.receivedAt.timeIntervalSince1970) == second
-        }) else { return .unknownTurn }
-
-        let newer = c.events[(index + 1)...].first(where: TurnOrdering.isMaterial)
-        if let newer {
-            return .stale("Overtaken by a newer \(newer.event.eventName) event; the agent has moved on since this was proposed.")
+    private static func freshness(_ c: DeliveryContext) -> TurnFreshness {
+        if c.proposal.sourceTaskId == nil {
+            return TurnFreshness.assess(events: c.events, basedOn: c.proposal.basedOn)
         }
-        return .fresh
+        // Another task's turn: its events must have been supplied, or we cannot know.
+        guard let source = c.sourceEvents else { return .unknownTurn }
+        return TurnFreshness.assess(events: source, basedOn: c.proposal.basedOn)
     }
 }

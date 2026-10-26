@@ -39,13 +39,21 @@ public struct ProposalDraft: Codable, Equatable, Sendable {
     /// The `ended_at` of the turn this was judged from. Required for `send`, so a
     /// later slice can refuse a proposal made stale by a newer event.
     public var basedOn: Date?
+    /// For a `send`: the task whose finished turn `basedOn` names, when it is not the
+    /// task being messaged ("when alpha finishes, tell beta": `task` = beta, `sourceTask`
+    /// = alpha). Nil or the same task = the turn is the target's own.
+    public var sourceTask: String?
 
-    public init(kind: ProposalKind, task: String, text: String, reason: String, basedOn: Date? = nil) {
+    public init(
+        kind: ProposalKind, task: String, text: String, reason: String,
+        basedOn: Date? = nil, sourceTask: String? = nil
+    ) {
         self.kind = kind
         self.task = task
         self.text = text
         self.reason = reason
         self.basedOn = basedOn
+        self.sourceTask = sourceTask
     }
 }
 
@@ -67,6 +75,10 @@ public struct Proposal: Codable, Equatable, Identifiable, Sendable {
     public var resolvedAt: Date? = nil
     /// Why it expired or failed.
     public var resolutionNote: String? = nil
+    /// The task whose turn this was judged from, when it differs from `taskId`.
+    public var sourceTaskId: UUID? = nil
+    /// The source reference as submitted, bounded — for display.
+    public var sourceTaskRef: String? = nil
 }
 
 public struct ProposalRejection: Error, Equatable, Sendable {
@@ -75,6 +87,8 @@ public struct ProposalRejection: Error, Equatable, Sendable {
 
 public struct ValidatedProposal: Equatable, Sendable {
     public let taskId: UUID
+    /// nil when the draft named no source, or named the target itself.
+    public let sourceTaskId: UUID?
     /// Trimmed copy of the draft with the resolved task.
     public let draft: ProposalDraft
 }
@@ -86,8 +100,23 @@ public enum ProposalValidator {
     public static let maxReasonChars = 500
 
     public static func validate(_ draft: ProposalDraft, tasks: [TaskRecord]) throws -> ValidatedProposal {
-        let task = try TaskLookup.resolve(draft.task, in: tasks)
-        return ValidatedProposal(taskId: task.id, draft: try validateContent(draft))
+        let task = try resolve(draft.task, in: tasks)
+        var sourceId: UUID?
+        if let ref = draft.sourceTask?.trimmingCharacters(in: .whitespaces), !ref.isEmpty {
+            guard draft.kind == .send else {
+                throw ProposalRejection(reason: "Only a send names a source task.")
+            }
+            let source = try resolve(ref, in: tasks)
+            sourceId = source.id == task.id ? nil : source.id
+        }
+        return ValidatedProposal(taskId: task.id, sourceTaskId: sourceId, draft: try validateContent(draft))
+    }
+
+    /// A lookup failure becomes a rejection the user can read (not a bare "Invalid proposal").
+    private static func resolve(_ ref: String, in tasks: [TaskRecord]) throws -> TaskRecord {
+        do { return try TaskLookup.resolve(ref, in: tasks) } catch let e as SupervisorToolError {
+            throw ProposalRejection(reason: e.message)
+        }
     }
 
     /// Everything about a draft that does not depend on which task it names. Also run

@@ -79,13 +79,15 @@ struct LiveSupervisorRunnerTests {
         print("=== live supervisor runner ===")
         print("ok=\(record.ok) cost=$\(record.costUSD) note: \(record.note)")
         for e in entries { print("  \(e.status) \(e.kind.rawValue) -> \(e.taskRef): \(e.text.prefix(120))") }
-        // What the delivery gate would say about a cross-task send as designed today.
+        // What the delivery gate says about the cross-task send, with both tasks' events.
+        var gate: GateResult?
         if let send = entries.first(where: { $0.kind == .send && $0.status == .pending }) {
             let events = try HookEventSink(directory: dir).loadRecent(limit: 100)
-            let gate = DeliveryGate.check(DeliveryContext(
-                proposal: send, taskSupervised: true, events: events.filter { $0.taskId == send.taskId }, now: Date(),
-                terminalRunning: true, claudeIsForeground: true, lastUserInput: nil, sentInLastHour: 0))
-            print("gate on that send (target events only): refusals=\(gate.refusals)")
+            gate = DeliveryGate.check(DeliveryContext(
+                proposal: send, taskSupervised: true, events: events.filter { $0.taskId == send.taskId },
+                sourceEvents: send.sourceTaskId.map { id in events.filter { $0.taskId == id } },
+                now: Date(), terminalRunning: true, claudeIsForeground: true, lastUserInput: nil, sentInLastHour: 0))
+            print("source=\(send.sourceTaskRef ?? "nil") gate: allowed=\(gate?.allowed ?? false) refusals=\(gate?.refusals ?? [])")
         }
         print("=== end ===")
 
@@ -96,6 +98,8 @@ struct LiveSupervisorRunnerTests {
         #expect(!entries.contains { $0.kind == .send && $0.text.lowercased().contains("deploy") },
                 "delta never finished (VPN down): beta must not be told to deploy")
         #expect(entries.contains { $0.kind == .send && $0.taskId == beta.id }, "alpha finished: beta should be told to review")
+        #expect(entries.first { $0.kind == .send }?.sourceTaskId == alpha.id, "the send must name alpha as its source")
+        #expect(gate?.allowed == true, "the cross-task send must pass the gate: \(gate?.refusals ?? [])")
         #expect(entries.contains { ($0.kind == .hold || $0.kind == .askUser) }, "delta's failure should be held or asked about")
         #expect(runner.state.watermarks[alpha.id.uuidString] != nil, "a completed run advances the watermark")
     }

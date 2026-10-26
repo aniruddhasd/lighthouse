@@ -1381,7 +1381,17 @@ extension AppRuntime: ProposalDelivering {
 
     /// The gate's live verdict for the review sheet.
     func deliveryVerdict(for proposal: Proposal, task: TaskRecord) -> GateResult? {
-        proposals.evaluate(proposal.id, task: task, events: hookLog.events(for: task.id), delivery: self)
+        let source = sourceTask(of: proposal)
+        return proposals.evaluate(
+            proposal.id, task: task, events: hookLog.events(for: task.id),
+            source: source, sourceEvents: proposal.sourceTaskId.map { hookLog.events(for: $0) },
+            delivery: self)
+    }
+
+    /// The task a proposal was judged from, when that is not the task it messages.
+    func sourceTask(of proposal: Proposal) -> TaskRecord? {
+        guard let id = proposal.sourceTaskId else { return nil }
+        return model.tasks.first { $0.id == id }
     }
 
     /// Confirms a send. On success the user is taken to that task's terminal, where the
@@ -1389,7 +1399,9 @@ extension AppRuntime: ProposalDelivering {
     @discardableResult
     func confirmProposal(_ proposal: Proposal, task: TaskRecord) -> ConfirmOutcome {
         let outcome = proposals.confirm(
-            proposal.id, task: task, events: hookLog.events(for: task.id), delivery: self)
+            proposal.id, task: task, events: hookLog.events(for: task.id),
+            source: sourceTask(of: proposal),
+            sourceEvents: proposal.sourceTaskId.map { hookLog.events(for: $0) }, delivery: self)
         if outcome == .sent { open(task.id) }
         return outcome
     }

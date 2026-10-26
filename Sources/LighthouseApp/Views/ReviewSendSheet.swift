@@ -72,7 +72,12 @@ struct ReviewSendSheet: View {
         Text(p.reason).font(.callout).textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
 
-        label("THE AGENT'S MESSAGE IT WAS BASED ON — untrusted text, shown as data")
+        if let source = runtime.sourceTask(of: p) {
+            Text("Triggered by the finished turn of “\(source.name)”, not by this task.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+
+        label("THE AGENT'S MESSAGE IT WAS BASED ON\(runtime.sourceTask(of: p).map { " (from “\($0.name)”)" } ?? "") — untrusted text, shown as data")
         ScrollView {
             Text(basedOnMessage(p) ?? "The turn this was based on is not in the log.")
                 .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -117,7 +122,7 @@ struct ReviewSendSheet: View {
     private func basedOnMessage(_ p: Proposal) -> String? {
         guard let basedOn = p.basedOn else { return nil }
         let second = Int(basedOn.timeIntervalSince1970)
-        return runtime.hookLog.events(for: task.id).last {
+        return runtime.hookLog.events(for: p.sourceTaskId ?? task.id).last {
             $0.attribution == .primary && $0.event.agentId == nil
                 && ($0.event.eventName == "Stop" || $0.event.eventName == "StopFailure")
                 && Int($0.event.receivedAt.timeIntervalSince1970) == second
