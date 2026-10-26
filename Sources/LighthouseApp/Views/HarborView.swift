@@ -225,6 +225,7 @@ struct HarborView: View {
             }
             Spacer()
             if runtime.hiddenTaskCount > 0 { hiddenToggle }
+            supervisorButton
             searchButton
             scratchTerminalButton
             newTaskButton
@@ -250,6 +251,25 @@ struct HarborView: View {
         }
         .buttonStyle(.plain)
         .help(runtime.showHiddenTasks ? "Re-hide hidden tasks" : "Show hidden tasks")
+    }
+
+    /// Opens the Supervisor panel; its label says whether the supervisor is on or halted.
+    private var supervisorButton: some View {
+        let runner = runtime.supervisor
+        let state = runner.state.haltReason != nil ? "halted" : (runner.settings.enabled ? "on" : "off")
+        return Button { runtime.supervisorPanelPresented = true } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "binoculars")
+                Text("Supervisor \(state)").font(LHFont.button)
+            }
+            .foregroundStyle(state == "off" ? theme.dim : (state == "halted" ? theme.primary : theme.text))
+            .padding(.horizontal, 12).frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Configure the supervisor and run it by hand")
     }
 
     private var subtitle: String {

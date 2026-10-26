@@ -54,6 +54,12 @@ public struct SupervisorState: Codable, Sendable, Equatable {
 
     public init() {}
 
+    /// What runs since local midnight cost — the daily cap's input, and what the panel shows.
+    public func spentToday(now: Date, calendar: Calendar = .current) -> Double {
+        let dayStart = calendar.startOfDay(for: now)
+        return runs.filter { $0.startedAt >= dayStart }.reduce(0) { $0 + $1.costUSD }
+    }
+
     public mutating func append(_ run: RunRecord) {
         runs.append(run)
         if runs.count > Self.maxRuns { runs.removeFirst(runs.count - Self.maxRuns) }

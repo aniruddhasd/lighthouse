@@ -25,6 +25,27 @@ public enum SkipReason: Equatable, Sendable {
     case snapshotUnavailable(String)
 }
 
+extension SkipReason {
+    /// Plain words for the panel and run log.
+    public var explanation: String {
+        switch self {
+        case .disabled: return "The supervisor is off."
+        case .halted(let why): return "Halted: \(why)"
+        case .invalidSettings(let problems): return "Fix the settings first: \(problems.joined(separator: " "))"
+        case .noInstructions: return "Write standing instructions first."
+        case .nothingNew:
+            return "Nothing to look at: no supervised task has a finished turn that is still current."
+        case .debouncing: return "Waiting for a burst of finished turns to settle."
+        case .hourlyCap(let n): return "Hourly limit reached (\(n) runs in the last hour)."
+        case .dailyCap(let spent, let cap):
+            return String(format: "Daily spend limit reached ($%.2f of $%.2f).", spent, cap)
+        case .runInFlight: return "A run is already running."
+        case .misconfigured(let why): return why
+        case .snapshotUnavailable(let why): return "The app's state could not be read: \(why)"
+        }
+    }
+}
+
 public enum WakeDecision: Equatable, Sendable {
     case wake([PendingTurn])
     case skip(SkipReason)
@@ -51,8 +72,7 @@ public enum WakePolicy {
 
         let recent = state.runs.filter { $0.startedAt > now.addingTimeInterval(-3_600) }
         if recent.count >= settings.maxWakesPerHour { return .skip(.hourlyCap(recent.count)) }
-        let dayStart = calendar.startOfDay(for: now)
-        let spent = state.runs.filter { $0.startedAt >= dayStart }.reduce(0) { $0 + $1.costUSD }
+        let spent = state.spentToday(now: now, calendar: calendar)
         if spent >= settings.maxDailySpendUSD {
             return .skip(.dailyCap(spent: spent, cap: settings.maxDailySpendUSD))
         }

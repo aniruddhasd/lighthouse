@@ -276,3 +276,84 @@ struct SupervisorRunnerTests {
         #expect(p.calls[1].stdin.contains("told b to start"))
     }
 }
+
+@MainActor
+@Suite("SupervisorRunner claude resolution", .serialized)
+struct SupervisorRunnerClaudeTests {
+    private let a = TaskRecord(name: "a", branch: "b", adapterKind: "c", sessionRef: "s", supervised: true, workspaces: [])
+    private func dir() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("lh-cl-\(UUID().uuidString.prefix(8))") }
+    private func stop() -> LoggedHookEvent {
+        LoggedHookEvent(taskId: a.id, attribution: .primary, event: HookEvent(
+            receivedAt: Date(timeIntervalSince1970: 2_000_010), eventName: "Stop", sessionId: "s"))
+    }
+    private func make(
+        _ d: URL, process: FakeProcess, resolver: (@Sendable (String?) async -> Result<ClaudeLocation, ClaudeNotFound>)?,
+        claudePath: String? = nil
+    ) throws -> SupervisorRunner {
+        let p = SupervisorPaths(claude: URL(fileURLWithPath: "/bin/sh"), mcpServer: URL(fileURLWithPath: "/bin/sh"),
+                                workDirectory: d.appendingPathComponent("work"), lighthouseDirectory: d,
+                                home: "/h", user: "u", path: "/usr/bin:/bin")
+        let r = SupervisorRunner(
+            directory: d, source: FakeSource(tasks: [a], events: [stop()]), process: process, paths: p,
+            claudeResolver: resolver, now: { Date(timeIntervalSince1970: 2_000_100) }, calendar: Calendar(identifier: .gregorian))
+        var s = SupervisorSettings()
+        s.enabled = true; s.instructions = "x"; s.debounceSeconds = 0; s.claudePath = claudePath
+        try r.update(s)
+        return r
+    }
+
+    @Test func theResolvedBinaryIsWhatGetsLaunchedAndTheSettingIsPassedToTheResolver() async throws {
+        let d = dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let seen = SeenBox()
+        let proc = FakeProcess([FakeProcess.ok()])
+        let r = try make(d, process: proc, resolver: { override in
+            await seen.set(override)
+            return .success(ClaudeLocation(url: URL(fileURLWithPath: "/bin/echo"), source: "setting"))
+        }, claudePath: "/custom/claude")
+        if case .ran = await r.evaluate(trigger: .manual) {} else { Issue.record("expected a run") }
+        #expect(proc.calls.first?.executable.path == "/bin/echo")
+        #expect(await seen.value == "/custom/claude")
+        #expect(try r.claude?.get().source == "setting")
+    }
+
+    @Test func aBinaryThatCannotBeFoundSkipsWithItsMessageAndLaunchesNothing() async throws {
+        let d = dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let proc = FakeProcess([FakeProcess.ok()])
+        let r = try make(d, process: proc, resolver: { _ in .failure(ClaudeNotFound(message: "no claude anywhere")) })
+        let result = await r.evaluate(trigger: .manual)
+        #expect(result == .skipped(.misconfigured("no claude anywhere")))
+        #expect(proc.calls.isEmpty)
+    }
+
+    @Test func aResolvedPathThatIsNotExecutableStillSkips() async throws {
+        let d = dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let proc = FakeProcess([FakeProcess.ok()])
+        let r = try make(d, process: proc, resolver: { _ in
+            .success(ClaudeLocation(url: URL(fileURLWithPath: "/nonexistent/claude"), source: "setting")) })
+        if case .skipped(.misconfigured) = await r.evaluate(trigger: .manual) {} else { Issue.record("must re-check executability") }
+        #expect(proc.calls.isEmpty)
+    }
+
+    @Test func refreshClaudeUpdatesWhatThePanelShows() async throws {
+        let d = dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let r = try make(d, process: FakeProcess([]), resolver: { _ in
+            .success(ClaudeLocation(url: URL(fileURLWithPath: "/bin/sh"), source: "login shell")) })
+        #expect(r.claude == nil)
+        await r.refreshClaude()
+        #expect(try r.claude?.get().url.path == "/bin/sh")
+    }
+
+    @Test func aClaudePathSettingMustBeAbsolute() {
+        var s = SupervisorSettings(); s.claudePath = "claude"
+        #expect(!s.problems.isEmpty)
+        s.claudePath = "/ok/claude"
+        #expect(s.problems.isEmpty)
+        s.claudePath = ""
+        #expect(s.problems.isEmpty, "blank means automatic")
+    }
+}
+
+private actor SeenBox {
+    private(set) var value: String?
+    func set(_ v: String?) { value = v }
+}

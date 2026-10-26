@@ -104,3 +104,26 @@ struct LiveSupervisorRunnerTests {
         #expect(runner.state.watermarks[alpha.id.uuidString] != nil, "a completed run advances the watermark")
     }
 }
+
+/// The real login-shell probe against the real machine (no API call, but machine-specific,
+/// so gated with the other live tests): with every known location ruled out, the user's
+/// login shell must still find `claude` — skipping the shell FUNCTION of that name.
+@Suite("Live claude locator", .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["LIGHTHOUSE_LIVE_CLAUDE_TEST"] == "1"))
+struct LiveClaudeLocatorTests {
+    @Test(.timeLimit(.minutes(1)))
+    func theLoginShellFindsTheRealBinaryNotTheFunction() async throws {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let probe = LoginShellProbe(
+            process: FoundationProcessRunner(), shell: shell, home: NSHomeDirectory(), user: NSUserName())
+        // A bogus home hides ~/.local/bin; /opt/homebrew and /usr/local may or may not hold one.
+        let result = await ClaudeLocator.locate(
+            override: nil, home: "/nonexistent-home",
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) },
+            shellProbe: { await probe.probe() })
+        let found = try result.get()
+        print("located: \(found.url.path) via \(found.source)")
+        #expect(FileManager.default.isExecutableFile(atPath: found.url.path))
+        #expect(found.url.lastPathComponent == "claude")
+    }
+}

@@ -29,6 +29,12 @@ public struct SupervisorPaths: Sendable, Equatable {
     }
 
     public var mcpConfig: URL { workDirectory.appendingPathComponent("mcp-config.json") }
+
+    public func replacingClaude(_ url: URL) -> SupervisorPaths {
+        SupervisorPaths(
+            claude: url, mcpServer: mcpServer, workDirectory: workDirectory,
+            lighthouseDirectory: lighthouseDirectory, home: home, user: user, path: path)
+    }
 }
 
 /// A fully specified process launch. Plain data, so the exact flags are testable

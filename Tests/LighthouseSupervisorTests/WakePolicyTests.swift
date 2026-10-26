@@ -172,3 +172,21 @@ struct WakePolicyTests {
         #expect(WakePolicy.haltReason(afterRuns: [], threshold: 1) == nil)
     }
 }
+
+@Suite("SkipReason explanations")
+struct SkipReasonExplanationTests {
+    @Test func everyReasonHasAPlainExplanationThatCarriesItsFacts() {
+        let cases: [(SkipReason, String)] = [
+            (.disabled, "off"), (.halted("3 runs failed"), "3 runs failed"),
+            (.invalidSettings(["Daily cap is below the per-run budget."]), "Daily cap"),
+            (.noInstructions, "instructions"), (.nothingNew, "finished turn"),
+            (.debouncing(until: Date(timeIntervalSince1970: 0)), "settle"), (.hourlyCap(20), "20"),
+            (.dailyCap(spent: 5.01, cap: 5), "5.01"), (.runInFlight, "already running"),
+            (.misconfigured("no claude anywhere"), "no claude anywhere"),
+            (.snapshotUnavailable("corrupt"), "corrupt"),
+        ]
+        for (reason, fragment) in cases {
+            #expect(reason.explanation.localizedCaseInsensitiveContains(fragment), "\(reason): \(reason.explanation)")
+        }
+    }
+}

@@ -69,6 +69,7 @@ struct ContentView: View {
         .preferredColorScheme(theme.colorScheme)
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $runtime.registerRepoPresented) { RegisterRepoSheet() }
+        .sheet(isPresented: $runtime.supervisorPanelPresented) { SupervisorPanel() }
         .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
         .sheet(item: $runtime.taskPendingAddWorkspace) { task in AddToTaskSheet(task: task) }
         .sheet(item: $runtime.workspacePendingRemoval) { request in

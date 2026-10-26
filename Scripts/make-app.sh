@@ -5,6 +5,8 @@
 # later; the id is baked now.
 #
 #   Scripts/make-app.sh [debug|release]   → dist/Lighthouse.app
+#   LIGHTHOUSE_DIST_DIR=<dir> Scripts/make-app.sh …   → <dir>/Lighthouse.app (e.g. to build
+#   a copy while the installed one is running)
 set -eu
 
 configuration="${1:-release}"
@@ -27,12 +29,16 @@ build_stamp="$(git -C "$package_root" rev-parse --short HEAD)$(git -C "$package_
 # manifest/lockfile disagreement — no silent re-resolution (verified flag,
 # Swift 6.3.3).
 swift build --force-resolved-versions -c "$configuration" --product Lighthouse
+# The supervisor's MCP server ships beside the app binary (the app launches it for the
+# supervisor; docs/orchestrator-design.md §14).
+swift build --force-resolved-versions -c "$configuration" --product lighthouse-supervisor-mcp
 
-app="$package_root/dist/Lighthouse.app"
+app="${LIGHTHOUSE_DIST_DIR:-$package_root/dist}/Lighthouse.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 
 cp ".build/$configuration/Lighthouse" "$app/Contents/MacOS/Lighthouse"
+cp ".build/$configuration/lighthouse-supervisor-mcp" "$app/Contents/MacOS/lighthouse-supervisor-mcp"
 
 # SPM resource bundle (vendored diff renderer): Bundle.module resolves it
 # from Contents/Resources in a .app.
@@ -99,6 +105,10 @@ PLIST
 # Ad-hoc signature: enough for local dev builds; hardened runtime and real
 # identity come with distribution, not v1.
 codesign --force --sign - "$app"
+
+# The bundle must hold a working supervisor MCP server and verify as a whole.
+test -x "$app/Contents/MacOS/lighthouse-supervisor-mcp"
+codesign --verify --deep --strict "$app"
 
 echo "Built $app"
 echo "Run with: open \"$app\""

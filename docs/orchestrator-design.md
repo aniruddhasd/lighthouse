@@ -942,3 +942,64 @@ Not covered
 - The review sheet and card changes compile but were not looked at by a person.
 - Nothing yet rate-limits by SOURCE (a flapping source could keep proposing to a target; the
   per-target limit of 6/hour, the pending cap of 5 per task and the human confirmation bound it).
+
+### 4b as built (2026-10-26)
+
+Ask: make the supervisor usable by hand from the app — configure it, find `claude`, ship the
+MCP server, run it on demand. Not in scope: automatic waking (4c), per-session accounts.
+
+Library (`LighthouseSupervisor`, all unit-tested)
+- `ClaudeLocator` + `LoginShellProbe`: an explicit `claudePath` setting (a wrong one is an
+  error, never a silent fallback), then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`,
+  then the user's login shell (`$SHELL -l -i -c 'whence -p claude || type -P claude'`, which
+  skips the zsh `claude()` function; rc-file noise is ignored — only an absolute-path line
+  counts). Every path is re-checked executable, also by the runner at run time.
+- `SupervisorRunner` is now `@Observable`, takes an optional `claudeResolver`, exposes
+  `claude` (where it was found, or why not) and `refreshClaude()`.
+- `SupervisorState.spentToday` (one definition, used by the policy and the panel — extracted
+  first, tests unchanged) and `SkipReason.explanation` (plain words for each skip).
+- `SupervisorSettings.claudePath`.
+
+App
+- `SupervisorWiring` builds the runner: state directory = the app's config directory, the MCP
+  server found **beside the running executable** (`Contents/MacOS` in the bundle; the build
+  directory under `swift run`), `claude` via the locator.
+- `Views/SupervisorPanel` (sheet from a "Supervisor on/off/halted" button in Harbor's header):
+  enable switch; the account the messages go to, stated; the instructions editor; model,
+  effort, binary path (with what was found) and limits; validation problems; Save/Revert (a
+  run only ever uses saved settings); **Run now** (enabled only when saved, on and valid);
+  today's spend; halt banner with **Resume**; the last 10 runs with the model's note rendered
+  inertly. `AppRuntime.runSupervisorNow()` calls `evaluate(trigger: .manual)`.
+- `Scripts/make-app.sh` now builds and copies `lighthouse-supervisor-mcp` into the bundle,
+  fails if it is missing, and runs `codesign --verify --deep --strict` on the result;
+  `LIGHTHOUSE_DIST_DIR` builds a copy elsewhere (used here so the running app was not touched).
+
+Verified
+- Locator: setting wins; a wrong/relative setting errors; known locations in order; the login
+  shell only when nothing else matches and its answer is checked; the shell probe survives a
+  timeout/failed exit. Runner: the resolved binary is what is launched and the setting is passed
+  to the resolver; not found → skip with the message and nothing launched; a resolved but
+  non-executable path still skips.
+- **Bundle:** built into the scratchpad; the script's `codesign --verify --deep --strict`
+  passed; the bundled server answered `initialize` + `tools/list` with all seven tools.
+- **Real machine (gated):** with `~/.local/bin` ruled out, the real login-shell probe found
+  `~/.local/bin/claude` in 1.1 s.
+
+Not verified (be honest)
+- ~~The panel and the Harbor button were not exercised by a person~~ — **done 2026-10-26:** the
+  user ran the runbook below on two real tasks (`debug-fetch-metrics` and `Review doc`) and
+  reported that everything worked as expected (no per-step detail recorded).
+- The `dist/Lighthouse.app` the user runs is still the pre-4b build until it is quit and rebuilt.
+- `Run now` end to end inside the *app* (panel → runner → real CLI → inbox → card) has not
+  been run; its pieces have (the runner + CLI + MCP in the gated live test; the inbox/card in 3a).
+
+Manual runbook (scratch task, a few cents)
+1. Quit the app (the "Agents are still working" dialog needs Quit Anyway), rebuild, launch.
+2. Harbor → **Supervisor off** → the panel opens; the binary line should say
+   `✓ …/claude (…)`.
+3. Switch supervision on for two scratch tasks (their cards), let each finish a turn.
+4. In the panel: write an instruction naming them, switch **enabled** on, **Save**.
+5. **Run now**. Expect: "Running…", then a run in the log with cost; proposals on the target
+   task's card within ~2 s; "Review & send…" shows "Triggered by the finished turn of …".
+6. Try failure modes: a wrong binary path (expect the error and no run); a daily cap of $0.10
+   with a $0.25 run budget (expect "Daily cap is below the per-run budget" and Save disabled).

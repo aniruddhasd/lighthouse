@@ -17,6 +17,8 @@ public struct SupervisorSettings: Codable, Sendable, Equatable {
     /// directory, i.e. the default (personal) account. The account is a per-process
     /// choice, so choosing it per calling session later means a different value here.
     public var configDirectory: String?
+    /// Absolute path of the `claude` binary; blank/nil = find it automatically.
+    public var claudePath: String?
     public var maxBudgetPerRunUSD = 0.25
     public var maxDailySpendUSD = 5.0
     public var maxWakesPerHour = 20
@@ -40,6 +42,10 @@ public struct SupervisorSettings: Codable, Sendable, Equatable {
         if let dir = configDirectory,
            !(dir.hasPrefix("/") && !dir.contains("\0") && !dir.contains("\n")) {
             out.append("The config directory must be an absolute path.")
+        }
+        if let path = claudePath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty,
+           !(path.hasPrefix("/") && !path.contains("\0") && !path.contains("\n")) {
+            out.append("The Claude binary path must be absolute.")
         }
         if !(0.01...5).contains(maxBudgetPerRunUSD) { out.append("Per-run budget must be $0.01–$5.") }
         if !(0.1...100).contains(maxDailySpendUSD) { out.append("Daily cap must be $0.10–$100.") }

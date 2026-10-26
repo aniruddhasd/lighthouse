@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import LighthouseAppCore
 import LighthouseTaskEngine
 
@@ -12,13 +13,16 @@ public enum EvaluationResult: Equatable, Sendable {
 /// Orchestration only: the decision is `WakePolicy`, the command line is
 /// `SupervisorInvocationBuilder`, the process is behind `ProcessRunning`.
 /// One run at a time; settings and state are the only things it persists.
-@MainActor
+@MainActor @Observable
 public final class SupervisorRunner {
     public private(set) var settings: SupervisorSettings
     public private(set) var state: SupervisorState
     public private(set) var isRunning = false
     public private(set) var lastResult: EvaluationResult?
+    /// Where `claude` was last found, or why not. Refreshed by `refreshClaude()` and on every run.
+    public private(set) var claude: Result<ClaudeLocation, ClaudeNotFound>?
 
+    @ObservationIgnored private let claudeResolver: (@Sendable (String?) async -> Result<ClaudeLocation, ClaudeNotFound>)?
     private let source: SupervisorSnapshotSource
     private let process: ProcessRunning
     private let paths: SupervisorPaths
@@ -33,9 +37,11 @@ public final class SupervisorRunner {
 
     public init(
         directory: URL, source: SupervisorSnapshotSource, process: ProcessRunning,
-        paths: SupervisorPaths, now: @escaping @Sendable () -> Date = { Date() },
-        calendar: Calendar = .current
+        paths: SupervisorPaths,
+        claudeResolver: (@Sendable (String?) async -> Result<ClaudeLocation, ClaudeNotFound>)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }, calendar: Calendar = .current
     ) {
+        self.claudeResolver = claudeResolver
         settingsFile = OwnerOnlyJSONFile(directory: directory, fileName: "supervisor-settings.json")
         stateFile = OwnerOnlyJSONFile(directory: directory, fileName: "supervisor-state.json")
         self.source = source
@@ -77,6 +83,12 @@ public final class SupervisorRunner {
         state = next
     }
 
+    /// Re-resolves the `claude` binary for the panel.
+    public func refreshClaude() async {
+        guard let claudeResolver else { return }
+        claude = await claudeResolver(settings.claudePath)
+    }
+
     // MARK: Evaluation
 
     /// Decides and, if warranted, runs the supervisor once. Never throws: every problem
@@ -116,6 +128,15 @@ public final class SupervisorRunner {
             return .skipped(.nothingNew)
         }
 
+        var paths = self.paths
+        if let claudeResolver {
+            let located = await claudeResolver(settings.claudePath)
+            claude = located
+            switch located {
+            case .success(let location): paths = paths.replacingClaude(location.url)
+            case .failure(let error): return .skipped(.misconfigured(error.message))
+            }
+        }
         for (name, url) in [("claude", paths.claude), ("the supervisor MCP server", paths.mcpServer)]
         where !FileManager.default.isExecutableFile(atPath: url.path) {
             return .skipped(.misconfigured("\(name) was not found at \(url.path)."))

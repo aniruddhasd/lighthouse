@@ -27,6 +27,10 @@ final class AppRuntime {
     /// Orchestrator slice 2 (docs/orchestrator-design.md §12): the app-owned queue of
     /// what the supervisor proposed. Nothing in it is ever sent to a session yet.
     let proposals: ProposalCenter
+    /// Orchestrator slice 4b (docs §14): wakes the supervisor model. In 4b only by hand
+    /// ("Run now" in the Supervisor panel); nothing triggers it automatically yet.
+    let supervisor: SupervisorRunner
+    var supervisorPanelPresented = false
     @ObservationIgnored private var proposalTask: Task<Void, Never>?
     private let hookInstaller: HookInstaller
     @ObservationIgnored private var hookListener: HookEventListener?
@@ -98,6 +102,7 @@ final class AppRuntime {
         self.configDirectory = configDirectory
         hookLog = HookEventLog(sink: HookEventSink(directory: configDirectory))
         proposals = ProposalCenter(directory: configDirectory)
+        supervisor = SupervisorWiring.makeRunner(directory: configDirectory)
         hookInstaller = HookInstaller(git: git)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
@@ -1372,6 +1377,12 @@ extension AppRuntime: ProposalDelivering {
 
     func lastUserInput(taskId: UUID) -> Date? {
         registry.agentController(taskId: taskId)?.lastUserInput
+    }
+
+    /// Wakes the supervisor once, now, on the user's explicit request. The runner records
+    /// the outcome (`supervisor.lastResult`, the run log); proposals arrive through the inbox.
+    func runSupervisorNow() {
+        Task { @MainActor [supervisor] in await supervisor.evaluate(trigger: .manual) }
     }
 
     /// Types WITHOUT a newline: in 3a the user reads the text in place and presses Enter.
