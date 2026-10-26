@@ -27,9 +27,12 @@ final class AppRuntime {
     /// Orchestrator slice 2 (docs/orchestrator-design.md §12): the app-owned queue of
     /// what the supervisor proposed. Nothing in it is ever sent to a session yet.
     let proposals: ProposalCenter
-    /// Orchestrator slice 4b (docs §14): wakes the supervisor model. In 4b only by hand
-    /// ("Run now" in the Supervisor panel); nothing triggers it automatically yet.
+    /// Orchestrator slice 4b/4c (docs §14): wakes the supervisor model — by hand ("Run now" in
+    /// the Supervisor panel) and, if the user switched it on, when a supervised turn ends.
     let supervisor: SupervisorRunner
+    /// Slice 4c: asks the runner to look whenever a supervised task's turn ends (only if the
+    /// user switched automatic runs on; the policy still decides whether anything runs).
+    let supervisorWaker: SupervisorAutoWaker
     var supervisorPanelPresented = false
     @ObservationIgnored private var proposalTask: Task<Void, Never>?
     private let hookInstaller: HookInstaller
@@ -102,7 +105,9 @@ final class AppRuntime {
         self.configDirectory = configDirectory
         hookLog = HookEventLog(sink: HookEventSink(directory: configDirectory))
         proposals = ProposalCenter(directory: configDirectory)
-        supervisor = SupervisorWiring.makeRunner(directory: configDirectory)
+        let supervisor = SupervisorWiring.makeRunner(directory: configDirectory)
+        self.supervisor = supervisor
+        supervisorWaker = SupervisorAutoWaker(runner: supervisor)
         hookInstaller = HookInstaller(git: git)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
@@ -1294,7 +1299,9 @@ final class AppRuntime {
         hookEventTask = Task { @MainActor [weak self] in
             for await event in stream {
                 guard let self else { return }
-                self.hookLog.record(event, tasks: self.model.tasks)
+                // The record is on disk before the waker looks (the run reads the file).
+                let logged = self.hookLog.record(event, tasks: self.model.tasks)
+                self.supervisorWaker.eventRecorded(logged)
             }
         }
         return url

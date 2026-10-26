@@ -54,6 +54,12 @@ struct SupervisorPanel: View {
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Supervisor enabled", isOn: $draft.enabled).toggleStyle(.switch)
+            Toggle("Run automatically when a supervised task finishes a turn", isOn: $draft.automatic)
+                .toggleStyle(.switch)
+                .disabled(!draft.enabled)
+            Text("Off: only Run now wakes it. On: each finished turn of a supervised task can start a run (about $0.02–0.03 each in testing), within the limits below. A failed run is retried only when the next turn ends.")
+                .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                .fixedSize(horizontal: false, vertical: true)
             Text(accountCaption).font(LHFont.metaFaint).foregroundStyle(theme.faint)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -122,7 +128,7 @@ struct SupervisorPanel: View {
                             supervisedCount, supervisedCount == 1 ? "" : "s"))
                     .font(LHFont.metaFaint).foregroundStyle(theme.faint)
             }
-            Text(lastResultText).font(.callout).foregroundStyle(.secondary)
+            Text("Last check: \(lastResultText)").font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text("A run wakes the model once for each supervised task whose last turn has finished and is still current. It can only propose; every send still waits for your confirmation on the task's card.")
                 .font(LHFont.metaFaint).foregroundStyle(theme.faint)
@@ -206,7 +212,8 @@ struct SupervisorPanel: View {
         if runner.loadError != nil { return "unavailable" }
         if runner.state.haltReason != nil { return "halted" }
         if runner.isRunning { return "running" }
-        return runner.settings.enabled ? "on — manual runs only" : "off"
+        guard runner.settings.enabled else { return "off" }
+        return runner.settings.automatic ? "on — automatic" : "on — manual runs only"
     }
 
     private var statusColor: Color {

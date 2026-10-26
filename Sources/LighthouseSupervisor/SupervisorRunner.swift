@@ -14,7 +14,7 @@ public enum EvaluationResult: Equatable, Sendable {
 /// `SupervisorInvocationBuilder`, the process is behind `ProcessRunning`.
 /// One run at a time; settings and state are the only things it persists.
 @MainActor @Observable
-public final class SupervisorRunner {
+public final class SupervisorRunner: SupervisorEvaluating {
     public private(set) var settings: SupervisorSettings
     public private(set) var state: SupervisorState
     public private(set) var isRunning = false
@@ -60,6 +60,10 @@ public final class SupervisorRunner {
         }
         loadError = problems.isEmpty ? nil : problems.joined(separator: " ")
         if let loadError { state.haltReason = loadError }
+    }
+
+    public var automaticEnabled: Bool {
+        loadError == nil && settings.enabled && settings.automatic && state.haltReason == nil
     }
 
     // MARK: Settings (the panel's entry points)

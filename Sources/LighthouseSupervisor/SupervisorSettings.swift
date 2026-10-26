@@ -9,6 +9,9 @@ public struct SupervisorSettings: Codable, Sendable, Equatable {
     public static let instructionLimit = 8_000
 
     public var enabled = false
+    /// Wake the supervisor by itself when a supervised task's turn ends. Off by default and
+    /// separate from `enabled`, so switching the supervisor on never starts spending by itself.
+    public var automatic = false
     /// The user's standing instructions, free text. The only trusted text the model gets.
     public var instructions = ""
     public var model = SupervisorSettings.defaultModel

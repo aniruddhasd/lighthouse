@@ -256,7 +256,8 @@ struct HarborView: View {
     /// Opens the Supervisor panel; its label says whether the supervisor is on or halted.
     private var supervisorButton: some View {
         let runner = runtime.supervisor
-        let state = runner.state.haltReason != nil ? "halted" : (runner.settings.enabled ? "on" : "off")
+        let state = runner.state.haltReason != nil ? "halted"
+            : (runner.settings.enabled ? (runner.settings.automatic ? "auto" : "on") : "off")
         return Button { runtime.supervisorPanelPresented = true } label: {
             HStack(spacing: 5) {
                 Image(systemName: "binoculars")

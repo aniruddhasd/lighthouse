@@ -13,6 +13,8 @@ public struct PendingTurn: Equatable, Sendable {
 
 public enum SkipReason: Equatable, Sendable {
     case disabled
+    /// An automatic trigger while automatic runs are off (a manual run is unaffected).
+    case automaticOff
     case halted(String)
     case invalidSettings([String])
     case noInstructions
@@ -30,6 +32,7 @@ extension SkipReason {
     public var explanation: String {
         switch self {
         case .disabled: return "The supervisor is off."
+        case .automaticOff: return "Automatic runs are off; use Run now, or switch them on."
         case .halted(let why): return "Halted: \(why)"
         case .invalidSettings(let problems): return "Fix the settings first: \(problems.joined(separator: " "))"
         case .noInstructions: return "Write standing instructions first."
@@ -60,6 +63,7 @@ public enum WakePolicy {
         tasks: [TaskRecord], events: [LoggedHookEvent], now: Date, calendar: Calendar = .current
     ) -> WakeDecision {
         guard settings.enabled else { return .skip(.disabled) }
+        if trigger == .automatic && !settings.automatic { return .skip(.automaticOff) }
         if let halt = state.haltReason { return .skip(.halted(halt)) }
         let problems = settings.problems
         if !problems.isEmpty { return .skip(.invalidSettings(problems)) }

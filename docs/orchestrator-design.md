@@ -1003,3 +1003,54 @@ Manual runbook (scratch task, a few cents)
    task's card within ~2 s; "Review & send…" shows "Triggered by the finished turn of …".
 6. Try failure modes: a wrong binary path (expect the error and no run); a daily cap of $0.10
    with a $0.25 run budget (expect "Daily cap is below the per-run budget" and Save disabled).
+
+### 4c as built (2026-10-26) — automatic waking
+
+Decisions taken with the user: automatic runs get their **own switch, off by default**
+(enabling the supervisor never starts spending by itself); the existing limits stay (20
+runs/hour, $5/day, halt after 3 failures); a turn that never ends (Esc, an unanswered
+questionnaire) is **not** handled in 4c — watch real use first.
+
+- `SupervisorSettings.automatic` and `SkipReason.automaticOff`: the policy refuses an
+  automatic trigger while it is off; a manual run is unaffected.
+- `SupervisorAutoWaker` (library; `SupervisorEvaluating` protocol so it is tested without a
+  process). It owns no policy — only WHEN to ask. A primary `Stop`/`StopFailure` (no
+  `agent_id`) starts a round; other events, subagent events, other sessions and unattributed
+  events never do. A burst is one evaluation (a `dirty` flag, one loop); a turn that ends
+  during a run gets exactly one follow-up check and evaluations never overlap; a debounce skip
+  is waited out (`until − now + 0.05 s`) and retried, at most 20 times per round; any other
+  skip ends the round without sleeping; a run is **never repeated without a new event**, so a
+  failed run waits for the next turn end (the policy's one-retry-per-turn applies then).
+- `AppRuntime` calls `waker.eventRecorded` right after `hookLog.record` — the event is on disk
+  by then, and the evaluation reads the file. The panel has the switch (disabled unless the
+  supervisor is enabled), Harbor's button reads `Supervisor auto`, and the panel's status line
+  says "Last check: …" with the skip reason in words.
+
+Verified
+- 13 waker tests (what never triggers, automatic off/halted, burst = one run, follow-up during
+  a run = exactly one with no overlap, no repeat without a new event, debounce wait duration,
+  bounded debounce loop and a fresh round afterwards, other skips don't sleep, switching
+  automatic off mid-loop stops it) + 2 policy tests + **2 end-to-end tests with the real runner,
+  the persisted event log and a fake process:** a finished turn runs once, the trailing helper
+  `SubagentStop` doesn't run it again, a later turn does; automatic off never runs while Run
+  now still does.
+- Mutation checks: removing the single-loop guard, the debounce cap, the turn-end filter and the
+  policy's automatic check each fail tests. **The first version of the coalescing test let the
+  single-loop mutation survive** (it counted evaluations but not overlap, and the dirty flag
+  alone hid the difference); it now also asserts no two evaluations overlap.
+
+Not verified
+- Automatic runs in the real app with real sessions (needs the manual test below).
+- Mac sleep/wake and long-running sessions; app restart mid-round (the watermark is persisted,
+  an in-flight round is not).
+- Cost over a day of real use: the daily cap is in list-price terms; whether runs draw on plan
+  limits or paid usage was not checked.
+
+Manual test (two scratch tasks A and B, supervision on, supervisor enabled with instructions
+such as "When A finishes, tell B to review")
+1. In the panel switch **Run automatically…** on, **Save**; Harbor's button reads `Supervisor auto`.
+2. In A send `reply with the single word done`. Within ~10–30 s of its `Stop` a run appears in
+   the panel's log (trigger `automatic`) and a proposal on B's card.
+3. Send A another message and let it finish: a second run. Do nothing for a minute: no run.
+4. Send A three short messages in a row, quickly: expect one or two runs, not three.
+5. Switch automatic off, finish another turn in A: no run; **Run now** still works.

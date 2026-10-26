@@ -14,6 +14,7 @@ struct WakePolicyTests {
     private var enabled: SupervisorSettings {
         var s = SupervisorSettings()
         s.enabled = true
+        s.automatic = true
         s.instructions = "when a finishes, tell b to start"
         return s
     }

@@ -76,7 +76,7 @@ struct SupervisorRunnerTests {
             directory: d, source: source, process: process, paths: paths(d, claude: claude),
             now: { clock.now }, calendar: Calendar(identifier: .gregorian))
         var s = SupervisorSettings()
-        s.enabled = enabled; s.instructions = "when a finishes tell b"; s.debounceSeconds = 0
+        s.enabled = enabled; s.automatic = true; s.instructions = "when a finishes tell b"; s.debounceSeconds = 0
         tweak(&s)
         try runner.update(s)
         return runner
@@ -272,7 +272,7 @@ struct SupervisorRunnerTests {
         _ = await r.evaluate(trigger: .automatic)
         src.events.append(stop(after: 100)); clock.advance(200)
         _ = await r.evaluate(trigger: .automatic)
-        #expect(p.calls.count == 2)
+        try #require(p.calls.count == 2)
         #expect(p.calls[1].stdin.contains("told b to start"))
     }
 }
