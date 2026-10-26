@@ -1303,6 +1303,10 @@ final class AppRuntime {
             while !Task.isCancelled {
                 guard let self else { return }
                 self.proposals.drain(tasks: self.model.tasks)
+                // Retire sends the agent has moved past, so a stale suggestion can't sit
+                // there looking actionable.
+                self.proposals.expireStale(
+                    tasks: self.model.tasks, eventsFor: { self.hookLog.events(for: $0) })
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -1353,3 +1357,41 @@ struct WorkspaceRemovalRequest: Identifiable, Equatable {
     let repoName: String
     var id: String { "\(task.id.uuidString):\(repoId.uuidString)" }
 }
+
+// MARK: - Proposal delivery (orchestrator slice 3a)
+
+extension AppRuntime: ProposalDelivering {
+    func terminalRunning(taskId: UUID) -> Bool {
+        registry.agentController(taskId: taskId)?.isRunning ?? false
+    }
+
+    /// nil when the foreground process could not be read (treated as "unknown").
+    func claudeIsForeground(taskId: UUID) -> Bool? {
+        ForegroundProbe.isClaude(name: registry.agentController(taskId: taskId)?.foregroundProcessName())
+    }
+
+    func lastUserInput(taskId: UUID) -> Date? {
+        registry.agentController(taskId: taskId)?.lastUserInput
+    }
+
+    /// Types WITHOUT a newline: in 3a the user reads the text in place and presses Enter.
+    func typeInto(taskId: UUID, text: String) -> Bool {
+        registry.typeIntoSession(taskId: taskId, text: text)
+    }
+
+    /// The gate's live verdict for the review sheet.
+    func deliveryVerdict(for proposal: Proposal, task: TaskRecord) -> GateResult? {
+        proposals.evaluate(proposal.id, task: task, events: hookLog.events(for: task.id), delivery: self)
+    }
+
+    /// Confirms a send. On success the user is taken to that task's terminal, where the
+    /// text now sits in the prompt box waiting for them to review it and press Enter.
+    @discardableResult
+    func confirmProposal(_ proposal: Proposal, task: TaskRecord) -> ConfirmOutcome {
+        let outcome = proposals.confirm(
+            proposal.id, task: task, events: hookLog.events(for: task.id), delivery: self)
+        if outcome == .sent { open(task.id) }
+        return outcome
+    }
+}
+

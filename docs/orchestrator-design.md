@@ -444,3 +444,173 @@ Not covered
 - Staleness expiry, a Harbor-level pending badge, and the "don't quote the agent
   verbatim" check remain unbuilt.
 
+## 13. Slice 3 — confirmed delivery (3a built 2026-10-23; 3b not built)
+
+Scope: the **only** place anything reaches a live session. A user reviews a pending
+`send` proposal and confirms; Lighthouse re-checks the world at that instant, marks the
+proposal sent, and types the text into the task's agent terminal. `hold` and `ask_user`
+have no delivery — they are notes the user acknowledges (Dismiss).
+
+### What the code does today (read, not assumed)
+- `SessionRegistry.typeIntoSession(taskId:text:)` types text into the task's **agent
+  tab** with **no trailing newline**, returning false if the pty isn't running. It has
+  **no current callers** (its "Ask Claude to resolve" use was removed with merge-to-base).
+- The agent tab is a **persistent login shell** with `claude` typed into it. When Claude
+  exits, the tab is a plain zsh prompt. Text typed then is not a message to an agent — it
+  is shell input, and with a newline it would be *executed*.
+- `LocalProcessTerminalView.send(source:data:)` is `open` and is the user-input path, so
+  the user's own keystrokes can be observed by overriding it; `LocalProcess.shellPid` is
+  public, so "what is running under this tab" is answerable.
+
+### Recommendation: deliver in two stages
+**3a — type, don't submit.** Confirm types the text into Claude's prompt box and takes the
+user to that task's terminal; the user reads it in place and presses Enter. Same posture as
+the old "Ask Claude to resolve" hatch. **3b — submit** (typing plus Enter, optionally
+auto-confirm for trusted patterns) comes only after 3a has produced evidence that typing
+into Claude's TUI is reliable — and, because Enter into the wrong place *runs* things, only
+with the foreground-process guard below. Reasons to start at 3a:
+- Claude's prompt box may already hold a half-typed draft; appended text is invisible to
+  us (no hook reports the box's contents). Without Enter the user sees the result.
+- Claude Code's TUI gives some leading characters meaning (`/` commands, `!` shell mode,
+  `#`, `@` references — **from memory; verify against the current docs before relying on
+  any list**). A menu open from `@` can also swallow Enter.
+- A permission prompt or questionnaire treats typed text as an answer.
+
+### The delivery gate (pure function, fail closed)
+`DeliveryGate.check(proposal, events, session, now) -> allowed | [refusals]`, re-run at the
+moment of the click — never trusted from when the sheet opened (time-of-check/time-of-use).
+Every condition must hold; an unknown state refuses:
+1. **Fresh.** No *material* primary-session event after `basedOn` — material = any event
+   with no `agent_id` other than `Notification`: `UserPromptSubmit`, `PermissionRequest`,
+   `PostToolUse`, `Stop`, `StopFailure`, `SessionStart`, `SessionEnd`. (`SubagentStop`
+   helper output always trails a `Stop` and does not count.) Otherwise the proposal is
+   **expired**, not merely refused.
+2. **Idle.** The latest material primary event is a `Stop`/`StopFailure`/`SessionStart`
+   — not `UserPromptSubmit` (mid-turn) and not a dangling `PermissionRequest` (an
+   Esc-interrupted questionnaire emits nothing, so this is also "unknown"; refuse).
+3. **Claude is the foreground process of that tab**, not a shell prompt: no `SessionEnd`
+   since, and the tab has a `claude` child process (via `shellPid`; **feasibility unverified**).
+   Required for 3b; for 3a a shell prompt would only receive visible, unsubmitted text, so
+   it is a warning there.
+4. **User not mid-keystroke.** No user input to that terminal in the last ~10 s.
+5. **Text re-validated** with `ProposalValidator` at send time (the queue file is
+   same-user-writable) plus a **first-character allowlist** (letter or digit): deny by
+   default for any prefix the TUI might treat as a command. *(New validation rule; the
+   slice-2 validator doesn't have it yet.)*
+6. **Rate breaker.** At most 6 deliveries per task per hour (tunable); beyond that the
+   user is told and nothing is typed.
+7. The task is still **supervised** and the proposal still **pending**.
+
+### State machine and at-most-once
+`pending → sent | dismissed | expired | failed`, plus the existing `rejected`. On confirm:
+re-run the gate → **persist `sent` (with `resolvedAt`) first** → type. If the save fails,
+nothing is typed. If typing then reports failure, the entry becomes `failed` with a reason
+(re-proposing is the retry). So a crash can never type the same message twice; the cost is
+that a crash between save and type reads as sent when it wasn't — at-most-once is the
+chosen failure side. Expiry runs on the same 2 s tick as the inbox drain and also fires when
+the session ends.
+
+### UI
+A "Review & send…" button on a pending `send` row opens a sheet (not an inline button, so
+nothing is one stray click): the **exact text** in monospace with whitespace made visible,
+the task, the supervisor's reason, **the agent message it was based on** (full, untrusted,
+inert), and a live checklist of the gate conditions. **Send** enables only when all pass,
+and the gate runs again on click. The row's status and the supervisor's own
+`list_proposals` show the outcome (`sent`/`expired`/`failed` + why).
+
+### Interfaces (so it is testable)
+Pure in `LighthouseSupervisor`: `DeliveryGate`, the new statuses and transitions,
+`ProposalCenter.confirm(id, …)`. The app implements a small `ProposalDelivering` protocol
+(`typeInto(taskId:text:) -> Bool`, `foregroundIsClaude(taskId:)`, `lastUserInput(taskId:)`)
+over `SessionRegistry`; tests use a fake, so every refusal path is unit-tested without a pty.
+
+### How it will be tested
+- **Gate**: a table test over (last-event sequence × session state × keystroke age × rate)
+  including the failure sequences seen live (Esc-interrupt leaving a `PermissionRequest`;
+  mid-turn `UserPromptSubmit`; `SessionEnd` then nothing; subagent helper after `Stop`).
+- **State machine**: save-then-type ordering with a failing save, a failing type, a crash
+  point between them; double-confirm; confirm after expiry/dismiss.
+- **Validator**: first-character allowlist (every non-alphanumeric ASCII start, emoji, quote).
+- **Typing fidelity**: a real pty running `cat`, asserting the exact bytes arrive (no
+  escapes added, nothing submitted) — extends the existing pty tests.
+- **Not automatable here**: how Claude's TUI reacts to typed text (drafts, `@` menus,
+  placeholder suggestion). That needs a short manual runbook on a scratch task before 3b.
+
+### Threats
+- *Injection steering the supervisor into a harmful send*: slice 2's validation, the
+  first-character allowlist, a human reading the exact text next to the agent message it
+  came from, and 3a not submitting.
+- *Typing into the wrong place* (shell prompt, questionnaire, user's draft): gate 2–4.
+- *Stale advice acted on after the world moved*: gate 1, re-checked at click time.
+- *Replay / double send*: at-most-once ordering and the `pending` precondition.
+- *Runaway*: rate breaker; a human click per send.
+
+### Still missing after slice 3 (the roadmap to the original goal)
+- **Slice 4 — the supervisor itself.** Nothing launches a supervisor. Standing instructions
+  ("when A finishes X, tell B to do Y"), the wake policy (on `Stop`/`StopFailure` for
+  supervised tasks, not every event), cost ceilings, where it runs (a headless `-p` loop
+  fits better than a pty tile) and how the user edits instructions are all unbuilt. Until
+  then the supervisor is started by hand with `--mcp-config`.
+- **`ask_user` answers** have no route back to the supervisor.
+- Bundling `lighthouse-supervisor-mcp` into `Lighthouse.app`.
+
+### Decisions for the user
+1. 3a (type only) first, 3b later — as recommended — or go straight to submit?
+2. The idle window for "user mid-keystroke" (10 s) and the rate breaker (6/hour/task).
+3. Whether slice 4 (the supervisor runner) should come before 3b, since a way to run the
+   supervisor is what makes any of this useful day to day.
+
+### 3a as built (2026-10-23)
+
+Decisions taken with the user: **3a first, then slice 4, then 3b**; idle window 10 s and
+rate breaker 6/hour/task accepted.
+
+Code
+- `LighthouseSupervisor`: `DeliveryGate` (pure; `userIdleWindow`, `maxPerHour`,
+  `requireClaudeForeground` for 3b), new statuses `sent`/`expired`/`failed` with
+  `resolvedAt`/`resolutionNote` (old queue files still decode), `ProposalQueue`
+  transitions (`markSent` succeeds once only), `ProposalCenter.confirm` / `evaluate` /
+  `expireStale` / `recentResolved`, the `ProposalDelivering` protocol, and the
+  first-character allowlist (a `send` must start with a letter or digit) in
+  `ProposalValidator`, now shared via `validateContent` so the gate re-runs it.
+- App: `ForegroundProbe` (`tcgetpgrp` on the pty master + `proc_name`), an `NSEvent`
+  key-monitor on `TerminalController` for the user's own keystrokes (so text we type
+  never counts as the user), `AppRuntime: ProposalDelivering`, an expiry pass on the
+  2 s tick, and `ReviewSendSheet` ("Review & send…" on a pending send).
+- Confirm = re-run the gate → save `sent` → type (no newline) → navigate to the task.
+  The supervisor sees outcomes in `list_proposals` (`sent`/`expired`/`failed` + note).
+
+Deviations from the design above
+- **Gate 2 (idle) is subsumed by gate 1 (fresh).** Freshness is order-based: find the
+  `Stop`/`StopFailure` that `based_on` names (matched by whole second, since the stored
+  time has no fraction) and refuse if ANY material primary event follows it. "The latest
+  material event is a Stop" is then implied, including the Esc-interrupt case (the
+  dangling `PermissionRequest` is a newer material event). A turn the log can't find is
+  **refused, not expired** ("unknown" is not "stale").
+- The Claude-foreground check is implemented and is a *warning* in 3a, a refusal for 3b.
+
+Verified
+- 117 supervisor tests (the live test is gated and not counted): gate table over the sequences seen live (helper
+  `SubagentStop` trails a `Stop` and must not count; a newer prompt, dangling
+  `PermissionRequest`, `SessionEnd`/`SessionStart` after the turn, a later `Stop`; other
+  sessions, subagents and notifications must not count; same-second ordering); typing
+  window incl. a *future* timestamp; rate breaker at the 7th; text revalidation;
+  allowlist over 19 forbidden starts incl. emoji and leading whitespace.
+- **At-most-once, observed on disk:** the test reads `proposals.json` from inside the
+  typing callback and sees `sent`. A failed save (chmod-induced) types nothing and keeps
+  the proposal pending; a failed type leaves `failed`, not `sent`; a second confirm never
+  types again; a corrupt queue delivers nothing; expiry only retires *proven* overtakes.
+- **Real pty:** the probe reads `sleep` while a command runs and the shell after Ctrl-C
+  (on macOS `/bin/sh` reports as `bash`); `typeIntoSession` delivers the exact bytes,
+  including UTF-8, with no `\n`/`\r` — checked with the pty in raw mode.
+
+Not covered (be honest about these)
+- **How Claude's TUI reacts to typed text** (a half-typed draft, an `@` menu, the
+  next-prompt placeholder, special leading characters) — not testable here; needs the manual
+  runbook on a scratch task before 3b. The allowlist is a guard, not a verified model of the TUI.
+- **The key monitor and the review sheet were built but not exercised by a person**
+  (the app was not launched); the monitor needs a real window and keyboard.
+- The foreground check on a *real* `claude` process: only `sleep`/shell were observed;
+  that Claude shows as `claude` comes from a `ps` listing, not from this probe.
+- Nothing launches a supervisor yet (slice 4); `ask_user`/`hold` are still just notes.
+

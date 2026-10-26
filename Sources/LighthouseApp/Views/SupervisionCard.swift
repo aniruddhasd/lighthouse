@@ -20,6 +20,8 @@ struct SupervisionCard: View {
     /// Rows whose full message is open. A long `Stop` can hold its question deep
     /// in the text (a 2,486-char one was seen), so the preview can't be the only view.
     @State private var expanded: Set<UUID> = []
+    /// The send proposal open in the review sheet.
+    @State private var reviewing: Proposal?
     /// Roughly three lines of the card's width; longer messages get a toggle.
     private let previewChars = 200
 
@@ -72,6 +74,9 @@ struct SupervisionCard: View {
         .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card)
             .strokeBorder(theme.border, lineWidth: 1))
+        .sheet(item: $reviewing) { proposal in
+            ReviewSendSheet(task: current, proposalId: proposal.id)
+        }
     }
 
     // MARK: Proposals (slice 2) — what the supervisor suggested. Nothing here has been
@@ -81,15 +86,17 @@ struct SupervisionCard: View {
         let center = runtime.proposals
         let pending = center.pending(for: task.id)
         let rejected = center.recentRejected(for: task.id)
+        let resolved = center.recentResolved(for: task.id)
         if let error = center.loadError ?? center.persistenceError {
             Text(error).font(LHFont.metaFaint).foregroundStyle(theme.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if !pending.isEmpty || !rejected.isEmpty {
+        if !pending.isEmpty || !rejected.isEmpty || !resolved.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text("SUPERVISOR PROPOSALS — NOT SENT")
+                Text("SUPERVISOR PROPOSALS")
                     .font(LHFont.metaFaint).foregroundStyle(theme.faint)
                 ForEach(pending) { proposalRow($0) }
+                ForEach(resolved) { resolvedRow($0) }
                 ForEach(rejected) { rejectedRow($0) }
             }
             .padding(.vertical, 4)
@@ -101,8 +108,12 @@ struct SupervisionCard: View {
             HStack(spacing: 8) {
                 Text(kindLabel(p.kind)).font(LHFont.mono(12, .medium)).foregroundStyle(theme.text)
                 Spacer()
+                if p.kind == .send {
+                    Button("Review & send…") { reviewing = p }
+                        .buttonStyle(.plain).font(LHFont.metaFaint).foregroundStyle(theme.primary)
+                }
                 Button("Dismiss") { runtime.proposals.dismiss(p.id) }
-                    .buttonStyle(.plain).font(LHFont.metaFaint).foregroundStyle(theme.primary)
+                    .buttonStyle(.plain).font(LHFont.metaFaint).foregroundStyle(theme.dim)
             }
             // Supervisor-written text: rendered inert, never interpreted.
             Text(p.text).font(LHFont.secondary).foregroundStyle(theme.text)
@@ -112,6 +123,18 @@ struct SupervisionCard: View {
         }
         .padding(8)
         .background(theme.bg, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func resolvedRow(_ p: Proposal) -> some View {
+        let verb: String
+        switch p.status {
+        case .sent: verb = "typed into the terminal — awaiting your Enter"
+        case .expired: verb = "expired — \(p.resolutionNote ?? "overtaken by events")"
+        default: verb = "not delivered — \(p.resolutionNote ?? "failed")"
+        }
+        return Text("\(p.status.rawValue): “\(p.text.prefix(60))” — \(verb)")
+            .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func rejectedRow(_ p: Proposal) -> some View {

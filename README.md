@@ -86,8 +86,9 @@ drives it.
   orchestrator's tool surface: an MCP server (`lighthouse-supervisor-mcp`) with three
   read tools over supervised tasks (`list_tasks`, `recent_events`, `last_turn`) and
   proposal tools (`propose_send`, `hold`, `ask_user`, `list_proposals`) that can only
-  queue a validated suggestion in an inbox; the app owns the queue and nothing is sent
-  to any session yet. See `docs/orchestrator-design.md` §11–§12.
+  queue a validated suggestion in an inbox; the app owns the queue. A send proposal
+  reaches a session only when you review it and confirm: it is typed into Claude's
+  prompt box (not submitted) after a gate re-checks that the agent hasn't moved on. See `docs/orchestrator-design.md` §11–§13.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway git
   repositories with known state. Never touches global git config or the network.
   A separate target so fixtures can never ship inside an app target.

@@ -12,7 +12,18 @@ public enum ProposalKind: String, Codable, Sendable, Equatable {
 }
 
 public enum ProposalStatus: String, Codable, Sendable, Equatable {
-    case pending, dismissed, rejected
+    case pending
+    /// The user dismissed it.
+    case dismissed
+    /// The app refused it at submission (see `rejectionReason`).
+    case rejected
+    /// A `send` was confirmed and typed into the session (saved BEFORE typing, so a
+    /// crash can never type it twice).
+    case sent
+    /// Overtaken by events (a newer prompt, the session ended, …) before it was acted on.
+    case expired
+    /// Confirmed, but delivery did not happen (`resolutionNote` says why).
+    case failed
 }
 
 /// What the supervisor submits. Untrusted input: it crosses a process boundary and
@@ -52,6 +63,10 @@ public struct Proposal: Codable, Equatable, Identifiable, Sendable {
     public let createdAt: Date
     public var status: ProposalStatus
     public let rejectionReason: String?
+    /// When it left `pending` (sent / dismissed / expired / failed).
+    public var resolvedAt: Date? = nil
+    /// Why it expired or failed.
+    public var resolutionNote: String? = nil
 }
 
 public struct ProposalRejection: Error, Equatable, Sendable {
@@ -72,7 +87,12 @@ public enum ProposalValidator {
 
     public static func validate(_ draft: ProposalDraft, tasks: [TaskRecord]) throws -> ValidatedProposal {
         let task = try TaskLookup.resolve(draft.task, in: tasks)
+        return ValidatedProposal(taskId: task.id, draft: try validateContent(draft))
+    }
 
+    /// Everything about a draft that does not depend on which task it names. Also run
+    /// again at delivery time (`DeliveryGate`), because the queue file is same-user-writable.
+    public static func validateContent(_ draft: ProposalDraft) throws -> ProposalDraft {
         // Control characters are checked on the RAW strings, before any trimming. A
         // `send` is eventually typed into a pty, where \n submits, ESC opens escape
         // sequences and ^C/^D interrupt or exit; a trailing newline trimmed away here
@@ -92,13 +112,21 @@ public enum ProposalValidator {
         guard reason.count <= maxReasonChars else {
             throw ProposalRejection(reason: "The reason is longer than \(maxReasonChars) characters.")
         }
-        if draft.kind == .send, draft.basedOn == nil {
-            throw ProposalRejection(reason: "A send proposal must say which turn it is based on (based_on).")
+        if draft.kind == .send {
+            if draft.basedOn == nil {
+                throw ProposalRejection(reason: "A send proposal must say which turn it is based on (based_on).")
+            }
+            // Deny by default: the agent's prompt box treats some leading characters as
+            // commands (slash commands, shell mode, …) and the exact list is not
+            // something to rely on from memory. Only a letter or digit may start a send.
+            if let first = text.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first) {
+                throw ProposalRejection(reason: "A send must start with a letter or digit (the agent's prompt treats other leading characters as commands).")
+            }
         }
         var clean = draft
         clean.text = text
         clean.reason = reason
-        return ValidatedProposal(taskId: task.id, draft: clean)
+        return clean
     }
 
     /// Control characters (Cc: includes \n \r \t ESC DEL and the C1 range) plus the

@@ -69,10 +69,43 @@ public struct ProposalQueue: Codable, Equatable, Sendable {
 
     /// Pending → dismissed. False for an unknown id or one that is not pending.
     @discardableResult
-    public mutating func dismiss(_ id: UUID) -> Bool {
-        guard let index = entries.firstIndex(where: { $0.id == id && $0.status == .pending })
+    public mutating func dismiss(_ id: UUID, now: Date = Date()) -> Bool {
+        resolve(id, from: [.pending], to: .dismissed, note: nil, now: now)
+    }
+
+    /// Pending → sent. The caller PERSISTS this before typing anything: a second call
+    /// returns false, which is what makes delivery at-most-once.
+    @discardableResult
+    public mutating func markSent(_ id: UUID, now: Date) -> Bool {
+        resolve(id, from: [.pending], to: .sent, note: nil, now: now)
+    }
+
+    /// Pending → expired (overtaken by events).
+    @discardableResult
+    public mutating func expire(_ id: UUID, reason: String, now: Date) -> Bool {
+        resolve(id, from: [.pending], to: .expired, note: reason, now: now)
+    }
+
+    /// Sent (or pending) → failed: delivery was confirmed but did not happen.
+    @discardableResult
+    public mutating func markFailed(_ id: UUID, reason: String, now: Date) -> Bool {
+        resolve(id, from: [.sent, .pending], to: .failed, note: reason, now: now)
+    }
+
+    /// Deliveries that actually went out for a task since `date` (failed ones typed
+    /// nothing and do not count) — the input to the per-hour rate breaker.
+    public func sentCount(for taskId: UUID, since date: Date) -> Int {
+        entries.filter { $0.taskId == taskId && $0.status == .sent && ($0.resolvedAt ?? .distantPast) >= date }.count
+    }
+
+    private mutating func resolve(
+        _ id: UUID, from: Set<ProposalStatus>, to: ProposalStatus, note: String?, now: Date
+    ) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == id && from.contains($0.status) })
         else { return false }
-        entries[index].status = .dismissed
+        entries[index].status = to
+        entries[index].resolvedAt = now
+        entries[index].resolutionNote = note.map(Self.clipped)
         return true
     }
 

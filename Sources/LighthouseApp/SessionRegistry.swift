@@ -137,6 +137,11 @@ final class TerminalController: NSObject {
     /// (the shell outlives Claude).
     var onExit: (@MainActor (TabKey, Int32?) -> Void)?
     private var pendingCommand: String?
+    /// When the USER last pressed a key while this terminal had focus. Tracked with a
+    /// key-event monitor — not through the pty — so text WE type programmatically never
+    /// counts as the user typing. Feeds the delivery gate's "don't type over the user".
+    private(set) var lastUserInput: Date?
+    private var keyMonitor: Any?
 
     init(key: TabKey, fontSize: CGFloat = TerminalFont.defaultSize) {
         self.key = key
@@ -185,6 +190,7 @@ final class TerminalController: NSObject {
             base: ProcessInfo.processInfo.environment, overrides: plan.environment)
 
         isRunning = true
+        installKeyMonitor()
         terminalView.startProcess(
             executable: plan.executable,
             args: plan.arguments,
@@ -209,7 +215,29 @@ final class TerminalController: NSObject {
         terminalView.send(txt: text)
     }
 
+    /// What is in the foreground of this terminal right now (e.g. "claude", "zsh").
+    func foregroundProcessName() -> String? {
+        ForegroundProbe.foregroundProcessName(masterFD: terminalView.process.childfd)
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if let self, let window = self.terminalView.window, window.isKeyWindow,
+               window.firstResponder === self.terminalView {
+                self.lastUserInput = Date()
+            }
+            return event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+    }
+
     func terminateIfRunning() {
+        removeKeyMonitor()
         guard isRunning else { return }
         isRunning = false
         terminalView.process.terminate()
@@ -225,6 +253,7 @@ extension TerminalController: LocalProcessTerminalViewDelegate {
         Task { @MainActor in
             guard self.isRunning else { return }
             self.isRunning = false
+            self.removeKeyMonitor()
             self.onExit?(self.key, exitCode)
         }
     }

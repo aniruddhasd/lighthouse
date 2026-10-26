@@ -75,6 +75,30 @@ struct ProposalValidatorTests {
         #expect(v.taskId == t.id && v.draft.text == "go ahead" && v.draft.reason == "ok")
     }
 
+    // The agent's prompt box gives some leading characters meaning (slash commands, shell
+    // mode, …), and the exact list isn't something we should rely on from memory. So a
+    // `send` is deny-by-default: it must START with a letter or digit.
+    @Test(arguments: ["!ls", "/clear", "#note", "@file", "-x", "$HOME", "\"quoted\"", "'x'", "(x)",
+                      "[x]", "\\n", "?", "👍 ok", "…and then", "*bold*", "> quote", "~/x", "| pipe", "; ls"])
+    func aSendMustStartWithALetterOrDigit(_ text: String) {
+        #expect(reason(draft(.send, text: text)) != nil, "\(text.debugDescription) must be rejected")
+    }
+
+    @Test func leadingWhitespaceDoesNotHideAForbiddenFirstCharacter() {
+        #expect(reason(draft(.send, text: "   /clear")) != nil)
+        #expect(reason(draft(.send, text: "  go ahead")) == nil, "trimmed text starts with a letter")
+    }
+
+    @Test(arguments: ["Rebase onto develop", "9 failing tests remain", "café ✓ — retry", "日本語 step"])
+    func lettersAndDigitsStartAnyScript(_ text: String) {
+        #expect(reason(draft(.send, text: text)) == nil)
+    }
+
+    @Test func holdAndAskUserTextIsNeverTypedSoItMayStartWithAnything() {
+        #expect(reason(draft(.hold, text: "! VPN is down")) == nil)
+        #expect(reason(draft(.askUser, text: "/clear or keep?")) == nil)
+    }
+
     @Test func ordinaryUnicodeIsAllowed() {
         #expect(reason(draft(text: "café ✓ — retry the 日本語 step 👍")) == nil)
     }
@@ -251,5 +275,81 @@ struct ProposalStoreTests {
         #expect(try store.load() == q)
         let perm = try #require((try FileManager.default.attributesOfItem(atPath: store.url.path))[.posixPermissions] as? NSNumber)
         #expect(perm.uint16Value & 0o777 == 0o600)
+    }
+}
+
+// MARK: - Resolution states (slice 3a)
+
+@Suite("ProposalQueue resolution")
+struct ProposalQueueResolutionTests {
+    private let now = Date(timeIntervalSince1970: 5_000)
+    private let a = task("a")
+
+    private func pending(_ q: inout ProposalQueue, _ text: String = "go on") -> Proposal {
+        q.ingest(draft(text: text), tasks: [a], now: now)
+    }
+
+    @Test func markSentWorksOnlyOnPendingAndStampsTheTime() {
+        var q = ProposalQueue()
+        let p = pending(&q)
+        let ok = q.markSent(p.id, now: now.addingTimeInterval(3))
+        #expect(ok)
+        #expect(q.entries[0].status == .sent && q.entries[0].resolvedAt == now.addingTimeInterval(3))
+        let again = q.markSent(p.id, now: now), unknown = q.markSent(UUID(), now: now)
+        #expect(!again && !unknown, "at-most-once: a second confirm must not succeed")
+    }
+
+    @Test func dismissedAndExpiredCannotBeSent() {
+        var q = ProposalQueue()
+        let a1 = pending(&q, "one"), a2 = pending(&q, "two")
+        _ = q.dismiss(a1.id, now: now)
+        let expired = q.expire(a2.id, reason: "newer activity", now: now)
+        #expect(expired)
+        let s1 = q.markSent(a1.id, now: now), s2 = q.markSent(a2.id, now: now)
+        #expect(!s1 && !s2)
+        #expect(q.entries[1].status == .expired && q.entries[1].resolutionNote == "newer activity")
+    }
+
+    @Test func aSentEntryCanBecomeFailedButAPendingOneCanToo() {
+        var q = ProposalQueue()
+        let p = pending(&q)
+        _ = q.markSent(p.id, now: now)
+        let failed = q.markFailed(p.id, reason: "session not running", now: now)
+        #expect(failed)
+        #expect(q.entries[0].status == .failed && q.entries[0].resolutionNote == "session not running")
+        let again = q.markFailed(p.id, reason: "x", now: now)
+        #expect(!again, "a terminal state does not change again")
+    }
+
+    @Test func sentCountOnlyCountsRecentSendsForThatTask() {
+        var q = ProposalQueue()
+        let other = task("b")
+        let p1 = pending(&q, "one"), p2 = pending(&q, "two")
+        let o = q.ingest(draft(task: "b", text: "other"), tasks: [a, other], now: now)
+        _ = q.markSent(p1.id, now: now.addingTimeInterval(-7_200))     // 2 h ago
+        _ = q.markSent(p2.id, now: now.addingTimeInterval(-60))
+        _ = q.markSent(o.id, now: now)
+        #expect(q.sentCount(for: a.id, since: now.addingTimeInterval(-3_600)) == 1)
+        #expect(q.sentCount(for: other.id, since: now.addingTimeInterval(-3_600)) == 1)
+    }
+
+    @Test func aFailedDeliveryDoesNotCountTowardsTheRateLimit() {
+        var q = ProposalQueue()
+        let p = pending(&q)
+        _ = q.markSent(p.id, now: now); _ = q.markFailed(p.id, reason: "x", now: now)
+        #expect(q.sentCount(for: a.id, since: now.addingTimeInterval(-3_600)) == 0)
+    }
+
+    @Test func legacyQueueFilesWithoutResolutionFieldsStillDecode() throws {
+        var q = ProposalQueue()
+        _ = pending(&q)
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        var obj = try #require(try JSONSerialization.jsonObject(with: enc.encode(q)) as? [String: Any])
+        var entries = try #require(obj["entries"] as? [[String: Any]])
+        entries[0].removeValue(forKey: "resolvedAt"); entries[0].removeValue(forKey: "resolutionNote")
+        obj["entries"] = entries
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let back = try dec.decode(ProposalQueue.self, from: JSONSerialization.data(withJSONObject: obj))
+        #expect(back.entries.count == 1 && back.entries[0].resolvedAt == nil)
     }
 }

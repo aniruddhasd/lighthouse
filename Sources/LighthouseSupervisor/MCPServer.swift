@@ -134,7 +134,7 @@ public struct MCPServer: Sendable {
         ],
         [
             "name": "list_proposals",
-            "description": "The proposal queue, newest first (max 50): what you proposed, and whether the app accepted it (pending), the user dismissed it, or it was rejected (with the reason). `awaiting_app` counts submissions you queued that the app has not ingested yet — they show up within a couple of seconds, so do not propose them again. Optionally only for one task.",
+            "description": "The proposal queue, newest first (max 50): what you proposed, and whether the app accepted it (pending), the user dismissed it, it was rejected (with the reason), it was sent (typed into the terminal for the user to review), or it expired / failed (with the reason). `awaiting_app` counts submissions you queued that the app has not ingested yet — they show up within a couple of seconds, so do not propose them again. Optionally only for one task.",
             "inputSchema": [
                 "type": "object",
                 "properties": ["task": ["type": "string", "description": "Task id (UUID) or exact name."]],
@@ -245,7 +245,8 @@ public struct MCPServer: Sendable {
             ProposalBrief(
                 id: $0.id.uuidString, kind: $0.kind.rawValue, taskId: $0.taskId?.uuidString,
                 taskRef: $0.taskRef, text: $0.text, reason: $0.reason, status: $0.status.rawValue,
-                rejectionReason: $0.rejectionReason, basedOn: $0.basedOn, createdAt: $0.createdAt)
+                rejectionReason: $0.rejectionReason, basedOn: $0.basedOn, createdAt: $0.createdAt,
+                resolvedAt: $0.resolvedAt, resolutionNote: $0.resolutionNote)
         })
     }
 
@@ -301,6 +302,9 @@ struct ProposalBrief: Codable {
     let rejectionReason: String?
     let basedOn: Date?
     let createdAt: Date
+    /// When it left `pending`, and why it expired or failed.
+    let resolvedAt: Date?
+    let resolutionNote: String?
 }
 
 struct ListProposalsResult: Codable {

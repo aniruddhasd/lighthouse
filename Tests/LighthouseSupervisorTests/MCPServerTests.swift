@@ -243,4 +243,15 @@ struct MCPServerTests {
         let payload = try #require(try JSONSerialization.jsonObject(with: Data(out.text.utf8)) as? [String: Any])
         #expect(payload["awaiting_app"] as? Int == 2)
     }
+
+    @Test func listProposalsExposesOutcomesSoTheSupervisorCanSeeWhatBecameOfThem() throws {
+        let p = Proposal(id: UUID(), taskId: alpha.id, taskRef: "alpha", kind: .send, text: "go on", reason: "r",
+                         basedOn: nil, createdAt: Date(timeIntervalSince1970: 1), status: .expired,
+                         rejectionReason: nil, resolvedAt: Date(timeIntervalSince1970: 9), resolutionNote: "Overtaken by a newer event")
+        let out = try call(server([alpha], proposals: [p]), "list_proposals", "{}")
+        let item = try #require(((try JSONSerialization.jsonObject(with: Data(out.text.utf8)) as? [String: Any])?["proposals"] as? [[String: Any]])?.first)
+        #expect(item["status"] as? String == "expired")
+        #expect(item["resolution_note"] as? String == "Overtaken by a newer event")
+        #expect(item["resolved_at"] != nil)
+    }
 }
