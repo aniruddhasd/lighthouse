@@ -82,3 +82,35 @@ overridden per task and workspace from the Summary tab
 (`Workspace.baseOverride`). Diff files render collapsible, and the file
 viewer (`FilePageBuilder`) uses the same WKWebView lockdown with a stricter
 CSP (`default-src 'none'; script-src 'nonce-…'; style-src 'unsafe-inline'`).
+
+## File viewer assets (syntax highlighting + markdown)
+
+The content viewer's file page (`FilePageBuilder`) vendors two more libraries,
+committed at `Sources/LighthouseApp/Resources/viewer/` and checked by
+`Scripts/verify-vendored-assets.sh` against that directory's `SHA256SUMS`
+(run from `make-app.sh` and `smoke-run.sh`). Added 2026-10-26.
+
+| Asset | Source (npm, latest stable verified that day) | License |
+|---|---|---|
+| `highlight.min.js`, `hljs-light.min.css`, `hljs-dark.min.css` | `@highlightjs/cdn-assets@11.12.0` (common-languages build; `styles/github`, `styles/github-dark`) | BSD-3-Clause |
+| `markdown-it.min.js` | `markdown-it@15.0.3`, `dist/browser/markdown-it.umd.min.js` | MIT |
+
+Both bundles were grep-checked: no `http(s)` references beyond two doc URLs in a
+highlight.js comment, no `fetch`/`XMLHttpRequest`/`eval`/`new Function`.
+
+Posture: file content stays base64 → in-page. Code is highlighted by
+highlight.js (output is escaped text plus `<span class>`, re-cut into per-line
+DOM). Markdown runs with `html: false`; its output is reduced to an allowlist of
+tags/attributes, images become a text placeholder and links lose their `href`
+(the native navigation delegate denies non-file URLs regardless). The CSP stays
+`default-src 'none'`; only a page that highlights or renders markdown adds
+`'self'` so the scripts in the render directory can load. Files over
+`FileRendering.maxHighlightBytes`/`maxHighlightLines` are shown as plain text.
+
+Proof: unit tests (`FileRenderingTests`) pin the choice and page shape; the
+FILERENDER gate in `smoke-run.sh` renders hostile plain, code and markdown
+fixtures in the real WKWebView and asserts no script/img/handler/link/forbidden
+element survives and that highlighting and rendering actually ran. A mutation
+check (sanitizer disabled → the gate's `imgs` count went 0→1) showed it can fail.
+Not covered: languages outside the common set stay plain; links are not
+clickable (an external-open bridge is out of scope).

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import WebKit
 import SwiftUI
 import LighthouseAdapter
 import LighthouseAppCore
@@ -769,18 +770,42 @@ final class AppRuntime {
     private var fileRenderKeepAlive: [AnyObject] = []
     private func runFileRenderCheckIfRequested() {
         guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_FILERENDER"] == "1" else { return }
+        // One fixture per rendering path, rendered one after another in a single
+        // web view: plain text, highlighted code, and rendered markdown.
+        let fixtures: [(name: String, content: String, rendering: FileRendering)] = [
+            ("plain", FilePageBuilder.hostileContent, .plain),
+            ("code", FilePageBuilder.hostileContent, FileRendering(language: "swift", markdown: false)),
+            ("markdown", FilePageBuilder.hostileMarkdown, FileRendering(language: "markdown", markdown: true)),
+        ]
         do {
             let directory = try DiffWebViewFactory.makeRenderDirectory()
+            var remaining = fixtures
+            var current = ""
+            var webViewRef: WKWebView?
+            func loadNext() {
+                guard !remaining.isEmpty, let webView = webViewRef else { return }
+                let fixture = remaining.removeFirst()
+                current = fixture.name
+                do {
+                    let page = FilePageBuilder.page(
+                        content: fixture.content, filename: "evil.txt",
+                        rendering: fixture.rendering, debugChecks: true)
+                    try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
+                } catch {
+                    FileHandle.standardOutput.write(Data("FILERENDER-STAGE failed \(error)\n".utf8))
+                }
+            }
             let gate = LocalOnlyNavigationDelegate(allowedRoot: directory) { message in
-                FileHandle.standardOutput.write(Data("FILERENDER result \(message)\n".utf8))
+                // The page's verdict, tagged with the fixture that produced it.
+                FileHandle.standardOutput.write(Data("FILERENDER result \(current) \(message)\n".utf8))
+                loadNext()
             }
             let webView = DiffWebViewFactory.makeWebView(
                 renderDirectory: directory, navigationGate: gate)
+            webViewRef = webView
             fileRenderKeepAlive = [webView, gate]
-            let page = FilePageBuilder.page(
-                content: FilePageBuilder.hostileContent, filename: "evil.txt", debugChecks: true)
-            try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
             FileHandle.standardOutput.write(Data("FILERENDER-STAGE loaded\n".utf8))
+            loadNext()
         } catch {
             FileHandle.standardOutput.write(Data("FILERENDER-STAGE failed \(error)\n".utf8))
         }

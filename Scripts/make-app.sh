@@ -21,6 +21,8 @@ build_stamp="$(git -C "$package_root" rev-parse --short HEAD)$(git -C "$package_
 "$package_root/Scripts/verify-vendored-assets.sh" \
     "$package_root/Sources/LighthouseApp/Resources/diff2html"
 "$package_root/Scripts/verify-vendored-assets.sh" \
+    "$package_root/Sources/LighthouseApp/Resources/viewer"
+"$package_root/Scripts/verify-vendored-assets.sh" \
     "$package_root/Sources/LighthouseApp/Resources/fonts"
 "$package_root/Scripts/verify-pins.sh" \
     "$package_root/Package.resolved" "$package_root/Scripts/pinned-revisions.txt"

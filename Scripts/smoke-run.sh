@@ -19,6 +19,8 @@ socket="$HOME/Library/Application Support/Lighthouse/attention.sock"
 # --force-resolved-versions — this makes the gate independently fail fast).
 "$package_root/Scripts/verify-vendored-assets.sh" \
     "$package_root/Sources/LighthouseApp/Resources/diff2html"
+"$package_root/Scripts/verify-vendored-assets.sh" \
+    "$package_root/Sources/LighthouseApp/Resources/viewer"
 "$package_root/Scripts/verify-pins.sh" \
     "$package_root/Package.resolved" "$package_root/Scripts/pinned-revisions.txt"
 
@@ -358,10 +360,10 @@ filerender_pid=$!
 trap 'kill -9 "$filerender_pid" 2>/dev/null || true; rm -rf "$filerender_cfg"' EXIT
 
 filerender_tries=0
-until grep -q "FILERENDER result" "$filerender_log"; do
+until [ "$(grep -c "FILERENDER result" "$filerender_log")" -ge 3 ]; do
     filerender_tries=$((filerender_tries + 1))
     if [ "$filerender_tries" -gt 100 ]; then
-        echo "FILERENDER GATE: FAIL (no render result within 20s)" >&2
+        echo "FILERENDER GATE: FAIL (expected 3 render results within 20s)" >&2
         grep "FILERENDER" "$filerender_log" | tail -5 >&2 || true
         exit 1
     fi
@@ -384,25 +386,41 @@ rm -rf "$filerender_cfg"
 
 python3 - "$filerender_log" <<'PY'
 import json, sys
-line = next((l for l in open(sys.argv[1]) if l.startswith("FILERENDER result ")), None)
-assert line, "result line vanished"
-result = json.loads(line.removeprefix("FILERENDER result ").strip())
-print(f"FILERENDER dom: {result}")
+lines = [l for l in open(sys.argv[1]) if l.startswith("FILERENDER result ")]
+results = {}
+for l in lines:
+    name, _, payload = l.removeprefix("FILERENDER result ").strip().partition(" ")
+    results[name] = json.loads(payload)
 problems = []
-if result.get("error"):
-    problems.append(f"page error: {result['error']}")
-if result.get("scripts", -1) != 0:
-    problems.append(f"{result.get('scripts')} script tags inside rendered file")
-if result.get("imgs", -1) != 0:
-    problems.append(f"{result.get('imgs')} img tags survived")
-if result.get("handlers", -1) != 0:
-    problems.append(f"{result.get('handlers')} event handlers survived")
-if result.get("pwned") is not False:
-    problems.append("hostile script EXECUTED (window.__pwned set)")
-if result.get("hostileTextPresent") is not True:
-    problems.append("hostile content missing as text — file not actually rendered")
-if result.get("lines", 0) < 1:
-    problems.append(f"expected rendered lines, got {result.get('lines')}")
+for name in ("plain", "code", "markdown"):
+    result = results.get(name)
+    if result is None:
+        problems.append(f"{name}: no result")
+        continue
+    print(f"FILERENDER dom ({name}): {result}")
+    if result.get("error"):
+        problems.append(f"{name}: page error: {result['error']}")
+    if result.get("scripts", -1) != 0:
+        problems.append(f"{name}: {result.get('scripts')} script tags inside rendered file")
+    if result.get("imgs", -1) != 0:
+        problems.append(f"{name}: {result.get('imgs')} img tags survived")
+    if result.get("handlers", -1) != 0:
+        problems.append(f"{name}: {result.get('handlers')} event handlers survived")
+    if result.get("links", -1) != 0:
+        problems.append(f"{name}: {result.get('links')} live links survived")
+    if result.get("badTags", -1) != 0:
+        problems.append(f"{name}: {result.get('badTags')} forbidden elements survived")
+    if result.get("pwned") is not False:
+        problems.append(f"{name}: hostile script EXECUTED (window.__pwned set)")
+    if result.get("hostileTextPresent") is not True:
+        problems.append(f"{name}: hostile content missing as text — file not actually rendered")
+    if result.get("lines", 0) < 1:
+        problems.append(f"{name}: expected rendered lines, got {result.get('lines')}")
+# The new paths must really have run, not silently fallen back to plain text.
+if results.get("code", {}).get("highlighted", 0) < 1:
+    problems.append("code: highlighter produced no tokens (fell back to plain?)")
+if results.get("markdown", {}).get("rendered") is not True:
+    problems.append("markdown: rendered view is empty (fell back to source?)")
 if problems:
     print("FILERENDER GATE: FAIL (" + "; ".join(problems) + ")")
     sys.exit(1)
