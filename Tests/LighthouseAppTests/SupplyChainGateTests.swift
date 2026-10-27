@@ -81,9 +81,13 @@ struct SupplyChainGateTests {
             .appendingPathComponent("resolved-\(UUID().uuidString.prefix(8)).json")
         defer { try? FileManager.default.removeItem(at: tampered) }
         let original = try String(contentsOf: URL(fileURLWithPath: "\(root)/Package.resolved"), encoding: .utf8)
+        // The pinned revision comes from the canonical lock, so a SwiftTerm upgrade
+        // updates one file, not this test as well.
+        let lock = try String(contentsOf: URL(fileURLWithPath: "\(root)/Scripts/pinned-revisions.txt"), encoding: .utf8)
+        let pinned = try #require(lock.split(separator: "\n")
+            .first { $0.hasPrefix("swiftterm ") }?.split(separator: " ").last.map(String.init))
         let drifted = original.replacingOccurrences(
-            of: "8e7a1e154f470e19c709a00a8768df348ba5fc43",
-            with: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            of: pinned, with: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         #expect(drifted != original, "fixture revision not found in Package.resolved")
         try drifted.write(to: tampered, atomically: true, encoding: .utf8)
 

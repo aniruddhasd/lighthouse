@@ -16,8 +16,10 @@ let package = Package(
     ],
     dependencies: [
         // Terminal emulation + local pty (spec §4 consumed contracts).
-        // Latest stable verified against GitHub releases 2026-07-09.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.13.0"),
+        // 1.14.0 (2026-07-10) is the first release with the SD (CSI Ps T) fix:
+        // 1.13.0 mangled scroll-down outside margin mode, corrupting Claude Code's
+        // scrolled view. Deliberately not the latest (1.99.1): smallest reviewable hop.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.14.0"),
     ],
     targets: [
         .target(name: "LighthouseGit"),
