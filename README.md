@@ -303,3 +303,8 @@ any time from **Help → Run Setup Checks**.
 - Stale wording remains in comments and UI strings (e.g. the RemoveTaskSheet
   in-place text mentions "attention hooks"; `AppRuntime`/`SetupView` doc
   comments describe the socket and hook self-test).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Bundled and vendored components keep their own
+licenses: see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
