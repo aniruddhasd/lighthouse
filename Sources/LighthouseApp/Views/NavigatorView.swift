@@ -1,6 +1,7 @@
 import SwiftUI
 import LighthouseAppCore
 import LighthouseGit
+import LighthouseTaskEngine
 
 /// The right-hand navigator: a segmented Changes | Files | History control over
 /// a shared per-task repo picker (multi-repo tasks). Selecting an item promotes
@@ -9,7 +10,11 @@ import LighthouseGit
 /// for the whole time this is on screen, regardless of the active segment.
 struct NavigatorView: View {
     @Environment(\.theme) private var theme
+    @Environment(AppRuntime.self) private var runtime
     @Bindable var workbench: WorkbenchModel
+    /// The ⌘⌥→/← chrome ring owned by FocusCenter; the navigator stop rings the
+    /// repo picker. ⌘⌥↑/↓ cycles the repo selection (no need to open the menu).
+    let chromeField: ChromeFocus?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,11 +47,41 @@ struct NavigatorView: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .fixedSize()
+            .overlay {
+                RoundedRectangle(cornerRadius: Theme.Radius.chip)
+                    .strokeBorder(theme.primary, lineWidth: chromeField == .navigator ? 2 : 0)
+                    .allowsHitTesting(false)
+            }
+            // Add another repo / worktree to this task (tracked from now on).
+            iconButton("plus", help: "Add a repo or worktree to this task") {
+                runtime.taskPendingAddWorkspace = workbench.task
+            }
+            // Remove the SELECTED repo from this task — the inverse of +. Hidden
+            // when the task tracks a single repo (removing the last workspace is
+            // "remove the task", not this). The sheet offers detach (keep the
+            // worktree) or discard (delete it).
+            if workbench.task.workspaces.count > 1, let selected = selectedEntry {
+                iconButton("minus", help: "Remove “\(selected.repoName)” from this task") {
+                    runtime.workspacePendingRemoval = WorkspaceRemovalRequest(
+                        task: workbench.task,
+                        repoId: selected.workspace.repoId,
+                        repoName: selected.repoName)
+                }
+            }
             if workbench.navigatorMode == .changes {
-                Text("diff vs base")
-                    .font(LHFont.mono(11))
-                    .foregroundStyle(theme.diffVsBase)
-                    .lineLimit(1)
+                // Uncommitted (working tree vs HEAD) vs the whole branch vs its
+                // base branch. The base is NAMED here (read-only); it is chosen
+                // in the Summary tab, not the sidebar.
+                Picker("Scope", selection: Binding(
+                    get: { workbench.review.scope },
+                    set: { workbench.review.scope = $0 })) {
+                    Text("Uncommitted").tag(DiffScope.uncommitted)
+                    Text(vsBaseLabel).tag(DiffScope.vsBase)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Uncommitted changes, or the whole worktree vs its base branch (set the base in the Summary tab)")
                 Button { workbench.review.refreshNow() } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11)).foregroundStyle(theme.dim)
@@ -69,6 +104,35 @@ struct NavigatorView: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.borderSoft).frame(height: 1) }
+    }
+
+    /// The "vs base" segment label, naming the active base branch (e.g. "vs main").
+    private var vsBaseLabel: String { "vs \(workbench.review.activeBase ?? "base")" }
+
+    /// The workspace currently chosen in the repo picker — the one the − button
+    /// removes.
+    private var selectedEntry: (index: Int, workspace: Workspace, repoName: String)? {
+        workbench.review.workspaces.first { $0.index == workbench.selectedWorkspaceIndex }
+    }
+
+    /// A header icon button with a real 26×26 hit target (the bare glyphs were
+    /// hard to click) and a subtle hover-less chip so +/− read as buttons.
+    @ViewBuilder
+    private func iconButton(
+        _ systemName: String, help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.dim)
+                .frame(width: 26, height: 26)
+                .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.chip))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.chip)
+                    .strokeBorder(theme.border2, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     /// Changes / Files / History — an equal-width segmented control, active

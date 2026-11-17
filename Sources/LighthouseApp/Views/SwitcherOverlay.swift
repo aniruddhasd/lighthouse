@@ -52,7 +52,6 @@ struct SwitcherOverlay: View {
     private func panel(entries: [TaskRecord]) -> some View {
         VStack(spacing: 0) {
             searchField
-            if runtime.notificationsHintVisible { notificationsHint }
             Divider().overlay(theme.borderSoft)
             if entries.isEmpty {
                 Text("No matching tasks")
@@ -82,26 +81,10 @@ struct SwitcherOverlay: View {
         .padding(.vertical, 14)
     }
 
-    private var notificationsHint: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "bell.slash").foregroundStyle(theme.dim)
-            Text("Notifications are off — badges still work. Enable them in setup.")
-                .font(LHFont.metaFaint)
-                .foregroundStyle(theme.dim)
-            Spacer()
-            Button("Dismiss") { runtime.dismissNotificationsHint() }
-                .buttonStyle(.plain)
-                .font(LHFont.metaFaint)
-                .foregroundStyle(theme.primary)
-        }
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(theme.panel2)
-    }
-
     private func results(_ entries: [TaskRecord]) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
-                Text("NEEDS YOU FIRST")
+                Text("LIVE FIRST")
                     .font(LHFont.mono(10.5, .semibold))
                     .tracking(0.6)
                     .foregroundStyle(theme.faint)
@@ -117,10 +100,9 @@ struct SwitcherOverlay: View {
     }
 
     private func row(_ task: TaskRecord) -> some View {
-        let state = runtime.model.attentionState(of: task.id)
         return Button { select(task.id) } label: {
             HStack(spacing: 10) {
-                StatusDot(state: state, glow: state == .needsInput)
+                StatusDot(live: runtime.model.isSessionLive(task.id))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(task.name)
                         .font(LHFont.ui(13.5, .medium))
@@ -132,7 +114,7 @@ struct SwitcherOverlay: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                StatusPill(state: state)
+                StatusPill(status: task.status)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

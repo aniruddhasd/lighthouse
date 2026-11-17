@@ -153,8 +153,6 @@ public actor TaskEngine {
         return TaskRecord(
             name: name, branch: branch, adapterKind: adapterKind,
             sessionRef: nil,
-            // No agent session exists yet (step 3): nothing needs attention.
-            state: .done,
             workspaces: workspaces)
     }
 
@@ -204,7 +202,93 @@ public actor TaskEngine {
         return TaskRecord(
             name: name, branch: primaryBranch ?? "(detached HEAD)",
             adapterKind: adapterKind, sessionRef: nil,
-            state: .done, workspaces: workspaces)
+            workspaces: workspaces)
+    }
+
+    // MARK: - Adding a workspace to an already-created task
+
+    /// Adds ONE new worktree (on `branch`, cut from `repo`'s base) to an
+    /// existing task and returns its `Workspace` — the "also work on repo B in
+    /// this task" case. Reuses the same per-repo provisioning and rollback as
+    /// creation: a failure after `worktree add` is undone. The caller appends
+    /// the returned workspace and persists.
+    public func addWorktreeWorkspace(
+        to task: TaskRecord, repo: RepoConfig, branch: String,
+        worktreesRootOverride: URL? = nil
+    ) async throws -> Workspace {
+        guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+            throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+        }
+        guard try await liftGit({ try await self.git.isValidBranchName(branch) }) else {
+            throw TaskEngineError.invalidBranchName(branch)
+        }
+        let destination = Self.worktreeDestination(
+            for: repo, taskName: task.name, worktreesRootOverride: worktreesRootOverride)
+        var created: [CreatedArtifact] = []
+        var createdParents: [URL] = []
+        do {
+            return try await createWorkspace(
+                for: repo, branch: branch, at: destination,
+                recordingArtifactsIn: &created, recordingCreatedParentsIn: &createdParents)
+        } catch {
+            _ = await rollBack(created, createdParents: createdParents)
+            throw error
+        }
+    }
+
+    /// Tracks a registered repo's OWN checkout as an in-place workspace of an
+    /// existing task — captures whatever the agent already changed there. Never
+    /// merged back or destroyed on removal (`isInPlace`). Nothing on disk is
+    /// mutated. The caller appends the returned workspace and persists.
+    public func inPlaceWorkspace(
+        for repo: RepoConfig, addingTo task: TaskRecord
+    ) async throws -> Workspace {
+        guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+            throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+        }
+        let repoURL = repo.pathURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: repo.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              try await liftGit({ try await self.git.isInsideWorkTree(at: repoURL) })
+        else {
+            throw TaskEngineError.repoNotFound(path: repo.path)
+        }
+        return Workspace(
+            repoId: repo.id, worktreePath: repo.path, mergeState: .merged, isInPlace: true)
+    }
+
+    /// Adopts an EXISTING work tree Lighthouse did not create (e.g. one the agent
+    /// spun up with `git worktree add`) as a tracked workspace. The directory is
+    /// matched to a registered repo by appearing in that repo's `worktree list`;
+    /// tracked only — never merged back or destroyed (`isInPlace`, since
+    /// Lighthouse does not own it). The caller appends and persists.
+    public func adoptWorktreeWorkspace(
+        at directory: URL, addingTo task: TaskRecord, repos: [RepoConfig]
+    ) async throws -> Workspace {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              try await liftGit({ try await self.git.isInsideWorkTree(at: directory) })
+        else {
+            throw TaskEngineError.notAGitWorktree(path: directory.path)
+        }
+        let canonical = directory.resolvingSymlinksInPath().path
+        for repo in repos {
+            let worktrees = (try? await liftGit({
+                try await self.git.listWorktrees(in: repo.pathURL)
+            })) ?? []
+            let owns = worktrees.contains {
+                URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == canonical
+            }
+            guard owns else { continue }
+            guard !task.workspaces.contains(where: { $0.repoId == repo.id }) else {
+                throw TaskEngineError.repoAlreadyInTask(repoId: repo.id)
+            }
+            return Workspace(
+                repoId: repo.id, worktreePath: canonical, mergeState: .merged, isInPlace: true)
+        }
+        throw TaskEngineError.notAWorktreeOfRegisteredRepo(path: directory.path)
     }
 
     /// One repo's share of creation. Every check that can fail runs BEFORE
@@ -419,37 +503,61 @@ public actor TaskEngine {
             guard let repo = repos.first(where: { $0.id == workspace.repoId }) else {
                 throw TaskEngineError.unknownRepo(repoId: workspace.repoId)
             }
-            // In-place: the repo's own checkout. Removal never deletes it or a
-            // branch, so removing the task loses nothing — no hazard to report.
-            if workspace.isInPlace { continue }
-            let repoURL = repo.pathURL
+            hazards += try await workspaceHazards(for: workspace, branch: task.branch, repo: repo)
+        }
+        return hazards
+    }
 
-            // Hazard 1: unmerged commits (only meaningful if the branch exists).
-            if try await liftGit({ try await self.git.branchExists(task.branch, in: repoURL) }) {
-                let merged = try await liftGit {
-                    try await self.git.isAncestor(task.branch, of: repo.baseBranch, in: repoURL)
-                }
-                if !merged {
-                    hazards.append(.unmergedCommits(
-                        repoId: repo.id, repoPath: repo.path, branch: task.branch))
-                }
+    /// The work-losing hazards (same two kinds) for ONE workspace — the unit
+    /// both `removalHazards(in:)` and single-workspace removal are built from.
+    private func workspaceHazards(
+        for workspace: Workspace, branch: String, repo: RepoConfig
+    ) async throws -> [RemovalHazard] {
+        // In-place / adopted: the repo's own checkout. Removal never deletes it
+        // or a branch, so removing it loses nothing — no hazard to report.
+        if workspace.isInPlace { return [] }
+        let repoURL = repo.pathURL
+        var hazards: [RemovalHazard] = []
+
+        // Hazard 1: unmerged commits (only meaningful if the branch exists).
+        if try await liftGit({ try await self.git.branchExists(branch, in: repoURL) }) {
+            let merged = try await liftGit {
+                try await self.git.isAncestor(branch, of: repo.baseBranch, in: repoURL)
             }
+            if !merged {
+                hazards.append(.unmergedCommits(
+                    repoId: repo.id, repoPath: repo.path, branch: branch))
+            }
+        }
 
-            // Hazard 2: dirty worktree. A gone directory has nothing to lose.
-            if FileManager.default.fileExists(atPath: workspace.worktreePath) {
-                let dirty: Bool
-                do {
-                    dirty = try await !self.git.status(in: workspace.worktreeURL).isClean
-                } catch {
-                    dirty = true  // fail-secure: unknown state is treated as hazardous
-                }
-                if dirty {
-                    hazards.append(.dirtyWorktree(
-                        repoId: repo.id, repoPath: repo.path, branch: task.branch))
-                }
+        // Hazard 2: dirty worktree. A gone directory has nothing to lose.
+        if FileManager.default.fileExists(atPath: workspace.worktreePath) {
+            let dirty: Bool
+            do {
+                dirty = try await !self.git.status(in: workspace.worktreeURL).isClean
+            } catch {
+                dirty = true  // fail-secure: unknown state is treated as hazardous
+            }
+            if dirty {
+                hazards.append(.dirtyWorktree(
+                    repoId: repo.id, repoPath: repo.path, branch: branch))
             }
         }
         return hazards
+    }
+
+    /// Hazards for a single workspace of `task`, named by repo — the gate for
+    /// removing just that repo from the task (`removeWorkspace`).
+    public func removalHazards(
+        forWorkspaceWithRepoId repoId: UUID, in task: TaskRecord, repos: [RepoConfig]
+    ) async throws -> [RemovalHazard] {
+        guard let workspace = task.workspaces.first(where: { $0.repoId == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        guard let repo = repos.first(where: { $0.id == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        return try await workspaceHazards(for: workspace, branch: task.branch, repo: repo)
     }
 
     // MARK: - Removal (guardrail 1)
@@ -488,76 +596,118 @@ public actor TaskEngine {
         var outcomes: [WorkspaceRemovalOutcome] = []
         for workspace in task.workspaces {
             let repo = repos.first(where: { $0.id == workspace.repoId })!  // verified above
-
-            // In-place: the repo's own checkout and branch are the user's, not
-            // ours to remove. Record the fact and touch nothing on disk. (Our
-            // attention hooks in the repo's .claude/ are removed one layer up,
-            // by AppModel, via the adapter — the worktree path is never deleted
-            // here, so they would otherwise linger.)
-            if workspace.isInPlace {
-                outcomes.append(WorkspaceRemovalOutcome(
-                    repoId: repo.id, repoPath: repo.path, branch: task.branch,
-                    worktree: .leftInPlace, branchResult: .leftInPlace))
-                continue
-            }
-
-            let repoURL = repo.pathURL
-            let worktreeURL = workspace.worktreeURL
-
-            let directoryExisted = FileManager.default.fileExists(atPath: workspace.worktreePath)
-            let worktreeOutcome: WorkspaceRemovalOutcome.WorktreeOutcome
-            do {
-                let removalMode: WorktreeRemovalMode = confirmedRepoIds.contains(repo.id)
-                    ? .forceDiscardingChanges(
-                        justification: "user confirmed destruction of unmerged or uncommitted work")
-                    : .refuseIfDirty
-                try await liftGit {
-                    try await self.git.removeWorktree(at: worktreeURL, in: repoURL, mode: removalMode)
-                }
-                worktreeOutcome = directoryExisted ? .removed : .alreadyGone
-            } catch let error as TaskEngineError {
-                // "is not a working tree": registration is already gone too
-                // (externally pruned). Reconcile and report; don't crash.
-                if case .git(.commandFailed(let failure)) = error,
-                   !directoryExisted, failure.stderr.contains("is not a working tree") {
-                    worktreeOutcome = .alreadyGone
-                } else {
-                    throw error
-                }
-            }
-
-            let branchOutcome: WorkspaceRemovalOutcome.BranchOutcome
-            if try await liftGit({ try await self.git.branchExists(task.branch, in: repoURL) }) {
-                // Merged-ness was verified above via --is-ancestor; `git
-                // branch -d`'s own HEAD-relative heuristic would false-refuse
-                // when the clone is checked out elsewhere, so force is correct
-                // for both paths here.
-                try await liftGit {
-                    try await self.git.deleteBranch(task.branch, force: true, in: repoURL)
-                }
-                branchOutcome = .deleted
-            } else {
-                branchOutcome = .alreadyGone
-            }
-
-            outcomes.append(WorkspaceRemovalOutcome(
-                repoId: repo.id, repoPath: repo.path, branch: task.branch,
-                worktree: worktreeOutcome, branchResult: branchOutcome))
-
-            // Husk cleanup: the worktree's parent is this task's grouping
-            // dir — remove it once empty; then its parent too, but ONLY when
-            // it is our own `lighthouse-worktrees` grouping dir (an override
-            // root is user-chosen and never removed). Non-empty dirs always
-            // stay — other tasks' worktrees live there.
-            let taskDir = workspace.worktreeURL.deletingLastPathComponent()
-            Self.removeIfEmpty(taskDir)
-            let groupingDir = taskDir.deletingLastPathComponent()
-            if groupingDir.lastPathComponent == Self.worktreesDirectoryName {
-                Self.removeIfEmpty(groupingDir)
-            }
+            outcomes.append(try await tearDownWorkspace(
+                workspace, branch: task.branch, repo: repo,
+                force: confirmedRepoIds.contains(repo.id)))
         }
 
         return TaskRemovalReport(workspaces: outcomes)
+    }
+
+    /// Removes ONE workspace (repo) from `task`, leaving its other workspaces,
+    /// their worktrees, and branches untouched. Same hazard gate as `removeTask`
+    /// but scoped to just this workspace: `.refuseIfHazards` throws the
+    /// workspace's own hazards, `.destroy` must carry exactly them. An in-place
+    /// or adopted workspace is simply untracked (nothing on disk is deleted).
+    public func removeWorkspace(
+        withRepoId repoId: UUID, from task: TaskRecord, repos: [RepoConfig], mode: TaskRemovalMode
+    ) async throws -> WorkspaceRemovalOutcome {
+        guard let workspace = task.workspaces.first(where: { $0.repoId == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+        guard let repo = repos.first(where: { $0.id == repoId }) else {
+            throw TaskEngineError.unknownRepo(repoId: repoId)
+        }
+
+        let actual = try await workspaceHazards(for: workspace, branch: task.branch, repo: repo)
+        switch mode {
+        case .refuseIfHazards:
+            guard actual.isEmpty else {
+                throw TaskEngineError.removalHazardsPresent(hazards: actual)
+            }
+        case .destroy(let confirmation):
+            guard Set(confirmation.destroying) == Set(actual) else {
+                throw TaskEngineError.staleConfirmation(
+                    confirmed: confirmation.destroying, actual: actual)
+            }
+        }
+        let force: Bool
+        if case .destroy = mode { force = !actual.isEmpty } else { force = false }
+        return try await tearDownWorkspace(
+            workspace, branch: task.branch, repo: repo, force: force)
+    }
+
+    /// Deletes one workspace's on-disk artifacts and reports the outcome — the
+    /// unit `removeTask` and `removeWorkspace` share. Hazard gating happens in
+    /// the callers; `force` discards dirty/unmerged work (only ever set once the
+    /// caller has confirmed it).
+    private func tearDownWorkspace(
+        _ workspace: Workspace, branch: String, repo: RepoConfig, force: Bool
+    ) async throws -> WorkspaceRemovalOutcome {
+        // In-place / adopted: the repo's own checkout and branch are the user's,
+        // not ours to remove. Record the fact and touch nothing on disk. (Our
+        // attention hooks in the repo's .claude/ are removed one layer up, by
+        // AppModel, via the adapter.)
+        if workspace.isInPlace {
+            return WorkspaceRemovalOutcome(
+                repoId: repo.id, repoPath: repo.path, branch: branch,
+                worktree: .leftInPlace, branchResult: .leftInPlace)
+        }
+
+        let repoURL = repo.pathURL
+        let worktreeURL = workspace.worktreeURL
+
+        let directoryExisted = FileManager.default.fileExists(atPath: workspace.worktreePath)
+        let worktreeOutcome: WorkspaceRemovalOutcome.WorktreeOutcome
+        do {
+            let removalMode: WorktreeRemovalMode = force
+                ? .forceDiscardingChanges(
+                    justification: "user confirmed destruction of unmerged or uncommitted work")
+                : .refuseIfDirty
+            try await liftGit {
+                try await self.git.removeWorktree(at: worktreeURL, in: repoURL, mode: removalMode)
+            }
+            worktreeOutcome = directoryExisted ? .removed : .alreadyGone
+        } catch let error as TaskEngineError {
+            // "is not a working tree": registration is already gone too
+            // (externally pruned). Reconcile and report; don't crash.
+            if case .git(.commandFailed(let failure)) = error,
+               !directoryExisted, failure.stderr.contains("is not a working tree") {
+                worktreeOutcome = .alreadyGone
+            } else {
+                throw error
+            }
+        }
+
+        let branchOutcome: WorkspaceRemovalOutcome.BranchOutcome
+        if try await liftGit({ try await self.git.branchExists(branch, in: repoURL) }) {
+            // Merged-ness was verified by the caller via --is-ancestor; `git
+            // branch -d`'s own HEAD-relative heuristic would false-refuse when
+            // the clone is checked out elsewhere, so force is correct for both
+            // paths here.
+            try await liftGit {
+                try await self.git.deleteBranch(branch, force: true, in: repoURL)
+            }
+            branchOutcome = .deleted
+        } else {
+            branchOutcome = .alreadyGone
+        }
+
+        // Husk cleanup: the worktree's parent is this task's grouping dir —
+        // remove it once empty; then its parent too, but ONLY when it is our own
+        // `lighthouse-worktrees` grouping dir (an override root is user-chosen
+        // and never removed). Non-empty dirs always stay — other tasks'
+        // worktrees live there.
+        let taskDir = workspace.worktreeURL.deletingLastPathComponent()
+        Self.removeIfEmpty(taskDir)
+        let groupingDir = taskDir.deletingLastPathComponent()
+        if groupingDir.lastPathComponent == Self.worktreesDirectoryName {
+            Self.removeIfEmpty(groupingDir)
+        }
+
+        return WorkspaceRemovalOutcome(
+            repoId: repo.id, repoPath: repo.path, branch: branch,
+            worktree: worktreeOutcome, branchResult: branchOutcome)
     }
 
     // MARK: - Helpers

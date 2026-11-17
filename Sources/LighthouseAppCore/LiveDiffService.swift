@@ -1,6 +1,14 @@
 import Foundation
 import LighthouseGit
 
+/// Which changes the review pane shows.
+public enum DiffScope: String, Sendable, CaseIterable, Equatable {
+    /// Working tree (staged + unstaged) vs HEAD — uncommitted work only.
+    case uncommitted
+    /// The whole branch's change vs the merge base with its base branch.
+    case vsBase
+}
+
 /// One snapshot of "what changed" for the review pane.
 public struct LiveDiff: Sendable, Equatable {
     /// Raw git patch text (size-capped per file), including untracked files
@@ -38,9 +46,38 @@ public struct LiveDiffService: Sendable {
         self.git = git
     }
 
+    /// Diff-vs-base: the whole branch's change (committed + staged + unstaged)
+    /// relative to the merge base with `baseBranch`, plus untracked files.
     public func liveDiff(workspace: URL, baseBranch: String) async throws -> LiveDiff {
-        var patch = try await git.liveDiff(againstMergeBaseOf: baseBranch, in: workspace)
-        let entries = try await git.liveDiffNameStatus(againstMergeBaseOf: baseBranch, in: workspace)
+        let patch = try await git.liveDiff(against: baseBranch, in: workspace)
+        let entries = try await git.liveDiffNameStatus(against: baseBranch, in: workspace)
+        return try await assemble(basePatch: patch, entries: entries, workspace: workspace)
+    }
+
+    /// Uncommitted-only: the working tree (staged + unstaged) relative to HEAD,
+    /// plus untracked files — "what have I not committed yet", excluding
+    /// already-committed branch work.
+    public func uncommittedDiff(workspace: URL) async throws -> LiveDiff {
+        let patch = try await git.uncommittedDiff(in: workspace)
+        let entries = try await git.uncommittedNameStatus(in: workspace)
+        return try await assemble(basePatch: patch, entries: entries, workspace: workspace)
+    }
+
+    /// Dispatch by the review pane's selected scope.
+    public func diff(workspace: URL, baseBranch: String, scope: DiffScope) async throws -> LiveDiff {
+        switch scope {
+        case .uncommitted: return try await uncommittedDiff(workspace: workspace)
+        case .vsBase: return try await liveDiff(workspace: workspace, baseBranch: baseBranch)
+        }
+    }
+
+    /// Appends untracked files (as added-file patches, size-capped) to a tracked
+    /// patch and caps oversized sections — shared by both scopes so untracked
+    /// handling never diverges between them.
+    private func assemble(
+        basePatch: String, entries: [DiffEntry], workspace: URL
+    ) async throws -> LiveDiff {
+        var patch = basePatch
         let untracked = try await git.status(in: workspace).untracked.sorted()
 
         for path in untracked {

@@ -105,7 +105,9 @@ public enum NavigatorPresenter {
     public static func filePage(for contents: FileContents, filename: String) -> String {
         switch contents {
         case .text(let text):
-            return FilePageBuilder.page(content: text, filename: filename)
+            return FilePageBuilder.page(
+                content: text, filename: filename,
+                rendering: FileRendering.forFile(named: filename, content: text))
         case .binary:
             return FilePageBuilder.page(
                 content: "Binary file — not shown.", filename: filename)

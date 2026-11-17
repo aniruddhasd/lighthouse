@@ -9,9 +9,9 @@ public enum HookInstallerError: Error, Sendable, Equatable {
     case ioFailure(path: String, detail: String)
 }
 
-/// Writes Lighthouse's attention hooks into a workspace's
-/// `.claude/settings.local.json` — the guardrail-2 third exception, kept
-/// surgical: MERGE semantics, existing user content survives byte-for-byte
+/// Writes Lighthouse's supervision hooks into a workspace's
+/// `.claude/settings.local.json` (orchestrator phase 1a: observation only),
+/// kept surgical: MERGE semantics, existing user content survives byte-for-byte
 /// in structure, double-install is a no-op, uninstall removes only ours.
 ///
 /// Also ensures the file is git-ignored: the docs promise auto-gitignore only
@@ -28,16 +28,25 @@ public struct HookInstaller: Sendable {
     static let hookURL = "http://localhost/lighthouse-hook"
 
     /// Hook events installed, with per-event matcher (nil = fires always).
-    /// Minimal set covering working / needs-input / done / died — see
-    /// docs/claude-code-contract.md.
+    /// Phase 1a OBSERVES, so the set is wide and `Notification` is unfiltered
+    /// (every notification type is logged, then we learn which matter). Names are
+    /// from the hooks reference (docs/claude-code-contract.md, re-verified
+    /// 2026-10-22 against CLI 2.1.308).
     static let installedEvents: [(event: String, matcher: String?)] = [
+        ("SessionStart", nil),
         ("UserPromptSubmit", nil),
         ("Stop", nil),
         ("StopFailure", nil),
+        ("SubagentStart", nil),
+        ("SubagentStop", nil),
+        ("Notification", nil),
+        ("PermissionRequest", nil),
+        // Experiment: does the questionnaire tool's completion fire PostToolUse (an
+        // "unblocked" signal)? Matched to that ONE tool — unfiltered it would fire
+        // after every tool call. Docs: fires only after a tool *succeeds*, so a
+        // cancelled questionnaire may stay silent.
+        ("PostToolUse", "AskUserQuestion"),
         ("SessionEnd", nil),
-        // Notification supports a notification-type matcher: the noisy types
-        // (auth_success, elicitation_*) never even spawn our hook.
-        ("Notification", "permission_prompt|idle_prompt|agent_needs_input|agent_completed"),
     ]
 
     private let git: GitClient
@@ -53,12 +62,13 @@ public struct HookInstaller: Sendable {
         var root = try Self.readSettings(at: settingsURL)
 
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
+        // Replace, don't skip: drop any handler of ours first (including stale
+        // ones from the removed attention system, which point at a dead socket
+        // path), then add fresh. Re-install is therefore idempotent AND repairs a
+        // moved socket path. User handlers are never touched.
+        hooks = Self.removingOurHandlers(from: hooks)
         for (event, matcher) in Self.installedEvents {
             var groups = (hooks[event] as? [[String: Any]]) ?? []
-            // Idempotence: skip if any group already contains our handler.
-            if groups.contains(where: { Self.containsOurHandler($0) }) {
-                continue
-            }
             var group: [String: Any] = [
                 "hooks": [Self.handler(socketPath: socketPath)]
             ]
@@ -84,27 +94,12 @@ public struct HookInstaller: Sendable {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else { return }
         var root = try Self.readSettings(at: settingsURL)
 
-        if var hooks = root["hooks"] as? [String: Any] {
-            for (event, groupsAny) in hooks {
-                guard var groups = groupsAny as? [[String: Any]] else { continue }
-                groups = groups.compactMap { group in
-                    var group = group
-                    guard var handlers = group["hooks"] as? [[String: Any]] else { return group }
-                    handlers.removeAll(where: Self.isOurHandler)
-                    if handlers.isEmpty { return nil } // group was only ours
-                    group["hooks"] = handlers
-                    return group
-                }
-                if groups.isEmpty {
-                    hooks.removeValue(forKey: event)
-                } else {
-                    hooks[event] = groups
-                }
-            }
-            if hooks.isEmpty {
+        if let hooks = root["hooks"] as? [String: Any] {
+            let remaining = Self.removingOurHandlers(from: hooks)
+            if remaining.isEmpty {
                 root.removeValue(forKey: "hooks")
             } else {
-                root["hooks"] = hooks
+                root["hooks"] = remaining
             }
         }
 
@@ -113,6 +108,29 @@ public struct HookInstaller: Sendable {
         } else {
             try Self.writeSettings(root, to: settingsURL)
         }
+    }
+
+    /// `hooks` with every handler of ours removed; groups and events left empty by
+    /// that are dropped. Anything that is not ours passes through untouched.
+    static func removingOurHandlers(from hooks: [String: Any]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (event, groupsAny) in hooks {
+            guard let groups = groupsAny as? [[String: Any]] else {
+                result[event] = groupsAny
+                continue
+            }
+            let kept: [[String: Any]] = groups.compactMap { group in
+                var group = group
+                guard var handlers = group["hooks"] as? [[String: Any]] else { return group }
+                let before = handlers.count
+                handlers.removeAll(where: isOurHandler)
+                if handlers.isEmpty && before > 0 { return nil } // group was only ours
+                group["hooks"] = handlers
+                return group
+            }
+            if !kept.isEmpty { result[event] = kept }
+        }
+        return result
     }
 
     // MARK: - Handler shape
@@ -146,7 +164,7 @@ public struct HookInstaller: Sendable {
         return args.contains(hookURL) && args.contains("--unix-socket")
     }
 
-    static func containsOurHandler(_ group: [String: Any]) -> Bool {
+        static func containsOurHandler(_ group: [String: Any]) -> Bool {
         ((group["hooks"] as? [[String: Any]]) ?? []).contains(where: isOurHandler)
     }
 

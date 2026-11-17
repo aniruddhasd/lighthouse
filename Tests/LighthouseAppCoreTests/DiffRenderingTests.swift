@@ -53,6 +53,19 @@ struct DiffPageBuilderTests {
         }
         #expect(nonce(page) != nonce(again))
     }
+
+    @Test func filesAreCollapsible() {
+        let page = DiffPageBuilder.page(
+            diff: "diff --git a/x b/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n")
+        // Collapse-all/expand-all controls and the per-file toggle class + wiring.
+        #expect(page.contains("id=\"lh-collapse-all\""))
+        #expect(page.contains("id=\"lh-expand-all\""))
+        #expect(page.contains("lh-collapsed"))
+        #expect(page.contains("lh-chevron"))
+        #expect(page.contains("addEventListener('click'"))
+        // CSP-safe: listeners are attached in the nonce'd script, never inline.
+        #expect(!page.contains("onclick="))
+    }
 }
 
 @Suite("PatchCapper")
@@ -252,34 +265,23 @@ struct DiffRefresherTests {
         await refresher.refreshNow()
         #expect(counter.count == 1) // did not wait 5s
     }
-}
 
-@Suite("ConflictPageBuilder security")
-struct ConflictPageBuilderTests {
-
-    @Test func hostileBlockContentNeverAppearsRawInHTML() {
-        let page = ConflictPageBuilder.page(path: "evil.txt", blocks: ConflictPageBuilder.hostileBlocks)
-        #expect(!page.contains("<script>window.__pwned=true</script>"))
-        #expect(!page.contains("onerror=\"window.__pwned=true\""))
-        #expect(!page.contains("nonce=steal"))
-        // Content is present only inside the base64 payload.
-        #expect(page.contains("default-src 'none'"))
-        #expect(!page.contains("http://"))
-        #expect(!page.contains("https://"))
-    }
-
-    @Test func pathIsAlsoBase64NotRaw() {
-        let page = ConflictPageBuilder.page(
-            path: "</h2><script>alert(1)</script>", blocks: [])
-        #expect(!page.contains("<script>alert(1)</script>"))
-    }
-
-    @Test func nonceDiffersPerBuild() {
-        func nonce(_ html: String) -> String? {
-            html.components(separatedBy: "'nonce-").dropFirst().first?
-                .components(separatedBy: "'").first
+    @Test func setIntervalChangesDebounceForNextBurst() async throws {
+        let counter = Counter()
+        // A 5 s default would never fire inside the assertion window; the
+        // shortened interval must take effect for the burst that follows it.
+        let refresher = DiffRefresher(interval: .seconds(5)) {
+            counter.increment()
         }
-        #expect(nonce(ConflictPageBuilder.page(path: "a", blocks: []))
-                != nonce(ConflictPageBuilder.page(path: "a", blocks: [])))
+        await refresher.setInterval(.milliseconds(50))
+        await refresher.noteChange()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(counter.count == 1, "shortened interval never fired: \(counter.count)")
+    }
+
+    @Test func backgroundDebounceIsSlowerThanForeground() {
+        // The whole point of the background cadence: fewer main-thread refreshes
+        // while the review surface is hidden.
+        #expect(DiffRefresher.backgroundDebounce > DiffRefresher.defaultDebounce)
     }
 }

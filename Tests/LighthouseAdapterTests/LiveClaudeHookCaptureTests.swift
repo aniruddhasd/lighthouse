@@ -2,62 +2,25 @@ import Foundation
 import Testing
 import LighthouseFixtures
 import LighthouseGit
-import LighthouseTaskEngine
 @testable import LighthouseAdapter
 
-/// Delegates to the real adapter while capturing every raw payload — the
-/// captured JSON is what docs/claude-code-contract.md quotes.
-private final class PayloadRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var payloads: [Data] = []
-    func record(_ data: Data) {
-        lock.lock(); payloads.append(data); lock.unlock()
-    }
-    var all: [Data] {
-        lock.lock(); defer { lock.unlock() }; return payloads
-    }
-}
-
-private struct RecordingAdapter: AgentAdapter {
-    let base = ClaudeCodeAdapter()
-    let recorder: PayloadRecorder
-    var kind: String { base.kind }
-    func launchPlan(for spec: SessionSpec) throws -> LaunchPlan { try base.launchPlan(for: spec) }
-    func resumePlan(for spec: SessionSpec, sessionRef: String) throws -> LaunchPlan {
-        try base.resumePlan(for: spec, sessionRef: sessionRef)
-    }
-    func prepareWorkspaceAttention(in workspace: URL, socketPath: URL) async throws {
-        try await base.prepareWorkspaceAttention(in: workspace, socketPath: socketPath)
-    }
-    func removeWorkspaceAttention(from workspace: URL) async throws {
-        try await base.removeWorkspaceAttention(from: workspace)
-    }
-    func attentionSignal(fromPayload payload: Data) -> AgentAttentionSignal? {
-        recorder.record(payload)
-        return base.attentionSignal(fromPayload: payload)
-    }
-}
-
 /// ONE live end-to-end run against the real installed Claude Code CLI in -p
-/// mode: project-local hooks (installed by our HookInstaller) → curl →
-/// unix socket → listener → attributed signals. Gated because it spends one
-/// real (haiku, single-turn) API call and needs a logged-in account:
+/// mode: hooks installed by our HookInstaller → curl → unix socket → listener →
+/// parsed `HookEvent`s. Gated because it spends one real (haiku, single-turn)
+/// API call and needs a logged-in account:
 ///
 ///   LIGHTHOUSE_LIVE_CLAUDE_TEST=1 swift test --filter LiveClaudeHookCapture
 ///
 /// Optional: LIGHTHOUSE_LIVE_CLAUDE_BIN (default ~/.local/bin/claude),
-/// LIGHTHOUSE_LIVE_CLAUDE_CONFIG_DIR (default ~/.claude-enterprise, matching
-/// the per-folder account this project runs under). Reads the account's
-/// config; never writes to it beyond normal session history.
+/// LIGHTHOUSE_LIVE_CLAUDE_CONFIG_DIR (default ~/.claude-enterprise, matching the
+/// per-folder account this project runs under). This covers -p mode only; the
+/// interactive session is observed through the app's Supervision card.
 @Suite(
     "Live Claude Code hook capture",
     .enabled(if: ProcessInfo.processInfo.environment["LIGHTHOUSE_LIVE_CLAUDE_TEST"] == "1"))
 final class LiveClaudeHookCaptureTests {
     private let fixtures = try! FixtureFactory()
-
-    deinit {
-        try? fixtures.destroy()
-    }
+    deinit { try? fixtures.destroy() }
 
     @Test(.timeLimit(.minutes(5)))
     func printModeDeliversHooksThroughOurSocket() async throws {
@@ -68,28 +31,19 @@ final class LiveClaudeHookCaptureTests {
         try #require(FileManager.default.isExecutableFile(atPath: claudeBin),
                      "claude binary not found at \(claudeBin)")
 
-        // Workspace fixture + listener + hooks, exactly as production wires
-        // them. The socket lives in a SHORT temp path: sun_path caps unix
-        // socket paths at ~104 bytes and the fixture root is too deep.
         let repo = try fixtures.cleanRepo()
+        // SHORT socket path: sun_path caps at ~104 bytes.
         let socketDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("lh-live-\(UUID().uuidString.prefix(8))", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: socketDir) }
-        let recorder = PayloadRecorder()
-        let listener = AttentionSocketListener(
-            directory: socketDir, adapter: RecordingAdapter(recorder: recorder))
+        let listener = HookEventListener(directory: socketDir)
         let socketURL = try await listener.start()
         defer { listener.stop() }
-
-        let installer = HookInstaller()
-        try await installer.install(in: repo.path, socketPath: socketURL)
+        try await HookInstaller().install(in: repo.path, socketPath: socketURL)
 
         let sessionId = UUID().uuidString.lowercased()
-        let taskId = UUID()
-        await listener.register(sessionRef: sessionId, taskId: taskId)
-        let stream = await listener.signals()
+        let stream = await listener.events()
 
-        // Non-interactive one-shot; trust dialog is skipped in -p mode.
         var claudeEnv = env
         claudeEnv["CLAUDE_CONFIG_DIR"] = configDir
         async let run = ProcessRunner.run(
@@ -99,28 +53,28 @@ final class LiveClaudeHookCaptureTests {
             workingDirectory: repo.path,
             environment: claudeEnv)
 
-        var received: [AttentionEvent] = []
-        for await signal in stream {
-            #expect(signal.taskId == taskId)
-            received.append(signal.event)
-            if received.contains(.agentWorking) && received.contains(.agentStopped) {
-                break
-            }
+        var received: [HookEvent] = []
+        for await event in stream {
+            received.append(event)
+            if event.eventName == "SessionEnd" { break }
+            if received.count > 40 { break }
         }
 
         let result = try await run
         #expect(result.exitCode == 0, "claude -p failed: \(result.stderrText)")
-        #expect(received.contains(.agentWorking), "UserPromptSubmit never arrived")
-        #expect(received.contains(.agentStopped), "Stop never arrived")
+        let names = received.map(\.eventName)
+        #expect(names.contains("UserPromptSubmit"), "UserPromptSubmit never arrived: \(names)")
+        #expect(names.contains("Stop"), "Stop never arrived: \(names)")
+        // Attribution key: every event echoes the pre-assigned session id.
+        #expect(received.allSatisfy { $0.sessionId == sessionId },
+                "foreign session ids: \(Set(received.map(\.sessionId)))")
+        let stop = received.first { $0.eventName == "Stop" }
+        #expect(stop?.lastAssistantMessage?.contains("OK") == true)
 
-        // Dump raw payloads for the contract doc (session id is not a secret,
-        // but redact the home directory).
-        print("=== captured live hook payloads (\(recorder.all.count)) ===")
-        for payload in recorder.all {
-            let text = String(decoding: payload, as: UTF8.self)
-                .replacingOccurrences(of: home, with: "~")
-            print(text)
+        print("=== captured live hook events (\(received.count)) ===")
+        for e in received {
+            print("\(e.eventName) notif=\(e.notificationType ?? "-") agent=\(e.agentId ?? "-") reason=\(e.endReason ?? "-") keys=\(e.payloadKeys.joined(separator: ","))")
         }
-        print("=== end captured payloads ===")
+        print("=== end ===")
     }
 }

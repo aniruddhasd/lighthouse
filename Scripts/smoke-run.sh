@@ -19,6 +19,8 @@ socket="$HOME/Library/Application Support/Lighthouse/attention.sock"
 # --force-resolved-versions — this makes the gate independently fail fast).
 "$package_root/Scripts/verify-vendored-assets.sh" \
     "$package_root/Sources/LighthouseApp/Resources/diff2html"
+"$package_root/Scripts/verify-vendored-assets.sh" \
+    "$package_root/Sources/LighthouseApp/Resources/viewer"
 "$package_root/Scripts/verify-pins.sh" \
     "$package_root/Package.resolved" "$package_root/Scripts/pinned-revisions.txt"
 
@@ -358,10 +360,10 @@ filerender_pid=$!
 trap 'kill -9 "$filerender_pid" 2>/dev/null || true; rm -rf "$filerender_cfg"' EXIT
 
 filerender_tries=0
-until grep -q "FILERENDER result" "$filerender_log"; do
+until [ "$(grep -c "FILERENDER result" "$filerender_log")" -ge 3 ]; do
     filerender_tries=$((filerender_tries + 1))
     if [ "$filerender_tries" -gt 100 ]; then
-        echo "FILERENDER GATE: FAIL (no render result within 20s)" >&2
+        echo "FILERENDER GATE: FAIL (expected 3 render results within 20s)" >&2
         grep "FILERENDER" "$filerender_log" | tail -5 >&2 || true
         exit 1
     fi
@@ -384,25 +386,41 @@ rm -rf "$filerender_cfg"
 
 python3 - "$filerender_log" <<'PY'
 import json, sys
-line = next((l for l in open(sys.argv[1]) if l.startswith("FILERENDER result ")), None)
-assert line, "result line vanished"
-result = json.loads(line.removeprefix("FILERENDER result ").strip())
-print(f"FILERENDER dom: {result}")
+lines = [l for l in open(sys.argv[1]) if l.startswith("FILERENDER result ")]
+results = {}
+for l in lines:
+    name, _, payload = l.removeprefix("FILERENDER result ").strip().partition(" ")
+    results[name] = json.loads(payload)
 problems = []
-if result.get("error"):
-    problems.append(f"page error: {result['error']}")
-if result.get("scripts", -1) != 0:
-    problems.append(f"{result.get('scripts')} script tags inside rendered file")
-if result.get("imgs", -1) != 0:
-    problems.append(f"{result.get('imgs')} img tags survived")
-if result.get("handlers", -1) != 0:
-    problems.append(f"{result.get('handlers')} event handlers survived")
-if result.get("pwned") is not False:
-    problems.append("hostile script EXECUTED (window.__pwned set)")
-if result.get("hostileTextPresent") is not True:
-    problems.append("hostile content missing as text — file not actually rendered")
-if result.get("lines", 0) < 1:
-    problems.append(f"expected rendered lines, got {result.get('lines')}")
+for name in ("plain", "code", "markdown"):
+    result = results.get(name)
+    if result is None:
+        problems.append(f"{name}: no result")
+        continue
+    print(f"FILERENDER dom ({name}): {result}")
+    if result.get("error"):
+        problems.append(f"{name}: page error: {result['error']}")
+    if result.get("scripts", -1) != 0:
+        problems.append(f"{name}: {result.get('scripts')} script tags inside rendered file")
+    if result.get("imgs", -1) != 0:
+        problems.append(f"{name}: {result.get('imgs')} img tags survived")
+    if result.get("handlers", -1) != 0:
+        problems.append(f"{name}: {result.get('handlers')} event handlers survived")
+    if result.get("links", -1) != 0:
+        problems.append(f"{name}: {result.get('links')} live links survived")
+    if result.get("badTags", -1) != 0:
+        problems.append(f"{name}: {result.get('badTags')} forbidden elements survived")
+    if result.get("pwned") is not False:
+        problems.append(f"{name}: hostile script EXECUTED (window.__pwned set)")
+    if result.get("hostileTextPresent") is not True:
+        problems.append(f"{name}: hostile content missing as text — file not actually rendered")
+    if result.get("lines", 0) < 1:
+        problems.append(f"{name}: expected rendered lines, got {result.get('lines')}")
+# The new paths must really have run, not silently fallen back to plain text.
+if results.get("code", {}).get("highlighted", 0) < 1:
+    problems.append("code: highlighter produced no tokens (fell back to plain?)")
+if results.get("markdown", {}).get("rendered") is not True:
+    problems.append("markdown: rendered view is empty (fell back to source?)")
 if problems:
     print("FILERENDER GATE: FAIL (" + "; ".join(problems) + ")")
     sys.exit(1)
@@ -504,114 +522,8 @@ print("NAVIGATOR GATE: PASS")
 PY
 rm -f "$navigator_log"
 
-# --- Merge walk gate: the merge-back cycle end-to-end in the real app ------
-# LIGHTHOUSE_DEBUG_MERGEWALK=<clone> drives a task's merge-to-base over a
-# scripted conflicting repo: run -> assert paused-conflicted -> resolve every
-# text file via the transform API -> complete -> assert the walk completes.
-mergewalk_clone="$(mktemp -d)/clone"
-mkdir -p "$mergewalk_clone"
-git -C "$mergewalk_clone" init -q -b main
-git -C "$mergewalk_clone" config user.name smoke
-git -C "$mergewalk_clone" config user.email smoke@lighthouse.invalid
-git -C "$mergewalk_clone" config commit.gpgsign false
-printf 'alpha\ncommon\nomega\n' > "$mergewalk_clone/shared.txt"
-git -C "$mergewalk_clone" add shared.txt
-git -C "$mergewalk_clone" commit -qm base
-git -C "$mergewalk_clone" checkout -qb task
-printf 'alpha\ntask edit\nomega\n' > "$mergewalk_clone/shared.txt"
-git -C "$mergewalk_clone" commit -qam "task edit"
-git -C "$mergewalk_clone" checkout -q main
-printf 'alpha\nmain edit\nomega\n' > "$mergewalk_clone/shared.txt"
-git -C "$mergewalk_clone" commit -qam "main edit"
-
-mergewalk_log="$(mktemp)"
-mergewalk_cfg="$(mktemp -d)"
-LIGHTHOUSE_DEBUG_MERGEWALK="$mergewalk_clone" LIGHTHOUSE_CONFIG_DIR="$mergewalk_cfg" \
-    "$package_root/dist/Lighthouse.app/Contents/MacOS/Lighthouse" > "$mergewalk_log" 2>&1 &
-mw_pid=$!
-trap 'kill -9 "$mw_pid" 2>/dev/null || true; rm -rf "$mergewalk_cfg" "$(dirname "$mergewalk_clone")"' EXIT
-
-mw_tries=0
-until grep -q "MERGEWALK-STAGE completed\|MERGEWALK-STAGE not-completed\|MERGEWALK-STAGE unexpected-state" "$mergewalk_log"; do
-    mw_tries=$((mw_tries + 1))
-    if [ "$mw_tries" -gt 100 ]; then
-        echo "MERGEWALK GATE: FAIL (no terminal stage within 20s)" >&2
-        grep "MERGEWALK-STAGE" "$mergewalk_log" >&2 || true
-        exit 1
-    fi
-    if ! kill -0 "$mw_pid" 2>/dev/null; then
-        echo "MERGEWALK GATE: FAIL (app exited during walk)" >&2
-        grep "MERGEWALK-STAGE" "$mergewalk_log" >&2 || true
-        exit 1
-    fi
-    sleep 0.2
-done
-kill -TERM "$mw_pid" 2>/dev/null || true
-mw_tries=0
-while kill -0 "$mw_pid" 2>/dev/null; do
-    mw_tries=$((mw_tries + 1))
-    [ "$mw_tries" -gt 15 ] && kill -9 "$mw_pid" 2>/dev/null || true
-    [ "$mw_tries" -gt 40 ] && break
-    sleep 0.2
-done
-trap - EXIT
-rm -rf "$mergewalk_cfg" "$(dirname "$mergewalk_clone")"
-
-python3 - "$mergewalk_log" <<'PY'
-import sys
-stages = [l.strip() for l in open(sys.argv[1]) if l.startswith("MERGEWALK-STAGE")]
-print("MERGEWALK stages:", " | ".join(s.removeprefix("MERGEWALK-STAGE ") for s in stages))
-def has(substr): return any(substr in s for s in stages)
-problems = []
-if not has("paused conflicted="): problems.append("walk never paused on a conflict")
-if not has("completed"): problems.append("walk never completed after resolution")
-if has("not-completed") or has("unexpected-state"): problems.append("walk ended in a bad state")
-if problems:
-    print("MERGEWALK GATE: FAIL (" + "; ".join(problems) + ")")
-    sys.exit(1)
-print("MERGEWALK GATE: PASS")
-PY
-rm -f "$mergewalk_log"
-
-# --- Notification gate: decision + UN* enqueue path in the real app --------
-# UNUserNotificationCenter SIGTRAPs unless the app is launched by
-# LaunchServices, so this probe launches via `open` (how the real app runs)
-# and writes results to a file. It asserts the DECISION (needs-input fires,
-# suppressed when the task is viewed) and that the request ENQUEUED — banner
-# DISPLAY needs the user's authorization and is NOT asserted here (honest).
-notify_out="$(mktemp -d)/notify.txt"
-notify_cfg="$(mktemp -d)"
-open -n --env "LIGHTHOUSE_DEBUG_NOTIFY=$notify_out" --env "LIGHTHOUSE_CONFIG_DIR=$notify_cfg" \
-    "$package_root/dist/Lighthouse.app"
-trap 'pkill -9 -f "dist/Lighthouse.app/Contents/MacOS/Lighthouse" 2>/dev/null || true; rm -rf "$notify_cfg" "$(dirname "$notify_out")"' EXIT
-notify_tries=0
-until grep -q "NOTIFY-STAGE done" "$notify_out" 2>/dev/null; do
-    notify_tries=$((notify_tries + 1))
-    if [ "$notify_tries" -gt 100 ]; then
-        echo "NOTIFY GATE: FAIL (no result within 20s)" >&2
-        cat "$notify_out" 2>/dev/null >&2 || true
-        exit 1
-    fi
-    sleep 0.2
-done
-pkill -9 -f "dist/Lighthouse.app/Contents/MacOS/Lighthouse" 2>/dev/null || true
-trap - EXIT
-python3 - "$notify_out" <<'PY'
-import sys
-lines = dict(
-    l.strip().removeprefix("NOTIFY-STAGE ").split("=", 1)
-    for l in open(sys.argv[1]) if l.startswith("NOTIFY-STAGE ") and "=" in l)
-print(f"NOTIFY stages: {lines}")
-problems = []
-if lines.get("decision") != "needsInput": problems.append(f"decision={lines.get('decision')}")
-if lines.get("suppressed-when-viewed") != "true": problems.append("not suppressed when viewed")
-if lines.get("enqueued") != "true": problems.append("request not enqueued")
-if problems:
-    print("NOTIFY GATE: FAIL (" + "; ".join(problems) + ")")
-    sys.exit(1)
-print("NOTIFY GATE: PASS (banner display depends on user authorization — not asserted)")
-PY
-rm -rf "$notify_cfg" "$(dirname "$notify_out")"
+# The notification gate was removed with the attention/hook system (2026-07-29):
+# Lighthouse no longer posts notifications, so there is nothing to assert here.
 
 # --- Theme gate: the runtime theme foundation in the real app --------------
 # The Theme tokens are pure and unit-tested, but the LIVE flip + the custom
@@ -779,15 +691,9 @@ def want(key, val):
 
 # The live grid rendered the five seeded cards.
 want("rendered-cards", "5")
-# HarborOrder: needs -> working -> idle(done) -> stale(dirty). A wrong sort
-# (plain name, or InboxOrder's needs->working->dirty->done) fails here.
-want("sort", "needs-input,needs-input,working,done,dirty")
-# Each filter chip selects exactly its mapped state's subset.
-want("filter-all", "5")
-want("filter-needs", "2")
-want("filter-working", "1")
-want("filter-idle", "1")
-want("filter-stale", "1")
+# The standard task order includes every seeded task (status filters were
+# removed with the attention system — one ordered list, no chips).
+want("ordered-count", "5")
 # card -> Focus and ⌘K -> Focus both flip the runtime, with selection applied.
 want("card-open-view", "focus")
 want("card-open-selected", "true")

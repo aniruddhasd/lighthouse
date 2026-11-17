@@ -18,7 +18,6 @@ final class AppModelTests {
         storeDirectory = fixtures.root.appendingPathComponent("store", isDirectory: true)
         model = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root.appendingPathComponent("attention.sock"),
             adapter: ClaudeCodeAdapter(),
             loginShell: "/bin/zsh")
         try model.load()
@@ -104,7 +103,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.repos == [registered])
@@ -145,55 +143,6 @@ final class AppModelTests {
         #expect(reloaded.tasks.isEmpty)
     }
 
-    /// A failure AFTER the engine finished creating (here: the base tip carries
-    /// an invalid committed `.claude/settings.local.json`, so hook installation
-    /// throws) must tear the engine's worktree + branch back down — otherwise a
-    /// retry trips over `branchAlreadyExists` on invisible on-disk debris.
-    @Test func postEngineFailureRollsBackWorktreeAndBranch() async throws {
-        let repo = try fixtures.cleanRepo()
-        // Commit an invalid settings file onto main so the created worktree
-        // checks it out and hook install refuses it (existingSettingsInvalid).
-        let claudeDir = repo.path.appendingPathComponent(".claude", isDirectory: true)
-        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
-        try "{ not valid json".write(
-            to: claudeDir.appendingPathComponent("settings.local.json"),
-            atomically: true, encoding: .utf8)
-        // Force-add: `.claude/` is commonly in a global/XDG gitignore, which git
-        // still honours even with GIT_CONFIG_GLOBAL masked, so a plain add would
-        // stage nothing and the commit would be empty.
-        _ = try fixtures.git(
-            ["add", "-f", ".claude/settings.local.json"], in: repo.path)
-        _ = try fixtures.git(["commit", "-m", "poison settings"], in: repo.path)
-        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
-
-        await #expect {
-            _ = try await self.model.createTask(
-                name: "poisoned", branch: "task/poisoned", repoIds: [registered.id])
-        } throws: { error in
-            guard case .existingSettingsInvalid = error as? HookInstallerError else { return false }
-            return true
-        }
-
-        // Model + store hold nothing.
-        #expect(model.tasks.isEmpty)
-        #expect(try ConfigStore(directory: storeDirectory).load().tasks.isEmpty)
-        // And crucially: no orphaned worktree or branch on disk.
-        let destination = TaskEngine.worktreeDestination(
-            for: registered, taskName: "poisoned", worktreesRootOverride: nil)
-        #expect(!FileManager.default.fileExists(atPath: destination.path))
-        let branches = try fixtures.git(["branch", "--list", "task/poisoned"], in: repo.path)
-        #expect(branches.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-        // Debris-free means a retry is possible: register a clean repo path is
-        // not needed — recommitting valid settings lets the SAME branch name
-        // succeed, proving the branch was really deleted.
-        _ = try fixtures.git(["rm", "-f", ".claude/settings.local.json"], in: repo.path)
-        _ = try fixtures.git(["commit", "-m", "drop settings"], in: repo.path)
-        let (task, _) = try await model.createTask(
-            name: "poisoned", branch: "task/poisoned", repoIds: [registered.id])
-        #expect(model.tasks == [task])
-    }
-
     @Test func creatingWithNoReposSelectedThrowsRatherThanCrashing() async throws {
         await #expect {
             _ = try await self.model.createTask(
@@ -206,7 +155,7 @@ final class AppModelTests {
         #expect(model.tasks.isEmpty)
     }
 
-    @Test func createTaskWiresSessionHooksAndPlan() async throws {
+    @Test func createTaskWiresSessionAndPlan() async throws {
         let repoA = try fixtures.cleanRepo()
         let repoB = try fixtures.cleanRepo()
         let a = try await model.registerRepo(path: repoA.path, baseBranch: "main")
@@ -229,15 +178,6 @@ final class AppModelTests {
         #expect(command.contains("--add-dir"))
         #expect(command.contains(task.workspaces[1].worktreePath))
         #expect(plan.workingDirectory.path == task.workspaces[0].worktreePath)
-
-        // Hooks live in the PRIMARY worktree only (--add-dir loads no
-        // sibling .claude config — verified contract fact).
-        let primarySettings = task.workspaces[0].worktreeURL
-            .appendingPathComponent(".claude/settings.local.json")
-        let siblingSettings = task.workspaces[1].worktreeURL
-            .appendingPathComponent(".claude/settings.local.json")
-        #expect(FileManager.default.fileExists(atPath: primarySettings.path))
-        #expect(!FileManager.default.fileExists(atPath: siblingSettings.path))
     }
 
     @Test func worktreesRootOverrideFlowsIntoCreationAndPersists() async throws {
@@ -253,7 +193,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.worktreesRootOverride == override.path)
@@ -267,9 +206,84 @@ final class AppModelTests {
 
         try await model.removeTask(task, mode: .refuseIfHazards)
         #expect(model.tasks.isEmpty)
-        #expect(model.attention[task.id] == nil)
+        #expect(!model.isSessionLive(task.id))
         let reloaded = try ConfigStore(directory: storeDirectory).load()
         #expect(reloaded.tasks.isEmpty)
+    }
+
+    @Test func removeWorkspaceRefusesTheTasksLastRepo() async throws {
+        let repo = try fixtures.cleanRepo()
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "solo", branch: "task/solo", repoIds: [registered.id])
+
+        await #expect {
+            _ = try await self.model.removeWorkspace(
+                fromTask: task.id, repoId: registered.id, mode: .refuseIfHazards)
+        } throws: { error in
+            guard case .cannotRemoveLastWorkspace(let id) = error as? TaskEngineError else {
+                return false
+            }
+            return id == task.id
+        }
+        // The task and its only workspace are left fully intact.
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.count == 1)
+    }
+
+    @Test func removeWorkspaceDropsOneRepoAndPersists() async throws {
+        let a = try fixtures.cleanRepo()
+        let b = try fixtures.cleanRepo()
+        let ra = try await model.registerRepo(path: a.path, baseBranch: "main")
+        let rb = try await model.registerRepo(path: b.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "pair", branch: "task/pair", repoIds: [ra.id, rb.id])
+        #expect(task.workspaces.count == 2)
+
+        _ = try await model.removeWorkspace(
+            fromTask: task.id, repoId: rb.id, mode: .refuseIfHazards)
+
+        let updated = try #require(model.tasks.first(where: { $0.id == task.id }))
+        #expect(updated.workspaces.map(\.repoId) == [ra.id])
+        // Persisted: a reloaded store drops the same workspace.
+        let reloaded = try ConfigStore(directory: storeDirectory).load()
+        #expect(reloaded.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+    }
+
+    @Test func detachWorkspaceUntracksButKeepsWorktreeAndBranch() async throws {
+        let a = try fixtures.cleanRepo()
+        let b = try fixtures.cleanRepo()
+        let ra = try await model.registerRepo(path: a.path, baseBranch: "main")
+        let rb = try await model.registerRepo(path: b.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "pair-detach", branch: "task/pair-detach", repoIds: [ra.id, rb.id])
+        let bWorktree = try #require(task.workspaces.first { $0.repoId == rb.id }).worktreeURL
+
+        try model.detachWorkspace(fromTask: task.id, repoId: rb.id)
+
+        // Untracked from the task and persisted…
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+        let reloaded = try ConfigStore(directory: storeDirectory).load()
+        #expect(reloaded.tasks.first(where: { $0.id == task.id })?.workspaces.map(\.repoId) == [ra.id])
+        // …but NOTHING on disk was deleted: the worktree dir and branch survive.
+        #expect(FileManager.default.fileExists(atPath: bWorktree.path))
+        #expect(try await GitClient().branchExists("task/pair-detach", in: rb.pathURL))
+    }
+
+    @Test func detachRefusesTheTasksLastRepo() async throws {
+        let repo = try fixtures.cleanRepo()
+        let registered = try await model.registerRepo(path: repo.path, baseBranch: "main")
+        let (task, _) = try await model.createTask(
+            name: "solo-detach", branch: "task/solo-detach", repoIds: [registered.id])
+
+        #expect {
+            try self.model.detachWorkspace(fromTask: task.id, repoId: registered.id)
+        } throws: { error in
+            guard case .cannotRemoveLastWorkspace(let id) = error as? TaskEngineError else {
+                return false
+            }
+            return id == task.id
+        }
+        #expect(model.tasks.first(where: { $0.id == task.id })?.workspaces.count == 1)
     }
 
     // MARK: UI preferences (Phase 5 — startView / showBeam setters)
@@ -283,7 +297,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.startView == "focus")
@@ -298,7 +311,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.showBeam == false)
@@ -314,7 +326,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.startView == "harbor")
@@ -330,7 +341,6 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.terminalFontSize == 11)
@@ -347,13 +357,12 @@ final class AppModelTests {
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
         #expect(reloaded.terminalFontSize == AppModel.terminalFontRange.lowerBound)
     }
 
-    // MARK: Attention reducer
+    // MARK: Session liveness (the one honest status signal)
 
     private func makeTask(named name: String = "attn") async throws -> TaskRecord {
         let repo = try fixtures.cleanRepo()
@@ -362,154 +371,332 @@ final class AppModelTests {
             name: name, branch: AppModel.branchSlug(from: name), repoIds: [registered.id]).task
     }
 
-    @Test func signalsFoldThroughTheStateMachine() async throws {
+    /// noteSessionStarted/Ended maintain `liveSessions` — the only automatic
+    /// signal. There is no agent-status inference and no persistence of it.
+    @Test func sessionLivenessTracksStartAndEnd() async throws {
         let task = try await makeTask()
+        #expect(!model.isSessionLive(task.id))
         model.noteSessionStarted(taskId: task.id)
-        #expect(model.attentionState(of: task.id) == .working)
-
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentNeedsInput))
-        #expect(model.attentionState(of: task.id) == .needsInput)
-
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentStopped))
-        #expect(model.attentionState(of: task.id) == .done)
-    }
-
-    @Test func unknownTaskSignalsAreIgnored() async throws {
-        _ = try await makeTask()
-        let before = model.attention
-        model.apply(TaskAttentionSignal(
-            taskId: UUID(), sessionRef: "ghost", event: .agentNeedsInput))
-        #expect(model.attention == before)
-    }
-
-    @Test func outOfOrderEventsLandDefined() async throws {
-        let task = try await makeTask()
-        model.noteSessionStarted(taskId: task.id)
-        // Straggling stop after death must not hide the orphaned state.
+        #expect(model.isSessionLive(task.id))
         model.noteSessionEnded(taskId: task.id)
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentStopped))
-        #expect(model.attentionState(of: task.id) == .dirty)
+        #expect(!model.isSessionLive(task.id))
     }
 
-    @Test func attentionStatePersistsAcrossReload() async throws {
+    /// A start for an unknown task id is ignored (guards the removal race).
+    @Test func startForUnknownTaskIsIgnored() async throws {
+        model.noteSessionStarted(taskId: UUID())
+        #expect(model.liveSessions.isEmpty)
+    }
+
+    /// Liveness is session-only: nothing about it is persisted, so a fresh model
+    /// (a relaunch) reads every task as not-live.
+    @Test func livenessIsNeverPersisted() async throws {
         let task = try await makeTask()
         model.noteSessionStarted(taskId: task.id)
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentNeedsInput))
 
         let reloaded = AppModel(
             store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
             adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
         try reloaded.load()
-        #expect(reloaded.attentionState(of: task.id) == .needsInput)
+        #expect(!reloaded.isSessionLive(task.id))
     }
 
-    // MARK: Load-seed reconciliation of a stale `.working`
+    // MARK: Free-text status
 
-    /// Craft a persisted task with a chosen state + sessionRef, write it to the
-    /// store, and return a fresh model loaded from disk (mirrors a relaunch).
-    private func reloadFrom(state: TaskAttentionState, sessionRef: String?) throws -> (AppModel, UUID) {
-        let record = TaskRecord(
-            name: "resurrected", branch: "task/resurrected", adapterKind: "claude-code",
-            sessionRef: sessionRef, state: state,
-            workspaces: [Workspace(
-                repoId: UUID(),
-                worktreePath: fixtures.root.appendingPathComponent("wt").path,
-                mergeState: .unmerged)])
-        try ConfigStore(directory: storeDirectory).save(LighthouseConfig(tasks: [record]))
-        let reloaded = AppModel(
-            store: ConfigStore(directory: storeDirectory),
-            socketPath: fixtures.root,
-            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
-        try reloaded.load()
-        return (reloaded, record.id)
-    }
-
-    /// A task last persisted as `.working` (no pty can be live at load) must come
-    /// back `.dirty` so Resume and the interrupted-workspace warning both appear.
-    /// This FAILS on the unpatched load(), which seeds `.working` verbatim →
-    /// canResume == false → the dead-end "No session for this task." pane.
-    @Test func loadReconcilesPersistedWorkingToDirty() async throws {
-        let (reloaded, taskId) = try reloadFrom(state: .working, sessionRef: "sess-live")
-        #expect(reloaded.attentionState(of: taskId) == .dirty)
-        let task = try #require(reloaded.tasks.first { $0.id == taskId })
-        #expect(reloaded.canResume(task))
-    }
-
-    /// Every non-`.working` persisted state is truthful and seeds unchanged.
-    @Test func loadLeavesNonWorkingStatesUntouched() async throws {
-        for state in [TaskAttentionState.dirty, .done, .needsInput] {
-            let (reloaded, taskId) = try reloadFrom(state: state, sessionRef: "sess-\(state.rawValue)")
-            #expect(reloaded.attentionState(of: taskId) == state)
-        }
-    }
-
-    /// The reconciliation lives ONLY at the load seam: a genuine in-session
-    /// transition to `.working` via the state machine is never rewritten to
-    /// `.dirty`. Guards against the fix leaking into the live pipeline.
-    @Test func liveWorkingTransitionIsNotReconciled() async throws {
+    /// The user's free-text status is trimmed, persists, and survives a reload.
+    @Test func statusIsSetTrimmedAndPersisted() async throws {
         let task = try await makeTask()
-        model.noteSessionStarted(taskId: task.id) // live → .working
-        #expect(model.attentionState(of: task.id) == .working)
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentWorking))
-        #expect(model.attentionState(of: task.id) == .working)
+        model.setStatus("  waiting on review  ", for: task.id)
+        #expect(model.tasks.first { $0.id == task.id }?.status == "waiting on review")
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.first { $0.id == task.id }?.status == "waiting on review")
+    }
+
+    /// Supervision is opt-in (default off), persists across a reload, and a
+    /// pre-feature config (no `supervised` key) decodes as unsupervised.
+    @Test func supervisedDefaultsOffPersistsAndLegacyDecodesOff() async throws {
+        let task = try await makeTask()
+        #expect(task.supervised == false)
+        model.setTaskSupervised(true, for: task.id)
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.first { $0.id == task.id }?.supervised == true)
+
+        let legacy = Data(#"""
+        {"id":"\#(UUID().uuidString)","name":"n","branch":"b","adapterKind":"claude-code","workspaces":[]}
+        """#.utf8)
+        #expect(try JSONDecoder().decode(TaskRecord.self, from: legacy).supervised == false)
+    }
+
+    /// Hiding a task drops it from ⌘K, persists across a reload, and unhiding
+    /// brings it back.
+    @Test func hidingExcludesFromSwitcherAndPersists() async throws {
+        let task = try await makeTask(named: "secret")
+        #expect(task.hidden == false)
+        #expect(model.switcherEntries(query: "").contains { $0.id == task.id })
+
+        model.setTaskHidden(true, for: task.id)
+        #expect(model.tasks.first { $0.id == task.id }?.hidden == true)
+        #expect(!model.switcherEntries(query: "").contains { $0.id == task.id })
+        #expect(model.switcherEntries(query: "secret").isEmpty) // not even by name
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.first { $0.id == task.id }?.hidden == true)
+
+        model.setTaskHidden(false, for: task.id)
+        #expect(model.switcherEntries(query: "").contains { $0.id == task.id })
+    }
+
+    /// The per-task base-branch override is trimmed, persists across a reload,
+    /// and an empty value clears it back to the repo default.
+    @Test func baseOverrideSetsPersistsAndClears() async throws {
+        let task = try await makeTask()
+        let repoId = task.workspaces[0].repoId
+        func override(in m: AppModel) -> String?? {
+            m.tasks.first { $0.id == task.id }?.workspaces[0].baseOverride
+        }
+        #expect(override(in: model) == .some(nil)) // default: no override
+
+        model.setWorkspaceBaseOverride(taskId: task.id, repoId: repoId, base: "  develop  ")
+        #expect(override(in: model) == "develop") // trimmed
+
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(override(in: reloaded) == "develop") // survived relaunch
+
+        model.setWorkspaceBaseOverride(taskId: task.id, repoId: repoId, base: "   ")
+        #expect(override(in: model) == .some(nil)) // empty clears it
     }
 
     // MARK: Derivations
 
+    /// Resume needs a stored session and NO live session (a live one is already
+    /// open — go to it, don't resume). A task with no sessionRef never resumes.
     @Test func resumeAffordanceMatrix() async throws {
-        // Persistent-shell model: resume is available whenever there's a
-        // session and the agent is not actively working (the runtime types
-        // `claude --resume` into the live shell, or opens a new tab).
         let task = try await makeTask()
-        #expect(model.canResume(task))                       // freshly created, done
-        model.noteSessionStarted(taskId: task.id)            // launching → working
-        #expect(!model.canResume(task))                      // not while working
-        model.apply(TaskAttentionSignal(
-            taskId: task.id, sessionRef: task.sessionRef!, event: .agentStopped))
-        #expect(model.canResume(task))                       // agent idle → resumable
-        model.noteSessionEnded(taskId: task.id)              // shell exited → dirty
-        #expect(model.canResume(task))                       // still resumable
-        // A task with no sessionRef is never resumable.
+        #expect(model.canResume(task))            // has sessionRef, not live
+        model.noteSessionStarted(taskId: task.id)
+        #expect(!model.canResume(task))           // live → go to it
+        model.noteSessionEnded(taskId: task.id)
+        #expect(model.canResume(task))            // ended → resumable again
         var bare = task
         bare.sessionRef = nil
-        #expect(!model.canResume(bare))
+        #expect(!model.canResume(bare))           // no session ref → never
     }
 
-    @Test func quitConfirmationListsOnlyLiveWorkingTasks() async throws {
-        let working = try await makeTask(named: "busy")
-        let idle = try await makeTask(named: "idle")
-        let deadNotResumed = try await makeTask(named: "dead")
+    /// Any task with a live session blocks quit; ended/never-started do not.
+    @Test func quitConfirmationListsEveryLiveSession() async throws {
+        let live = try await makeTask(named: "busy")
+        _ = try await makeTask(named: "idle")
+        let ended = try await makeTask(named: "ended")
 
-        model.noteSessionStarted(taskId: working.id)
-        model.noteSessionStarted(taskId: idle.id)
-        model.apply(TaskAttentionSignal(
-            taskId: idle.id, sessionRef: idle.sessionRef!, event: .agentStopped))
-        model.noteSessionStarted(taskId: deadNotResumed.id)
-        model.noteSessionEnded(taskId: deadNotResumed.id)
+        model.noteSessionStarted(taskId: live.id)
+        model.noteSessionStarted(taskId: ended.id)
+        model.noteSessionEnded(taskId: ended.id)
 
-        #expect(model.tasksBlockingQuit().map(\.id) == [working.id])
+        #expect(model.tasksBlockingQuit().map(\.id) == [live.id])
     }
 
-    @Test func switcherPutsNeedsInputFirstAndFiltersFuzzily() async throws {
+    /// ⌘K search fuzzy-filters by name; empty query returns the standard order.
+    @Test func switcherFiltersFuzzilyByName() async throws {
         let alpha = try await makeTask(named: "alpha payments")
         let beta = try await makeTask(named: "beta payments")
         _ = try await makeTask(named: "unrelated chore")
 
-        model.apply(TaskAttentionSignal(
-            taskId: beta.id, sessionRef: beta.sessionRef!, event: .agentNeedsInput))
-
-        let all = model.switcherEntries(query: "")
-        #expect(all.first?.id == beta.id) // inbox: needs-input first
-        #expect(all.count == 3)
-
-        let filtered = model.switcherEntries(query: "payments")
-        #expect(filtered.map(\.id) == [beta.id, alpha.id])
+        #expect(model.switcherEntries(query: "").count == 3)
+        let filtered = model.switcherEntries(query: "payments").map(\.id)
+        #expect(Set(filtered) == Set([alpha.id, beta.id]))
         #expect(model.switcherEntries(query: "zzz").isEmpty)
+    }
+
+    /// The standard task order puts live sessions first, then most-recent.
+    @Test func orderedTasksPutsLiveSessionsFirst() async throws {
+        _ = try await makeTask(named: "one")
+        let two = try await makeTask(named: "two")
+        model.noteSessionStarted(taskId: two.id)
+        #expect(model.orderedTasks().first?.id == two.id)
+    }
+
+    /// The keyboard-navigation primitive: wraps both ends, seeds sensibly from
+    /// no selection, and is nil only when there's nothing to step through.
+    @Test func stepTaskWrapsAndSeeds() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let ids = [a, b, c]
+        // forward / back from a real position
+        #expect(AppModel.stepTask(ids: ids, from: a, delta: 1) == b)
+        #expect(AppModel.stepTask(ids: ids, from: b, delta: -1) == a)
+        // wrap at both ends
+        #expect(AppModel.stepTask(ids: ids, from: c, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: ids, from: a, delta: -1) == c)
+        // no selection: +1 → first, -1 → last
+        #expect(AppModel.stepTask(ids: ids, from: nil, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: ids, from: nil, delta: -1) == c)
+        // an id not in the list is treated as "no selection"
+        #expect(AppModel.stepTask(ids: ids, from: UUID(), delta: 1) == a)
+        // single element wraps to itself; empty is nil
+        #expect(AppModel.stepTask(ids: [a], from: a, delta: 1) == a)
+        #expect(AppModel.stepTask(ids: [], from: nil, delta: 1) == nil)
+    }
+
+    // MARK: - Clone & register (spec option D) — failures first
+
+    @Test func cloneWithEmptyURLRejectedBeforeCloning() async throws {
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: "   ", destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .invalidRemoteURL("   ")
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneWithOptionLookalikeURLRejected() async throws {
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: "--upload-pack=/tmp/pwn", destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .invalidRemoteURL("--upload-pack=/tmp/pwn")
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneIntoExistingDestinationRefused() async throws {
+        let source = try fixtures.cleanRepo()
+        // A folder already occupying the derived destination name.
+        let occupied = fixtures.root.appendingPathComponent(
+            source.path.lastPathComponent, isDirectory: true)
+        try FileManager.default.createDirectory(at: occupied, withIntermediateDirectories: true)
+
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: source.path.path, destinationParent: self.fixtures.root)
+        } throws: { error in
+            error as? RepoRegistrationError == .destinationExists(path: occupied.path)
+        }
+        #expect(model.repos.isEmpty)
+    }
+
+    @Test func cloneIntoMissingParentRejectedBeforeCloning() async throws {
+        let source = try fixtures.cleanRepo()
+        let ghostParent = fixtures.root.appendingPathComponent("no-such-parent")
+        await #expect {
+            try await self.model.cloneAndRegister(
+                remoteURL: source.path.path, destinationParent: ghostParent)
+        } throws: { error in
+            error as? RepoRegistrationError == .pathDoesNotExist(ghostParent.path)
+        }
+    }
+
+    // MARK: - Clone & register — happy path
+
+    @Test func cloneAndRegisterClonesThenRegisters() async throws {
+        let source = try fixtures.cleanRepo()
+        let parent = fixtures.root.appendingPathComponent("clones", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let registered = try await model.cloneAndRegister(
+            remoteURL: source.path.path, destinationParent: parent)
+
+        // Registered against the freshly-cloned working tree, base auto-detected.
+        let expectedPath = parent.appendingPathComponent(source.path.lastPathComponent)
+            .resolvingSymlinksInPath().path
+        #expect(registered.path == expectedPath)
+        #expect(registered.baseBranch == "main")
+        #expect(model.repos.map(\.id) == [registered.id])
+        // Survives a reload — it is an ordinary registration.
+        #expect(try ConfigStore(directory: storeDirectory).load().repos.count == 1)
+    }
+
+    @Test func cloneAndRegisterRespectsFolderNameOverride() async throws {
+        let source = try fixtures.cleanRepo()
+        let parent = fixtures.root.appendingPathComponent("clones2", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let registered = try await model.cloneAndRegister(
+            remoteURL: source.path.path, destinationParent: parent, folderName: "renamed")
+
+        #expect(registered.path.hasSuffix("/renamed"))
+        #expect(FileManager.default.fileExists(atPath: registered.path))
+    }
+
+    // MARK: - repoName derivation
+
+    // MARK: - PR task naming
+
+    @Test func prTaskNameSanitizesTitleAndHonorsOverride() {
+        let info = PullRequestInfo(number: 14, title: "fix: cache/eviction bug")
+        // Default: PR title, path-safe (slashes → dashes).
+        #expect(AppModel.taskName(fromPR: info, override: nil) == "fix: cache-eviction bug")
+        // Override wins when non-empty.
+        #expect(AppModel.taskName(fromPR: info, override: "my task") == "my task")
+        #expect(AppModel.taskName(fromPR: info, override: "  ") == "fix: cache-eviction bug")
+        // A title that sanitizes to nothing falls back to pr-<N>.
+        #expect(AppModel.taskName(
+            fromPR: PullRequestInfo(number: 7, title: "   "), override: nil) == "pr-7")
+    }
+
+    // MARK: - Scratch terminal (repo-less, ephemeral)
+
+    /// A scratch task carries NO workspaces (the terminal-only discriminator),
+    /// names itself after the directory, stashes the path in `branch`, and is
+    /// ephemeral — a reload (mirroring relaunch) must not bring it back.
+    @Test func scratchTaskIsWorkspaceLessAndNeverPersisted() async throws {
+        let dir = try fixtures.nonRepoDirectory()
+        let scratch = model.createScratchTask(directory: dir)
+
+        #expect(scratch.workspaces.isEmpty)
+        #expect(scratch.branch == dir.path)
+        #expect(scratch.name == dir.lastPathComponent)
+        #expect(model.tasks.map(\.id) == [scratch.id])
+        #expect(!model.isSessionLive(scratch.id))
+
+        // Ephemeral: nothing on disk, gone after a reload.
+        #expect(try ConfigStore(directory: storeDirectory).load().tasks.isEmpty)
+        let reloaded = AppModel(
+            store: ConfigStore(directory: storeDirectory),
+            adapter: ClaudeCodeAdapter(), loginShell: "/bin/zsh")
+        try reloaded.load()
+        #expect(reloaded.tasks.isEmpty)
+    }
+
+    /// A scratch terminal opened at $HOME is labelled "Home", not ".".
+    @Test func scratchTaskAtHomeIsLabelledHome() {
+        let scratch = model.createScratchTask(
+            directory: FileManager.default.homeDirectoryForCurrentUser)
+        #expect(scratch.name == "Home")
+    }
+
+    /// Removing a scratch task drops it from the model and clears its attention
+    /// entry — with no engine/worktree work, since it owns nothing on disk.
+    @Test func removeScratchTaskDropsItFromTheModel() throws {
+        let dir = try fixtures.nonRepoDirectory()
+        let scratch = model.createScratchTask(directory: dir)
+        #expect(model.tasks.count == 1)
+
+        model.removeScratchTask(scratch.id)
+        #expect(model.tasks.isEmpty)
+        #expect(!model.isSessionLive(scratch.id))
+    }
+
+    @Test func repoNameStripsGitSuffixAcrossURLShapes() {
+        #expect(AppModel.repoName(fromURL: "git@github.com:org/repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo") == "repo")
+        #expect(AppModel.repoName(fromURL: "https://github.com/org/repo/") == "repo")
+        #expect(AppModel.repoName(fromURL: "git@host:repo.git") == "repo")
+        #expect(AppModel.repoName(fromURL: "") == nil)
+        #expect(AppModel.repoName(fromURL: "/") == nil)
     }
 }

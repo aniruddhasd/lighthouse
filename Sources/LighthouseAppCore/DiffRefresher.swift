@@ -11,8 +11,14 @@ import Foundation
 ///  - stop() cancels everything.
 public actor DiffRefresher {
     public static let defaultDebounce: Duration = .milliseconds(300)
+    /// Slower cadence used while the review surface is hidden. The changed-file
+    /// tree nobody is watching still self-heals, but its ~300 ms main-thread
+    /// refresh stops competing with SwiftTerm's drawing during heads-down
+    /// terminal typing. Reverts to `defaultDebounce` (plus an immediate refresh)
+    /// the instant the navigator is reopened, so a revealed tree is never stale.
+    public static let backgroundDebounce: Duration = .milliseconds(1500)
 
-    private let interval: Duration
+    private var interval: Duration
     private let action: @Sendable () async -> Void
     private var pending = false
     private var worker: Task<Void, Never>?
@@ -24,6 +30,13 @@ public actor DiffRefresher {
     ) {
         self.interval = interval
         self.action = action
+    }
+
+    /// Adjusts the debounce applied to SUBSEQUENT bursts. A debounce already in
+    /// flight keeps its current sleep; the new interval takes effect on the next
+    /// event. Owner-driven (review visible ⇔ foreground cadence).
+    public func setInterval(_ newInterval: Duration) {
+        interval = newInterval
     }
 
     /// Called for every filesystem event; cheap and non-blocking.

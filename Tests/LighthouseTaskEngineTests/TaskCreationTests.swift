@@ -371,7 +371,7 @@ final class TaskCreationTests {
         #expect(task.branch == "task/payments-fix")
         #expect(task.adapterKind == "claude-code")
         #expect(task.sessionRef == nil)
-        #expect(task.state == .done)
+        #expect(task.status.isEmpty)
         #expect(task.workspaces.count == 2)
         #expect(task.workspaces.allSatisfy { $0.mergeState == .unmerged })
 

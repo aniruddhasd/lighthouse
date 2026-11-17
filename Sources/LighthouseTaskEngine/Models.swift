@@ -29,15 +29,6 @@ public struct RepoConfig: Codable, Sendable, Equatable, Identifiable {
     public var pathURL: URL { URL(fileURLWithPath: path, isDirectory: true) }
 }
 
-/// Task attention state (spec §3 attention pipeline):
-/// working / needs-input / done / dirty.
-public enum TaskAttentionState: String, Codable, Sendable, Equatable, CaseIterable {
-    case working
-    case needsInput = "needs-input"
-    case done
-    case dirty
-}
-
 /// Per-workspace merge-back progress. Partially-merged tasks are a visible
 /// state, not an error (spec §2.5) — hence a value per workspace, not per task.
 public enum WorkspaceMergeState: String, Codable, Sendable, Equatable, CaseIterable {
@@ -60,27 +51,34 @@ public struct Workspace: Codable, Sendable, Equatable {
     /// nested inside TaskRecord and both-way tolerant (older builds ignore it on
     /// read), so it needs no top-level config schema bump.
     public var isInPlace: Bool
+    /// The base branch this task's "vs base" diff compares against — a branch
+    /// name. nil means "use the repo's registered `baseBranch`" (the branch the
+    /// worktree was created from). Changeable per task (from the Summary tab) so
+    /// a task can diff against any branch. Absent in older configs → decodes nil.
+    public var baseOverride: String?
 
     public init(
         repoId: UUID, worktreePath: String, mergeState: WorkspaceMergeState,
-        isInPlace: Bool = false
+        isInPlace: Bool = false, baseOverride: String? = nil
     ) {
         self.repoId = repoId
         self.worktreePath = worktreePath
         self.mergeState = mergeState
         self.isInPlace = isInPlace
+        self.baseOverride = baseOverride
     }
 
     public var worktreeURL: URL { URL(fileURLWithPath: worktreePath, isDirectory: true) }
 
-    /// Custom decode so a legacy workspace (no `isInPlace` key) loads as a
-    /// worktree — the only safe default for the removal path.
+    /// Custom decode so a legacy workspace (no `isInPlace`/`baseOverride` keys)
+    /// loads as a worktree with the repo-default base — the only safe defaults.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         repoId = try c.decode(UUID.self, forKey: .repoId)
         worktreePath = try c.decode(String.self, forKey: .worktreePath)
         mergeState = try c.decode(WorkspaceMergeState.self, forKey: .mergeState)
         isInPlace = try c.decodeIfPresent(Bool.self, forKey: .isInPlace) ?? false
+        baseOverride = try c.decodeIfPresent(String.self, forKey: .baseOverride)
     }
 }
 
@@ -95,25 +93,65 @@ public struct TaskRecord: Codable, Sendable, Equatable, Identifiable {
     public var branch: String
     public var adapterKind: String
     public var sessionRef: String?
-    public var state: TaskAttentionState
+    /// Free-text status the user sets by hand (e.g. "waiting on review"). Empty
+    /// means unset. Replaces the old automatic attention state — Lighthouse no
+    /// longer infers a task's status from agent hooks; whether a SESSION is live
+    /// is tracked separately and honestly (AppModel.liveSessions).
+    public var status: String
+    /// User-hidden: dropped from the Harbor grid and the ⌘K switcher until
+    /// revealed. Purely a view preference — the task, its worktrees and session
+    /// are untouched. Absent in older configs → decodes to false.
+    public var hidden: Bool
+    /// Opted in to supervision (orchestrator phase 1a, docs/orchestrator-design.md):
+    /// Lighthouse installs observation hooks in this task's workspaces and logs the
+    /// agent's hook events. Off by default; an unsupervised task is never wired and
+    /// emits nothing. Absent in older configs → decodes to false.
+    public var supervised: Bool
     public var workspaces: [Workspace]
 
     public init(
         id: UUID = UUID(), name: String, branch: String, adapterKind: String,
-        sessionRef: String? = nil, state: TaskAttentionState, workspaces: [Workspace]
+        sessionRef: String? = nil, status: String = "", hidden: Bool = false,
+        supervised: Bool = false, workspaces: [Workspace]
     ) {
         self.id = id
         self.name = name
         self.branch = branch
         self.adapterKind = adapterKind
         self.sessionRef = sessionRef
-        self.state = state
+        self.status = status
+        self.hidden = hidden
+        self.supervised = supervised
         self.workspaces = workspaces
     }
 
-    /// True when every workspace runs in-place (investigation mode). A task is
-    /// created all-in-place or all-worktree — never mixed — so the UI keys its
-    /// merge/branch affordances off this. An empty task is not in-place.
+    private enum CodingKeys: String, CodingKey {
+        case id, name, branch, adapterKind, sessionRef, status, hidden, supervised, workspaces
+    }
+
+    /// Custom decode so configs written before free-text status (which carried a
+    /// `state` enum instead) still load: the legacy `state` key is ignored and
+    /// `status`/`hidden` default. Encode is synthesized.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        branch = try c.decode(String.self, forKey: .branch)
+        adapterKind = try c.decode(String.self, forKey: .adapterKind)
+        sessionRef = try c.decodeIfPresent(String.self, forKey: .sessionRef)
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        supervised = try c.decodeIfPresent(Bool.self, forKey: .supervised) ?? false
+        workspaces = try c.decode([Workspace].self, forKey: .workspaces)
+    }
+
+    /// True when EVERY workspace runs in-place (investigation mode) — the UI
+    /// keys its merge/branch affordances off this. A task is created either
+    /// all-in-place or all-worktree, but a later "add repo to task" can mix
+    /// tracked (in-place/adopted) workspaces into a worktree task; that is safe
+    /// because merge-back and removal both test `isInPlace` PER WORKSPACE, so a
+    /// mixed task merges/removes its worktree workspaces and leaves the tracked
+    /// ones untouched. An empty task is not in-place.
     public var isInPlace: Bool {
         !workspaces.isEmpty && workspaces.allSatisfy(\.isInPlace)
     }

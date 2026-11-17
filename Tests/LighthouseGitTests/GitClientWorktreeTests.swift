@@ -134,4 +134,38 @@ final class GitClientWorktreeTests {
         #expect(status.head == .branch("task/one"))
         #expect(status.isClean)
     }
+
+    // MARK: Branch listing (base picker source)
+
+    @Test func listBranchesReturnsLocalBranchesFromAnyWorktree() async throws {
+        let repo = try fixtures.cleanRepo() // default branch "main"
+        try await client.createBranch("develop", at: "HEAD", in: repo.path)
+        try await client.createBranch("feature/x", at: "HEAD", in: repo.path)
+        #expect(Set(await client.listBranches(in: repo.path)) == ["main", "develop", "feature/x"])
+
+        // Branches are shared, so a linked worktree lists the same set.
+        let destination = repo.path.deletingLastPathComponent().appendingPathComponent("wt")
+        try await client.addWorktree(at: destination, newBranch: "task/y", from: "main", in: repo.path)
+        #expect(Set(await client.listBranches(in: destination))
+                == ["main", "develop", "feature/x", "task/y"])
+    }
+
+    @Test func listBranchesOnNonRepoReturnsEmptyNeverThrows() async throws {
+        #expect(await client.listBranches(in: try fixtures.nonRepoDirectory()).isEmpty)
+    }
+
+    @Test func addDetachedWorktreeChecksOutRefWithNoBranch() async throws {
+        let repo = try fixtures.cleanRepo()
+        let baseTip = try await client.revParse("HEAD", in: repo.path)
+        let destination = repo.path.deletingLastPathComponent()
+            .appendingPathComponent("detached-wt")
+
+        try await client.addDetachedWorktree(at: destination, from: "HEAD", in: repo.path)
+
+        #expect(try await client.headCommit(in: destination) == baseTip)
+        // Detached: at the commit, but on no branch.
+        let status = try await client.status(in: destination)
+        #expect(status.head == .detached)
+        #expect(status.isClean)
+    }
 }

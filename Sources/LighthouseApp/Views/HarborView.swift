@@ -17,51 +17,36 @@ enum HarborDebug {
 }
 
 extension Theme {
-    /// Status → accent color: the clean mapping (spec §2) with no new state
-    /// machine — working, needsInput→needs(amber), done→idle(green),
-    /// dirty→stale(muted yellow).
-    func accent(for state: TaskAttentionState) -> Color {
-        switch state {
-        case .working: return working
-        case .needsInput: return needs
-        case .done: return idle
-        case .dirty: return stale
-        }
-    }
+    /// Session-liveness → dot color. Green (`idle` token) when a session is
+    /// live for the task, muted (`dim`) when not. Replaces the old
+    /// attention-state palette — the only automatic signal now is "is a session
+    /// live", which Lighthouse observes directly.
+    func liveAccent(_ live: Bool) -> Color { live ? idle : dim }
 }
 
-/// Human-facing status label (the redesign's vocabulary: idle/unaccounted).
-func harborStatusLabel(_ state: TaskAttentionState) -> String {
-    switch state {
-    case .working: return "Working"
-    case .needsInput: return "Needs you"
-    case .done: return "Idle"
-    case .dirty: return "Unaccounted"
-    }
-}
-
-/// A 9px status dot in the state accent. `.working` gets a pulsing expanding
-/// ring (~1.6s infinite, handoff) — reduce-motion gated, so it is a steady dot
-/// when motion is off. The ring is an OVERLAY (never changes the dot's frame),
-/// so a pulsing dot never reflows the row. `glow` adds the needs-you amber halo.
+/// A small dot indicating SESSION LIVENESS: the state accent green when a live
+/// session exists for the task, muted otherwise. When live it CAN pulse, but
+/// only where `pulses` is opted in (harbor rows) — a per-frame animation is
+/// kept off the terminal screens (profiled 2026-07-27). The ring is an OVERLAY
+/// (never changes the dot's frame), so a pulsing dot never reflows the row.
 struct StatusDot: View {
     @Environment(\.theme) private var theme
     @Environment(\.motionEnabled) private var motionEnabled
-    let state: TaskAttentionState
+    let live: Bool
     var size: CGFloat = 9
-    var glow: Bool = false
+    var pulses: Bool = false
     @State private var pulsing = false
 
     var body: some View {
-        let accent = theme.accent(for: state)
+        let accent = theme.liveAccent(live)
         Circle()
             .fill(accent)
             .frame(width: size, height: size)
             .overlay {
-                // Only the working state pulses, and only when motion is on:
-                // the ring view is absent under reduce-motion, so no infinite
-                // animation is ever mounted (not merely paused).
-                if state == .working && motionEnabled {
+                // A live session can pulse, only when motion is on and the caller
+                // opted in: the ring view is otherwise absent (not merely paused),
+                // so no infinite animation is ever mounted.
+                if live && motionEnabled && pulses {
                     Circle()
                         .stroke(accent, lineWidth: 1.5)
                         .scaleEffect(pulsing ? 2.6 : 1)
@@ -72,27 +57,28 @@ struct StatusDot: View {
                         .onAppear { pulsing = true }
                 }
             }
-            .shadow(color: glow ? accent.opacity(0.65) : .clear, radius: glow ? 5 : 0)
     }
 }
 
-/// Status pill: `{accent}22` bg, `{accent}55` border, `{accent}` text, radius
-/// 20 (handoff §1 card head row).
+/// A pill showing the user's free-text status. Renders NOTHING when the status
+/// is empty (unset) — no fabricated "Idle"/"Working"; the card just omits it.
 struct StatusPill: View {
     @Environment(\.theme) private var theme
-    let state: TaskAttentionState
+    let status: String
 
     var body: some View {
-        let accent = theme.accent(for: state)
-        Text(harborStatusLabel(state))
-            .font(LHFont.pill)
-            .foregroundStyle(accent)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
-            .background(accent.opacity(0.13),
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.pill))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.pill)
-                .strokeBorder(accent.opacity(0.33), lineWidth: 1))
+        if !status.isEmpty {
+            Text(status)
+                .font(LHFont.pill)
+                .foregroundStyle(theme.dim)
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(theme.panel2,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.pill))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.pill)
+                    .strokeBorder(theme.border2, lineWidth: 1))
+        }
     }
 }
 
@@ -118,17 +104,29 @@ struct HarborView: View {
     @Environment(\.theme) private var theme
     @Binding var showCreateTask: Bool
 
-    private var orderedFilteredTasks: [TaskRecord] {
-        runtime.model.harborOrder().filter {
-            runtime.nav.filter.matches(runtime.model.attentionState(of: $0.id))
-        }
+    /// Keyboard-focus targets Tab cycles through on Harbor. We hold key focus on
+    /// the whole grid (a focusable container) and track the target ourselves,
+    /// rather than wiring @FocusState into every button — SwiftUI's per-control
+    /// Tab traversal is unreliable for a mixed grid + chrome layout.
+    enum Field: Hashable { case tasks, reposHeader, addRepo, newTask, scratch, search }
+    @State private var field: Field = .tasks
+    @FocusState private var hasKeyFocus: Bool
+
+    /// The targets present right now, in Tab order: the task grid, then the repos
+    /// chevron + Add-repo, then New-task / Scratch / Search.
+    private var tabOrder: [Field] {
+        var order: [Field] = []
+        if !runtime.model.tasks.isEmpty { order.append(.tasks) }
+        if !runtime.model.repos.isEmpty { order += [.reposHeader, .addRepo] }
+        order += [.newTask, .scratch, .search]
+        return order
     }
 
     var body: some View {
-        let cards = orderedFilteredTasks
+        @Bindable var runtime = runtime
+        let cards = runtime.visibleHarborTasks
         VStack(spacing: 0) {
             header
-            filterChips
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
                     if runtime.model.tasks.isEmpty {
@@ -147,7 +145,70 @@ struct HarborView: View {
         // A background layer: never affects the grid layout, never intercepts
         // clicks (the beam is allowsHitTesting(false)).
         .background(HarborBackground())
-        .onAppear { HarborDebug.emit("rendered-cards=\(cards.count)") }
+        // Hold key focus on the whole Harbor so Tab / arrows / Return reach the
+        // handler below; draw our own per-field ring, not the container's.
+        .focusable()
+        .focused($hasKeyFocus)
+        .focusEffectDisabled()
+        .onKeyPress(phases: .down) { handleKey($0) }
+        .onAppear {
+            hasKeyFocus = true
+            if !tabOrder.contains(field) { field = tabOrder.first ?? .newTask }
+            HarborDebug.emit("rendered-cards=\(cards.count)")
+        }
+    }
+
+    // MARK: Keyboard focus traversal
+
+    /// Tab / Shift-Tab cycle fields; arrows browse the grid when it's focused,
+    /// else step fields; Return activates the focused field.
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        switch press.key {
+        case .tab:
+            cycleField(press.modifiers.contains(.shift) ? -1 : 1); return .handled
+        case .return:
+            activateField(); return .handled
+        case .leftArrow, .upArrow:
+            if field == .tasks { runtime.moveHarborHighlight(-1) } else { cycleField(-1) }
+            return .handled
+        case .rightArrow, .downArrow:
+            if field == .tasks { runtime.moveHarborHighlight(1) } else { cycleField(1) }
+            return .handled
+        default:
+            return .ignored
+        }
+    }
+
+    private func cycleField(_ delta: Int) {
+        let order = tabOrder
+        guard !order.isEmpty else { return }
+        let i = order.firstIndex(of: field) ?? (delta > 0 ? -1 : 0)
+        field = order[((i + delta) % order.count + order.count) % order.count]
+        // Entering the grid seeds the card highlight; leaving it clears it.
+        if field == .tasks {
+            if runtime.harborHighlightedTaskId == nil { runtime.moveHarborHighlight(1) }
+        } else {
+            runtime.harborHighlightedTaskId = nil
+        }
+    }
+
+    private func activateField() {
+        switch field {
+        case .tasks: runtime.openHarborHighlight()
+        case .reposHeader: runtime.model.setReposCollapsed(!runtime.model.reposCollapsed)
+        case .addRepo: runtime.registerRepoPresented = true
+        case .newTask: showCreateTask = true
+        case .scratch: runtime.promptAndOpenScratchTerminal()
+        case .search: runtime.switcherPresented = true
+        }
+    }
+
+    /// A ring on whichever chrome control is the current Tab target. `radius`
+    /// matches the control's own corner radius so the ring hugs it.
+    @ViewBuilder private func focusRing(_ target: Field, radius: CGFloat = Theme.Radius.search) -> some View {
+        RoundedRectangle(cornerRadius: radius)
+            .strokeBorder(theme.primary, lineWidth: field == target ? 2 : 0)
+            .allowsHitTesting(false)
     }
 
     // MARK: Header
@@ -163,7 +224,10 @@ struct HarborView: View {
                     .foregroundStyle(theme.dim)
             }
             Spacer()
+            if runtime.hiddenTaskCount > 0 { hiddenToggle }
+            supervisorButton
             searchButton
+            scratchTerminalButton
             newTaskButton
         }
         .padding(.leading, Theme.Metric.gutter)
@@ -172,11 +236,48 @@ struct HarborView: View {
         .padding(.bottom, 6)
     }
 
+    /// Reveal / re-hide the hidden tasks. Only shown when some exist.
+    private var hiddenToggle: some View {
+        Button { runtime.showHiddenTasks.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: runtime.showHiddenTasks ? "eye" : "eye.slash")
+                Text("Hidden \(runtime.hiddenTaskCount)").font(LHFont.button)
+            }
+            .foregroundStyle(runtime.showHiddenTasks ? theme.primary : theme.dim)
+            .padding(.horizontal, 12).frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(runtime.showHiddenTasks ? "Re-hide hidden tasks" : "Show hidden tasks")
+    }
+
+    /// Opens the Supervisor panel; its label says whether the supervisor is on or halted.
+    private var supervisorButton: some View {
+        let runner = runtime.supervisor
+        let state = runner.state.haltReason != nil ? "halted"
+            : (runner.settings.enabled ? (runner.settings.automatic ? "auto" : "on") : "off")
+        return Button { runtime.supervisorPanelPresented = true } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "binoculars")
+                Text("Supervisor \(state)").font(LHFont.button)
+            }
+            .foregroundStyle(state == "off" ? theme.dim : (state == "halted" ? theme.primary : theme.text))
+            .padding(.horizontal, 12).frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Configure the supervisor and run it by hand")
+    }
+
     private var subtitle: String {
         let n = runtime.model.tasks.count
         let m = runtime.model.repos.count
-        let k = runtime.model.needsInputCount
-        return "\(n) task\(n == 1 ? "" : "s") across \(m) repo\(m == 1 ? "" : "s") · \(k) need you"
+        let live = runtime.model.tasks.filter { runtime.model.isSessionLive($0.id) }.count
+        return "\(n) task\(n == 1 ? "" : "s") across \(m) repo\(m == 1 ? "" : "s") · \(live) live"
     }
 
     private var searchButton: some View {
@@ -196,6 +297,28 @@ struct HarborView: View {
                 .strokeBorder(theme.border2, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .overlay { focusRing(.search) }
+    }
+
+    /// A plain terminal in a chosen directory, with no repo — see
+    /// `AppRuntime.promptAndOpenScratchTerminal`. Always enabled (needs no
+    /// registered repo), which is the whole point.
+    private var scratchTerminalButton: some View {
+        Button { runtime.promptAndOpenScratchTerminal() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                Text("Scratch terminal").font(LHFont.button)
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 38)
+            .background(theme.panel2, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.search)
+                .strokeBorder(theme.border2, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .overlay { focusRing(.scratch) }
+        .help("Open a plain terminal in a chosen directory — no repo needed")
     }
 
     private var newTaskButton: some View {
@@ -210,33 +333,10 @@ struct HarborView: View {
             .background(theme.primary, in: RoundedRectangle(cornerRadius: Theme.Radius.search))
         }
         .buttonStyle(.plain)
+        .overlay { focusRing(.newTask) }
         .disabled(runtime.model.repos.isEmpty)
         .opacity(runtime.model.repos.isEmpty ? 0.5 : 1)
         .help(runtime.model.repos.isEmpty ? "Register a repo first" : "Create a new task")
-    }
-
-    // MARK: Filter chips
-
-    private var filterChips: some View {
-        FlowLayout(spacing: 9) {
-            ForEach(HarborFilter.allCases) { filter in
-                FilterChip(
-                    filter: filter,
-                    count: chipCount(filter),
-                    active: runtime.nav.filter == filter,
-                    action: { runtime.nav.setFilter(filter) })
-            }
-        }
-        .padding(.horizontal, Theme.Metric.gutter)
-        .padding(.top, 14)
-        .padding(.bottom, 16)
-    }
-
-    /// Chip counts come from the full task list mapped by state (spec §3).
-    private func chipCount(_ filter: HarborFilter) -> Int {
-        runtime.model.tasks.filter {
-            filter.matches(runtime.model.attentionState(of: $0.id))
-        }.count
     }
 
     // MARK: Task grid
@@ -251,6 +351,17 @@ struct HarborView: View {
                     TaskCardView(task: task)
                 }
                 .buttonStyle(.plain)
+                // A hidden task only appears here when "Hidden" is toggled on;
+                // dim it so it reads as hidden-but-revealed.
+                .opacity(task.hidden ? 0.5 : 1)
+                // Arrow-key browse highlight (Return opens it).
+                .overlay {
+                    if runtime.harborHighlightedTaskId == task.id {
+                        RoundedRectangle(cornerRadius: Theme.Radius.card)
+                            .strokeBorder(theme.primary, lineWidth: 2)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .taskContextMenu(for: task)
             }
         }
@@ -261,12 +372,27 @@ struct HarborView: View {
     @ViewBuilder
     private var reposSection: some View {
         if !runtime.model.repos.isEmpty {
+            let collapsed = runtime.model.reposCollapsed
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("REPOS")
-                        .font(LHFont.mono(13, .semibold))
-                        .tracking(0.6)
+                    // The whole "REPOS" label toggles the section — it carries
+                    // little action, so it opens collapsed and tucks away.
+                    Button { runtime.model.setReposCollapsed(!collapsed) } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("REPOS").font(LHFont.mono(13, .semibold)).tracking(0.6)
+                            if collapsed {
+                                Text("\(runtime.model.repos.count)")
+                                    .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                            }
+                        }
                         .foregroundStyle(theme.dim)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .overlay { focusRing(.reposHeader, radius: Theme.Radius.chip).padding(-4) }
+                    .help(collapsed ? "Show repos" : "Hide repos")
                     Spacer()
                     Button { runtime.registerRepoPresented = true } label: {
                         HStack(spacing: 5) {
@@ -280,14 +406,17 @@ struct HarborView: View {
                             .strokeBorder(theme.border2, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .overlay { focusRing(.addRepo, radius: Theme.Radius.chip) }
                     .help("Register another local repo")
                 }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
-                    spacing: 16
-                ) {
-                    ForEach(runtime.model.repos) { repo in
-                        RepoCardView(repo: repo, taskCount: taskCount(for: repo))
+                if !collapsed {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
+                        spacing: 16
+                    ) {
+                        ForEach(runtime.model.repos) { repo in
+                            RepoCardView(repo: repo, taskCount: taskCount(for: repo))
+                        }
                     }
                 }
             }
@@ -343,14 +472,17 @@ struct TaskCardView: View {
     let task: TaskRecord
     @State private var appeared = false
 
-    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
-        let accent = theme.accent(for: state)
+        let accent = theme.liveAccent(live)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 10) {
-                StatusDot(state: state, glow: state == .needsInput)
+                // Harbor rows are the ONLY place the live pulse animates: this
+                // screen is never on screen while a terminal is, so the per-frame
+                // layout cost can't steal SwiftTerm's main thread.
+                StatusDot(live: live, pulses: true)
                     .padding(.top, 4)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.name)
@@ -364,7 +496,7 @@ struct TaskCardView: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
-                StatusPill(state: state)
+                StatusPill(status: task.status)
             }
             // Footer (handoff §1): model chip · +add/−del · files · time. Every
             // slot is honest — a nil digest field renders NOTHING (never a fake
@@ -378,7 +510,7 @@ struct TaskCardView: View {
                     DiffMetrics(stat: stat)
                 }
                 Spacer(minLength: 8)
-                if let since = runtime.model.attentionSince(of: task.id) {
+                if let since = runtime.model.lastActivity(of: task.id) {
                     Text(relativeTime(since))
                         .font(LHFont.metaFaint)
                         .foregroundStyle(theme.faint)
@@ -398,11 +530,10 @@ struct TaskCardView: View {
                 .fill(accent)
                 .frame(width: 3)
         }
-        // Needs-you card glow shadow (handoff §1: `0 0 26px -8px {accent}`) —
-        // a STATIC ambient signal, not motion-gated. The 3px accent border
-        // above stays.
-        .shadow(color: state == .needsInput ? accent.opacity(0.5) : .clear,
-                radius: state == .needsInput ? 13 : 0)
+        // Live-session glow shadow — a STATIC ambient "this one is running"
+        // signal, not motion-gated. The 3px accent border above stays.
+        .shadow(color: live ? accent.opacity(0.5) : .clear,
+                radius: live ? 13 : 0)
         // fadeup entrance (~.4s subtle offset+opacity), reduce-motion gated:
         // when motion is off the card is shown in its final frame with no
         // animation.
@@ -476,91 +607,6 @@ struct RepoCardView: View {
     }
 }
 
-/// One Harbor filter chip: status dot (except All) + label + count. Active =
-/// status-tint bg + border + colored text; inactive = panel2/border2/dim.
-struct FilterChip: View {
-    @Environment(\.theme) private var theme
-    let filter: HarborFilter
-    let count: Int
-    let active: Bool
-    let action: () -> Void
-
-    private var label: String {
-        switch filter {
-        case .all: return "All"
-        case .needs: return "Needs you"
-        case .working: return "Working"
-        case .idle: return "Idle"
-        case .stale: return "Unaccounted"
-        }
-    }
-
-    var body: some View {
-        // The tint color for a chip: its mapped status accent, or primary for All.
-        let tint: Color = filter.attentionState.map { theme.accent(for: $0) } ?? theme.primary
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let state = filter.attentionState {
-                    Circle().fill(theme.accent(for: state)).frame(width: 7, height: 7)
-                }
-                Text(label).font(LHFont.button)
-                Text("\(count)").font(LHFont.metaFaint)
-                    .foregroundStyle(active ? tint.opacity(0.9) : theme.faint)
-            }
-            .foregroundStyle(active ? tint : theme.dim)
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(active ? tint.opacity(0.14) : theme.panel2,
-                        in: RoundedRectangle(cornerRadius: Theme.Radius.chip))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.chip)
-                .strokeBorder(active ? tint.opacity(0.45) : theme.border2, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// A minimal wrapping HStack for the filter chip row (the chips wrap; SwiftUI
-/// has no stock flow container pre-macOS 15, so a tiny Layout keeps the deploy
-/// target at macOS 14).
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 9
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var rows: [[CGSize]] = [[]]
-        var x: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth, !rows[rows.count - 1].isEmpty {
-                rows.append([]); x = 0
-            }
-            rows[rows.count - 1].append(size)
-            x += size.width + spacing
-        }
-        let height = rows.reduce(CGFloat(0)) { acc, row in
-            acc + (row.map(\.height).max() ?? 0) + spacing
-        } - (rows.isEmpty ? 0 : spacing)
-        return CGSize(width: maxWidth == .infinity ? x : maxWidth, height: max(0, height))
-    }
-
-    func placeSubviews(
-        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void
-    ) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX; y += rowHeight + spacing; rowHeight = 0
-            }
-            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-    }
-}
-
 /// Right-click actions shared by every task surface (Harbor card, beacon-rail
 /// dot): resume a resumable session, and remove the task (opens the
 /// confirmation sheet via `runtime.taskPendingRemoval`). Restores the affordance
@@ -571,11 +617,22 @@ private struct TaskContextMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content.contextMenu {
-            if runtime.model.canResume(task) {
-                Button("Resume Session") { runtime.resumeSession(for: task) }
-            }
-            Button("Remove Task…", role: .destructive) {
-                runtime.taskPendingRemoval = task
+            // A scratch terminal owns nothing on disk, so it skips the
+            // removal-hazard sheet and just closes.
+            if task.workspaces.isEmpty {
+                Button("Close Terminal", role: .destructive) {
+                    runtime.closeScratchTask(task)
+                }
+            } else {
+                if runtime.model.canResume(task) {
+                    Button("Resume Session") { runtime.resumeSession(for: task) }
+                }
+                Button(task.hidden ? "Unhide" : "Hide") {
+                    runtime.toggleTaskHidden(task)
+                }
+                Button("Remove Task…", role: .destructive) {
+                    runtime.taskPendingRemoval = task
+                }
             }
         }
     }

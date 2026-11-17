@@ -13,10 +13,9 @@ public enum WorktreeRemovalMode: Sendable, Equatable {
 }
 
 /// The single place Lighthouse ever invokes git. All subprocess execution
-/// uses argument arrays (no shell, no interpolation); every nonzero exit is
-/// a typed thrown error except merge conflicts, which are an expected state
-/// reported via `MergeOutcome`. This client has no network operations by
-/// design — no fetch, pull, or push exists here; Lighthouse is fully offline.
+/// uses argument arrays (no shell, no interpolation); every nonzero exit is a
+/// typed thrown error. This client has no network operations by design — no
+/// fetch, pull, or push exists here; Lighthouse is fully offline.
 public actor GitClient {
     private let gitExecutable: String
 
@@ -36,6 +35,15 @@ public actor GitClient {
     ) async throws {
         try await runExpectingSuccess(
             ["worktree", "add", "-b", newBranch, path.path, "--", baseRef], in: repository)
+    }
+
+    /// `git worktree add --detach <path> -- <ref>` — a worktree checked out at
+    /// `ref` with a DETACHED HEAD (no new branch created). The empty landing
+    /// spot a PR checkout switches onto the PR's branch (see PullRequestCheckout);
+    /// `--` fences a ref beginning with `-` from the option parser.
+    public func addDetachedWorktree(at path: URL, from ref: String, in repository: URL) async throws {
+        try await runExpectingSuccess(
+            ["worktree", "add", "--detach", path.path, "--", ref], in: repository)
     }
 
     /// Parsed `git worktree list --porcelain -z`.
@@ -91,12 +99,14 @@ public actor GitClient {
         return try Self.parseNameStatus(result.stdout)
     }
 
-    /// LIVE diff for the review pane: `git diff --merge-base <base> --` —
-    /// per git-diff(1), the working tree relative to the merge base of
-    /// <base> and HEAD. Covers committed + staged + unstaged in one
-    /// invocation and excludes base-side commits (verified live 2026-07-12);
-    /// untracked files are separate (see untrackedFilePatch).
-    public func liveDiff(againstMergeBaseOf base: String, in repository: URL) async throws -> String {
+    /// LIVE diff for the review pane: `git diff --merge-base <base> --`
+    /// (= `git diff <base>...HEAD`) — the worktree's NET FORWARD CHANGE on top of
+    /// `<base>`: committed + staged + unstaged relative to the merge base of
+    /// `<base>` and HEAD, so commits that are on the base branch but not this
+    /// worktree are excluded. This is exactly "what this worktree adds that a
+    /// merge into `<base>` would bring" (2026-08-03, user's framing). Untracked
+    /// files are appended separately (see untrackedFilePatch).
+    public func liveDiff(against base: String, in repository: URL) async throws -> String {
         let result = try await runExpectingSuccess(
             ["diff", "--merge-base", "--end-of-options", base, "--"], in: repository)
         return result.stdoutText
@@ -104,22 +114,37 @@ public actor GitClient {
 
     /// File list for the live diff: `git diff --name-status -z --merge-base <base> --`.
     public func liveDiffNameStatus(
-        againstMergeBaseOf base: String, in repository: URL
+        against base: String, in repository: URL
     ) async throws -> [DiffEntry] {
         let result = try await runExpectingSuccess(
             ["diff", "--name-status", "-z", "--merge-base", "--end-of-options", base, "--"], in: repository)
         return try Self.parseNameStatus(result.stdout)
     }
 
+    /// UNCOMMITTED changes only: `git diff HEAD --` — the working tree (staged +
+    /// unstaged) relative to the last commit, excluding committed branch work.
+    /// The "what have I not committed yet" view; untracked files are separate.
+    public func uncommittedDiff(in repository: URL) async throws -> String {
+        let result = try await runExpectingSuccess(
+            ["diff", "--end-of-options", "HEAD", "--"], in: repository)
+        return result.stdoutText
+    }
+
+    /// File list for the uncommitted diff: `git diff --name-status -z HEAD --`.
+    public func uncommittedNameStatus(in repository: URL) async throws -> [DiffEntry] {
+        let result = try await runExpectingSuccess(
+            ["diff", "--name-status", "-z", "--end-of-options", "HEAD", "--"], in: repository)
+        return try Self.parseNameStatus(result.stdout)
+    }
+
     /// Deterministic add/del/file counts for the live review surface:
-    /// `git diff --numstat --merge-base <base> --` — the working tree relative
-    /// to the merge base of `<base>` and HEAD (committed + staged + unstaged),
-    /// the same range as `liveDiff`. `--end-of-options` keeps a base ref
-    /// beginning with `-` out of git's option parser (verified git 2.50.1,
-    /// mirroring the neighbouring diff methods); parsing (binary `-`/`-`,
-    /// renames, zero-change) is handled by the pure `DiffStat.parse`. Untracked
-    /// files are NOT counted here (they never appear in a diff vs the merge
-    /// base) — the live review surface renders them separately.
+    /// `git diff --numstat --merge-base <base> --` — the worktree's net forward
+    /// change on top of `<base>` (committed + staged + unstaged relative to the
+    /// merge base), the same range as `liveDiff`, so the CHANGES card and the
+    /// review tree always agree. `--end-of-options` keeps a base ref beginning
+    /// with `-` out of git's option parser (verified git 2.50.1); parsing (binary
+    /// `-`/`-`, renames, zero-change) is handled by the pure `DiffStat.parse`.
+    /// Untracked files are NOT counted here — rendered separately.
     public func diffStat(worktree: URL, base: String) async throws -> DiffStat {
         let result = try await runExpectingSuccess(
             ["diff", "--numstat", "--merge-base", "--end-of-options", base, "--"], in: worktree)
@@ -137,96 +162,6 @@ public actor GitClient {
         case 0, 1: return result.stdoutText
         default: throw classify(result, arguments: arguments, in: repository)
         }
-    }
-
-    // MARK: - Merge
-
-    /// `git merge --no-edit <branch>`. A conflict is returned as
-    /// `.conflicted` with the unmerged paths — it is a state, not an error.
-    public func merge(_ branch: String, in repository: URL) async throws -> MergeOutcome {
-        let arguments = ["merge", "--no-edit", "--end-of-options", branch]
-        let result = try await run(arguments, in: repository)
-        return try await mergeOutcome(from: result, arguments: arguments, in: repository)
-    }
-
-    /// `git merge --continue` after conflicts have been resolved and staged.
-    /// Uses a no-op editor so the default merge-commit message is taken.
-    public func continueMerge(in repository: URL) async throws -> MergeOutcome {
-        let arguments = ["-c", "core.editor=true", "merge", "--continue"]
-        let result = try await run(arguments, in: repository)
-        return try await mergeOutcome(from: result, arguments: arguments, in: repository)
-    }
-
-    /// True while a merge is in progress (MERGE_HEAD exists), verified via
-    /// `git rev-parse -q --verify MERGE_HEAD` — the canonical check.
-    public func isMergeInProgress(in repository: URL) async throws -> Bool {
-        let result = try await run(["rev-parse", "-q", "--verify", "MERGE_HEAD"], in: repository)
-        switch result.exitCode {
-        case 0: return true
-        case 1 where result.stderrText.isEmpty: return false // -q: absent, quietly
-        default: throw classify(result, arguments: ["rev-parse", "-q", "--verify", "MERGE_HEAD"], in: repository)
-        }
-    }
-
-    /// `git checkout --conflict=zdiff3 -- <path>` — re-materializes conflict
-    /// markers (with the base section) in a conflicted file, e.g. after an
-    /// external editor mangled them.
-    public func rematerializeConflict(path: String, in repository: URL) async throws {
-        try await runExpectingSuccess(
-            ["checkout", "--conflict=zdiff3", "--", path], in: repository)
-    }
-
-    /// `git merge --abort` — restores the pre-merge state (index + working
-    /// tree). Non-destructive to committed work (verified git 2.50.1); the
-    /// in-app exit from a paused merge in the user's clone.
-    public func abortMerge(in repository: URL) async throws {
-        try await runExpectingSuccess(["merge", "--abort"], in: repository)
-    }
-
-    /// Which side of a conflict to take whole-file, for binary and
-    /// delete/modify cases where text markers do not exist.
-    public enum ConflictSide: Sendable { case ours, theirs }
-
-    /// `git checkout --ours|--theirs -- <path>` then stage it — whole-file
-    /// resolution for a binary conflict (no text transform possible).
-    public func takeWholeFile(_ side: ConflictSide, path: String, in repository: URL) async throws {
-        let flag = side == .ours ? "--ours" : "--theirs"
-        try await runExpectingSuccess(
-            ["--literal-pathspecs", "checkout", flag, "--", path], in: repository)
-        try await stage(paths: [path], in: repository)
-    }
-
-    /// Stages resolved paths: `git add -- <paths>`. Used after a conflict
-    /// transform writes resolved content, or to mark a whole-file/
-    /// keep-modified choice. Paths are pathspecs (not revisions); the `--`
-    /// separator keeps a path beginning with `-` out of the option parser
-    /// (`git add` does not accept `--end-of-options`; verified git 2.50.1).
-    /// `--literal-pathspecs` additionally disables pathspec magic, so a path
-    /// git handed us that begins with `:` (e.g. `:(exclude)`) is treated as a
-    /// literal filename rather than a magic pathspec — belt to the `--` braces.
-    public func stage(paths: [String], in repository: URL) async throws {
-        guard !paths.isEmpty else { return }
-        try await runExpectingSuccess(["--literal-pathspecs", "add", "--"] + paths, in: repository)
-    }
-
-    /// `git rm -- <path>` — the keep-deleted resolution for a delete/modify
-    /// conflict (records the deletion in the index). `--literal-pathspecs`
-    /// disables `:`-prefixed pathspec magic, same as `stage`.
-    public func removeConflictedPath(_ path: String, in repository: URL) async throws {
-        try await runExpectingSuccess(["--literal-pathspecs", "rm", "--", path], in: repository)
-    }
-
-    /// True when a conflicted path is binary: `git diff --numstat` between
-    /// its ours-stage (`:2:`) and theirs-stage (`:3:`) blobs prints `-` for
-    /// binary content (verified git 2.50.1). Callers must pass a genuinely
-    /// both-modified conflict (both stages present); delete/modify is
-    /// classified from the status `u` line instead.
-    public func isConflictBinary(path: String, in repository: URL) async throws -> Bool {
-        let result = try await runExpectingSuccess(
-            ["diff", "--numstat", "--end-of-options", ":2:\(path)", ":3:\(path)"],
-            in: repository)
-        // Format: "<added>\t<deleted>\t<path>"; binary → "-\t-\t<path>".
-        return result.stdoutText.hasPrefix("-\t-")
     }
 
     // MARK: - Branches
@@ -319,6 +254,20 @@ public actor GitClient {
         case 1: return nil // detached HEAD
         default: throw classify(result, arguments: ["symbolic-ref", "--short", "HEAD"], in: repository)
         }
+    }
+
+    /// Local branch names (`git for-each-ref refs/heads`), most-recent commit
+    /// first — the candidate list for choosing a diff base. Branches are shared
+    /// across a repo's worktrees, so this is valid from any linked worktree.
+    /// Returns [] on any failure, never throws into the picker.
+    public func listBranches(in repository: URL) async -> [String] {
+        guard let result = try? await run(
+            ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/heads"],
+            in: repository), result.exitCode == 0 else { return [] }
+        return result.stdoutText
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// Absolute path of the git directory for `repository`
@@ -543,6 +492,41 @@ public actor GitClient {
         return .text(String(decoding: data, as: UTF8.self))
     }
 
+    /// Overwrites an EXISTING file inside `worktree` with UTF-8 `contents`
+    /// (atomic temp-then-rename). Same canonical-containment guard as
+    /// `fileContents`: a path resolving outside the worktree — via `..`, an
+    /// absolute path, or an escaping symlink — is refused with
+    /// `pathOutsideWorktree`, never written. The file editor's save path; only
+    /// files the viewer already opened (existing, regular) are writable.
+    public func writeFile(worktree: URL, relativePath: String, contents: String) async throws {
+        guard let canonicalRoot = Self.realPath(worktree.path) else {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: "worktree root not resolvable")
+        }
+        let joined = URL(
+            fileURLWithPath: relativePath,
+            relativeTo: URL(fileURLWithPath: canonicalRoot, isDirectory: true))
+        guard let canonicalTarget = Self.realPath(joined.path) else {
+            throw GitClientError.fileUnwritable(relativePath: relativePath, reason: "no such file")
+        }
+        guard Self.isContained(canonicalTarget, within: canonicalRoot) else {
+            throw GitClientError.pathOutsideWorktree(relativePath: relativePath)
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: canonicalTarget, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: "not a regular file")
+        }
+        do {
+            try Data(contents.utf8).write(
+                to: URL(fileURLWithPath: canonicalTarget), options: .atomic)
+        } catch {
+            throw GitClientError.fileUnwritable(
+                relativePath: relativePath, reason: String(describing: error))
+        }
+    }
+
     /// realpath(3) wrapper: fully resolves symlinks and `..`; nil if the path
     /// does not exist. Mirrors FixtureFactory's use of realpath — chosen over
     /// URL.resolvingSymlinksInPath(), which strips the /private prefix on macOS.
@@ -593,19 +577,6 @@ public actor GitClient {
             throw classify(result, arguments: arguments, in: directory)
         }
         return result
-    }
-
-    private func mergeOutcome(
-        from result: ProcessResult, arguments: [String], in repository: URL
-    ) async throws -> MergeOutcome {
-        if result.exitCode == 0 { return .merged }
-        // Distinguish "stopped on conflicts" (a state) from real failure by
-        // the canonical marker: MERGE_HEAD exists while a merge is unresolved.
-        if try await isMergeInProgress(in: repository) {
-            let status = try await status(in: repository)
-            return .conflicted(paths: status.conflictedPaths)
-        }
-        throw classify(result, arguments: arguments, in: repository)
     }
 
     private func classify(

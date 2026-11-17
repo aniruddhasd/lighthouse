@@ -20,11 +20,14 @@ enum DiffWebViewFactory {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("lighthouse-diff-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        for asset in [DiffPageBuilder.scriptAsset, DiffPageBuilder.styleAsset] {
+        let staged = [DiffPageBuilder.scriptAsset, DiffPageBuilder.styleAsset].map {
+            (subdirectory: "Resources/diff2html", asset: $0)
+        } + FilePageBuilder.assets.map { (subdirectory: FilePageBuilder.assetSubdirectory, asset: $0) }
+        for (subdirectory, asset) in staged {
             guard let source = Bundle.module.url(
                 forResource: (asset as NSString).deletingPathExtension,
                 withExtension: (asset as NSString).pathExtension,
-                subdirectory: "Resources/diff2html")
+                subdirectory: subdirectory)
             else {
                 throw CocoaError(.fileNoSuchFile, userInfo: [
                     NSFilePathErrorKey: "bundled renderer asset \(asset) missing"])

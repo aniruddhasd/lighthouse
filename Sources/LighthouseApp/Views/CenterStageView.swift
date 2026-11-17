@@ -21,6 +21,11 @@ struct FocusBodyView: View {
     @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
+    /// Viewer header row height. Shared so the navigator overlay can start
+    /// BELOW it (FocusView), keeping the header's Edit/Terminal controls
+    /// visible instead of tucked behind the slid-in navigator.
+    static let viewerHeaderHeight: CGFloat = 40
+
     var body: some View {
         let body = workbench.effectiveBody
         ZStack {
@@ -81,11 +86,6 @@ struct FocusBodyView: View {
     @ViewBuilder
     private var noSessionView: some View {
         VStack(spacing: 12) {
-            if runtime.model.attentionState(of: task.id) == .dirty {
-                Label("Session ended — workspace may hold unfinished work",
-                      systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.yellow)
-            }
             if runtime.model.canResume(task) {
                 Button { runtime.resumeSession(for: task) } label: {
                     Label("Resume session", systemImage: "play.circle")
@@ -104,7 +104,7 @@ struct FocusBodyView: View {
 
     @ViewBuilder
     private var summaryPane: some View {
-        SummaryPaneView(task: task)
+        SummaryPaneView(workbench: workbench, task: task)
     }
 
     // MARK: Viewer pane (restyled header — handoff §2: path · read-only · ⌘J)
@@ -127,9 +127,39 @@ struct FocusBodyView: View {
                         systemImage: "doc.text.magnifyingglass",
                         description: Text("Pick a change, file, or commit in the navigator."))
                 }
+                // Edit mode: a native monospace editor over the read-only page.
+                if workbench.isEditing {
+                    fileEditor
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var fileEditor: some View {
+        VStack(spacing: 0) {
+            if workbench.editConflict {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color(hex: 0xf0b45e))
+                    Text("This file changed on disk since you started editing.")
+                        .font(.caption)
+                    Spacer()
+                    Button("Overwrite") { Task { await workbench.overwriteEdits() } }
+                    Button("Reload") { Task { await workbench.reloadForEditing() } }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(hex: 0x3a2f14))
+            }
+            TextEditor(text: $workbench.editText)
+                .font(.system(.body, design: .monospaced))
+                .autocorrectionDisabled(true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scrollContentBackground(.hidden)
+                .background(Color(hex: 0x1e1e1e))
+                .foregroundStyle(Color(hex: 0xd4d4d4))
+        }
     }
 
     private var viewerHeader: some View {
@@ -145,12 +175,33 @@ struct FocusBodyView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text("read-only")
-                .font(LHFont.mono(11))
-                .foregroundStyle(Color(hex: 0x6f7890))
+            if workbench.isEditing {
+                Text("editing")
+                    .font(LHFont.mono(11)).foregroundStyle(Color(hex: 0xf0b45e))
+            } else if !workbench.canEditCurrentFile {
+                Text("read-only")
+                    .font(LHFont.mono(11)).foregroundStyle(Color(hex: 0x6f7890))
+            }
             Spacer(minLength: 12)
-            if let error = workbench.viewer.renderError {
+            if let editError = workbench.editError {
+                Text(editError).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            } else if let error = workbench.viewer.renderError {
                 Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            }
+            if workbench.isEditing {
+                Button("Save") { Task { await workbench.saveEdits() } }
+                    .keyboardShortcut("s", modifiers: .command)
+                Button("Cancel") { workbench.exitEditing() }
+            } else if workbench.canEditCurrentFile {
+                Button { Task { await workbench.beginEditing() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil")
+                        Text("Edit").font(LHFont.button)
+                    }
+                    .foregroundStyle(Color(hex: 0xc8cfdd))
+                }
+                .buttonStyle(.plain)
+                .help("Edit this file")
             }
             Button { workbench.showTerminal() } label: {
                 HStack(spacing: 6) {
@@ -164,7 +215,7 @@ struct FocusBodyView: View {
             .help("Back to the running terminal (⌘J)")
         }
         .padding(.horizontal, 12)
-        .frame(height: 40)
+        .frame(height: Self.viewerHeaderHeight)
         .background(Color.black.opacity(0.28))
     }
 }
@@ -179,9 +230,10 @@ struct FocusBodyView: View {
 struct SummaryPaneView: View {
     @Environment(AppRuntime.self) private var runtime
     @Environment(\.theme) private var theme
+    @Bindable var workbench: WorkbenchModel
     let task: TaskRecord
 
-    private var state: TaskAttentionState { runtime.model.attentionState(of: task.id) }
+    private var live: Bool { runtime.model.isSessionLive(task.id) }
     private var digest: TaskDigest { runtime.digests.digest(for: task.id) }
 
     var body: some View {
@@ -189,7 +241,9 @@ struct SummaryPaneView: View {
             VStack(alignment: .leading, spacing: 20) {
                 statusLine
                 actionLine
+                if !task.workspaces.isEmpty { diffBaseSection }
                 statCards
+                if !task.workspaces.isEmpty { SupervisionCard(task: task) }
                 // Phase 4b will add the rich transcript-derived Summary here:
                 // "What the agent did" (✓ per steps[]) and the amber "Next step"
                 // callout (next). Until then the deterministic cards + action
@@ -202,20 +256,84 @@ struct SummaryPaneView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
+        .task(id: workbench.selectedWorkspaceIndex) { await workbench.loadBranchInfo() }
     }
 
-    // status dot + label, then "baked for {baked}" when the timing is known.
+    // MARK: Diff base — the branch the "vs base" diff compares against. This is
+    // the ONLY place the base is chosen (the sidebar just names it). "The folder
+    // (worktree, on whatever branch) vs a base branch you pick."
+    private var diffBaseSection: some View {
+        card(title: "Diff base") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Worktree on").font(LHFont.meta).foregroundStyle(theme.dim)
+                    Text(workbench.worktreeBranch ?? "—")
+                        .font(LHFont.mono(12)).foregroundStyle(theme.text)
+                }
+                HStack(spacing: 8) {
+                    Text("Compare vs").font(LHFont.meta).foregroundStyle(theme.dim)
+                    baseMenu
+                }
+                Text("“vs base” in the sidebar shows this branch. Uncommitted shows the working tree vs its own HEAD.")
+                    .font(LHFont.metaFaint).foregroundStyle(theme.faint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var baseMenu: some View {
+        Menu {
+            ForEach(workbench.availableBranches, id: \.self) { branch in
+                Button {
+                    chooseBase(branch)
+                } label: {
+                    if branch == workbench.review.activeBase {
+                        Label(branch, systemImage: "checkmark")
+                    } else {
+                        Text(branch)
+                    }
+                }
+            }
+            if let def = workbench.review.repoDefaultBase {
+                Divider()
+                Button(workbench.review.isBaseOverridden
+                       ? "Use repo default (\(def))" : "Repo default (\(def))") {
+                    chooseBase(nil)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 11))
+                Text(workbench.review.activeBase ?? "base").font(LHFont.mono(12))
+                if workbench.review.isBaseOverridden {
+                    Circle().fill(theme.primary).frame(width: 5, height: 5)
+                }
+            }
+            .foregroundStyle(theme.text)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose the base branch this task's diff compares against")
+    }
+
+    private func chooseBase(_ base: String?) {
+        workbench.setBase(base) { repoId, newBase in
+            runtime.model.setWorkspaceBaseOverride(
+                taskId: task.id, repoId: repoId, base: newBase)
+        }
+    }
+
+    // Live dot + an editable free-text status. "Live" means a session is
+    // running (the one honest signal); the status text is whatever the user
+    // typed. Submitting the field persists it via AppModel.setStatus.
     private var statusLine: some View {
         HStack(spacing: 10) {
-            Circle().fill(theme.accent(for: state)).frame(width: 9, height: 9)
-            Text(Self.statusLabel(state))
-                .font(LHFont.ui(15, .semibold))
-                .foregroundStyle(theme.text)
-            if let baked = digest.baked {
-                Text("baked for \(Self.bakedText(baked))")
-                    .font(LHFont.mono(12))
-                    .foregroundStyle(theme.dim)
-            }
+            StatusDot(live: live)
+            Text(live ? "Session live" : "No session")
+                .font(LHFont.ui(13, .medium))
+                .foregroundStyle(live ? theme.text : theme.dim)
+            Divider().frame(height: 16)
+            StatusEditor(task: task)
         }
     }
 
@@ -296,24 +414,6 @@ struct SummaryPaneView: View {
             .strokeBorder(theme.border, lineWidth: 1))
     }
 
-    static func statusLabel(_ state: TaskAttentionState) -> String {
-        switch state {
-        case .working: return "Working"
-        case .needsInput: return "Needs you"
-        case .done: return "Idle"
-        case .dirty: return "Unaccounted"
-        }
-    }
-
-    /// "45s", "2m 14s", "1h 3m" — a compact turn duration.
-    static func bakedText(_ interval: TimeInterval) -> String {
-        let total = Int(interval.rounded())
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m \(s)s" }
-        return "\(s)s"
-    }
-
     /// 1_000_000 → "1M", 200_000 → "200K", else the raw count.
     static func windowText(_ tokens: Int) -> String {
         if tokens % 1_000_000 == 0 { return "\(tokens / 1_000_000)M" }
@@ -336,7 +436,7 @@ struct TerminalTabBar: View {
                 let focused = runtime.focusedTab[task.id] == tab.id
                 HStack(spacing: 4) {
                     if tab.isAgent {
-                        AttentionBadge(state: runtime.model.attentionState(of: task.id))
+                        AttentionBadge(live: runtime.model.isSessionLive(task.id))
                     }
                     Text(tab.title).font(.caption)
                     if !tab.isAgent {
@@ -361,30 +461,43 @@ struct TerminalTabBar: View {
     }
 }
 
-/// The ambient attention signal (spec §1 problem 2). Badges the agent tab in
-/// the terminal tab bar. (The redesign's task cards / rail use the themed
-/// `StatusDot`; this compact symbol badge is the tab-bar variant.)
+/// Badges the agent tab with SESSION LIVENESS — a STATIC filled dot, green when
+/// a session is live, muted otherwise. Never an animated/indeterminate badge:
+/// it sits on the terminal tab bar the whole session, and a per-frame animation
+/// forces an NSHostingView layout pass every display cycle, stealing the main
+/// thread from SwiftTerm's (main-thread) drawing and lagging typing (profiled
+/// 2026-07-27). The honest signal only — no agent-status inference.
 struct AttentionBadge: View {
-    let state: TaskAttentionState
+    let live: Bool
 
     var body: some View {
-        switch state {
-        case .working:
-            ProgressView()
-                .controlSize(.small)
-                .help("Agent is working")
-        case .needsInput:
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.orange)
-                .help("Needs your input")
-        case .done:
-            Image(systemName: "checkmark.circle")
-                .foregroundStyle(.green)
-                .help("Idle — nothing pending")
-        case .dirty:
-            Image(systemName: "circle.dotted.circle")
-                .foregroundStyle(.yellow)
-                .help("Unaccounted-for changes (session died or edits with no agent)")
-        }
+        Image(systemName: "circle.fill")
+            .font(.system(size: 8))
+            .foregroundStyle(live ? .green : .secondary)
+            .help(live ? "Session live" : "No live session")
     }
+}
+
+/// Inline editor for a task's free-text status. Seeds from the task, commits on
+/// submit or focus-loss via AppModel.setStatus — the only way status changes now.
+struct StatusEditor: View {
+    @Environment(AppRuntime.self) private var runtime
+    @Environment(\.theme) private var theme
+    let task: TaskRecord
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Set a status…", text: $draft)
+            .textFieldStyle(.plain)
+            .font(LHFont.ui(13, .regular))
+            .foregroundStyle(theme.text)
+            .focused($focused)
+            .onAppear { draft = task.status }
+            .onChange(of: task.id) { draft = task.status }
+            .onSubmit { commit() }
+            .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+    }
+
+    private func commit() { runtime.model.setStatus(draft, for: task.id) }
 }

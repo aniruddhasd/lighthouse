@@ -32,7 +32,7 @@ final class WorkbenchModelTests {
         try Data("new\n".utf8).write(to: worktree.appendingPathComponent("untracked.txt"))
         let repo = RepoConfig(path: main.path.path, baseBranch: "main")
         let task = TaskRecord(
-            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil, state: .done,
+            name: "t", branch: "task", adapterKind: "debug", sessionRef: nil,
             workspaces: [Workspace(repoId: repo.id, worktreePath: worktree.path, mergeState: .unmerged)])
         return (WorkbenchModel(task: task, repos: [repo], git: git), worktree)
     }
@@ -138,5 +138,55 @@ final class WorkbenchModelTests {
         await workbench.selectCommit(commit)
         #expect(workbench.effectiveBody == .viewer)
         #expect(workbench.viewer.hasContent)
+    }
+
+    // MARK: File editing (simple native editor)
+
+    @Test func editingATextFileSavesToDisk() async throws {
+        let (workbench, worktree) = try makeWorkbench()
+        await workbench.selectFile("notes.txt")
+        #expect(workbench.canEditCurrentFile)
+
+        await workbench.beginEditing()
+        #expect(workbench.isEditing)
+        #expect(workbench.editText == "changed\n") // loaded fresh from disk
+
+        workbench.editText = "edited by test\n"
+        await workbench.saveEdits()
+
+        #expect(!workbench.isEditing)
+        #expect(try await git.fileContents(worktree: worktree, relativePath: "notes.txt")
+                == .text("edited by test\n"))
+    }
+
+    @Test func staleFileFlagsConflictInsteadOfClobbering() async throws {
+        let (workbench, worktree) = try makeWorkbench()
+        await workbench.selectFile("notes.txt")
+        await workbench.beginEditing()
+
+        // The agent (someone else) changes the file underneath us.
+        try Data("agent changed\n".utf8).write(to: worktree.appendingPathComponent("notes.txt"))
+        workbench.editText = "my edit\n"
+        await workbench.saveEdits()
+
+        // Not written — a conflict is surfaced instead.
+        #expect(workbench.editConflict)
+        #expect(workbench.isEditing)
+        #expect(try await git.fileContents(worktree: worktree, relativePath: "notes.txt")
+                == .text("agent changed\n"))
+
+        // Overwrite resolves it explicitly.
+        await workbench.overwriteEdits()
+        #expect(!workbench.isEditing)
+        #expect(try await git.fileContents(worktree: worktree, relativePath: "notes.txt")
+                == .text("my edit\n"))
+    }
+
+    @Test func binaryFileIsNotEditable() async throws {
+        let (workbench, worktree) = try makeWorkbench()
+        try Data([0x00, 0x01, 0xFF]).write(to: worktree.appendingPathComponent("blob.bin"))
+        await workbench.selectFile("blob.bin")
+        #expect(!workbench.currentFileEditable)
+        #expect(!workbench.canEditCurrentFile)
     }
 }

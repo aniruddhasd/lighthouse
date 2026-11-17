@@ -4,3 +4,6 @@
 xcuserdata/
 .swiftpm/
 dist/
+
+# Raw screenshots can show usernames, paths and project names; publish only processed copies (site/assets).
+/docs/Screenshot*

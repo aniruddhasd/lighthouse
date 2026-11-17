@@ -11,7 +11,7 @@ final class HookInstallerTests {
     private let fixtures: FixtureFactory
     private let git = GitClient()
     private let installer: HookInstaller
-    private let socket = URL(fileURLWithPath: "/tmp/lighthouse test/attention.sock")
+    private let socket = URL(fileURLWithPath: "/tmp/lighthouse test/hooks.sock")
 
     init() throws {
         fixtures = try FixtureFactory()
@@ -84,10 +84,9 @@ final class HookInstallerTests {
             let groups = try #require(hooks[event] as? [[String: Any]], "missing \(event)")
             #expect(groups.contains(where: HookInstaller.containsOurHandler))
         }
-        // Notification carries the type matcher; Stop has none.
+        // Phase 1a observes everything: Notification is NOT filtered by type.
         let notification = try #require((hooks["Notification"] as? [[String: Any]])?.first)
-        #expect(notification["matcher"] as? String
-            == "permission_prompt|idle_prompt|agent_needs_input|agent_completed")
+        #expect(notification["matcher"] == nil)
         let stop = try #require((hooks["Stop"] as? [[String: Any]])?.first)
         #expect(stop["matcher"] == nil)
         // Exec form: args present → no shell parses the command (contract doc).
@@ -97,6 +96,17 @@ final class HookInstallerTests {
         #expect(args.contains(socket.path))
         #expect(args.contains("--unix-socket"))
         #expect(handler["async"] as? Bool == true)
+    }
+
+    /// The "unblocked" experiment: PostToolUse is installed ONLY for the questionnaire
+    /// tool — an unfiltered PostToolUse would fire after every tool call.
+    @Test func postToolUseIsMatchedToAskUserQuestionOnly() async throws {
+        let repo = try fixtures.cleanRepo()
+        try await installer.install(in: repo.path, socketPath: socket)
+        let hooks = try #require(try readJSON(settingsURL(repo))["hooks"] as? [String: Any])
+        let groups = try #require(hooks["PostToolUse"] as? [[String: Any]])
+        #expect(groups.count == 1)
+        #expect(groups[0]["matcher"] as? String == "AskUserQuestion")
     }
 
     @Test func existingUserHooksSurviveMerge() async throws {
@@ -137,6 +147,33 @@ final class HookInstallerTests {
         try await installer.install(in: repo.path, socketPath: socket)
         let second = try Data(contentsOf: settingsURL(repo))
         #expect(first == second)
+    }
+
+    /// The removed attention system left handlers pointing at a dead socket in
+    /// worktrees. Installing must REPLACE them (not leave two handlers, not skip
+    /// because "ours is already there"), including under events no longer used.
+    @Test func installReplacesStaleHandlersFromAnOldSocketPath() async throws {
+        let repo = try fixtures.cleanRepo()
+        let url = settingsURL(repo)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stale = HookInstaller.handler(socketPath: URL(fileURLWithPath: "/old/attention.sock"))
+        try JSONSerialization.data(withJSONObject: [
+            "hooks": [
+                "Stop": [["hooks": [stale]]],
+                "SomeRetiredEvent": [["hooks": [stale]]],
+            ],
+        ]).write(to: url)
+
+        try await installer.install(in: repo.path, socketPath: socket)
+
+        let hooks = try #require(try readJSON(url)["hooks"] as? [String: Any])
+        #expect(hooks["SomeRetiredEvent"] == nil)
+        let all = hooks.values.compactMap { $0 as? [[String: Any]] }.flatMap { $0 }
+            .flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }
+        #expect(!all.contains { ($0["args"] as? [String])?.contains("/old/attention.sock") == true })
+        let stopGroups = try #require(hooks["Stop"] as? [[String: Any]])
+        #expect(stopGroups.count == 1)
     }
 
     @Test func uninstallRemovesOnlyOurs() async throws {

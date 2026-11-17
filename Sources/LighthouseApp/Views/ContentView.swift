@@ -45,6 +45,16 @@ struct ContentView: View {
         // The custom titlebar installs itself on the host window from here; a
         // zero-size background view, so no layout is affected.
         .background(TitlebarConfigurator(controller: runtime.themeController, theme: theme))
+        // ⌘1…⌘9: jump straight to the Nth task in Harbor order, from anywhere.
+        // Zero-size hidden buttons (the ⌘J/⌘\ pattern) so there are no 9 menu
+        // entries; ⌘-shortcuts reach the app before the terminal.
+        .background {
+            ForEach(1...9, id: \.self) { n in
+                Button("") { runtime.focusTask(number: n) }
+                    .keyboardShortcut(KeyEquivalent(Character(String(n))), modifiers: .command)
+                    .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            }
+        }
         .environment(\.theme, theme)
         .environment(\.motionEnabled, motionEnabled)
         // THE COHERENCE FIX (2026-07-15): pin the window's appearance to the
@@ -59,7 +69,12 @@ struct ContentView: View {
         .preferredColorScheme(theme.colorScheme)
         .sheet(isPresented: $showCreateTask) { CreateTaskSheet() }
         .sheet(isPresented: $runtime.registerRepoPresented) { RegisterRepoSheet() }
+        .sheet(isPresented: $runtime.supervisorPanelPresented) { SupervisorPanel() }
         .sheet(item: $runtime.taskPendingRemoval) { task in RemoveTaskSheet(task: task) }
+        .sheet(item: $runtime.taskPendingAddWorkspace) { task in AddToTaskSheet(task: task) }
+        .sheet(item: $runtime.workspacePendingRemoval) { request in
+            RemoveWorkspaceSheet(request: request)
+        }
         .sheet(isPresented: Binding(
             get: { runtime.setupPresented },
             set: { runtime.setupPresented = $0 })) { SetupView() }
@@ -76,16 +91,6 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(runtime.lastError ?? "")
-        }
-        .safeAreaInset(edge: .bottom) {
-            if let degraded = runtime.attentionDegraded {
-                Text(degraded)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity)
-                    .padding(4)
-                    .background(.quaternary)
-            }
         }
     }
 

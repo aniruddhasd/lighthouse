@@ -46,7 +46,37 @@ final class LighthouseTerminalView: LocalProcessTerminalView {
         for _ in 0..<reports {
             terminal.sendEvent(buttonFlags: flags, x: grid.col, y: grid.row)
         }
+        // Open a short "just scrolled" window; while it's open, `setNeedsDisplay`
+        // (below) forces FULL redraws so the agent's re-render of the scrolled
+        // view can't leave stale rows behind.
+        lastScrollAt = ProcessInfo.processInfo.systemUptime
+        setNeedsDisplay(bounds)
         return true
+    }
+
+    /// Uptime of the most recent scroll report — see `setNeedsDisplay`.
+    private var lastScrollAt: TimeInterval = -1
+    /// Full-redraw window (seconds) after a scroll, long enough to cover the
+    /// agent's async re-render of the scrolled view.
+    private let scrollRedrawWindow: TimeInterval = 0.8
+
+    /// SwiftTerm invalidates only the rows its terminal model marked dirty
+    /// (`updateDisplay → setNeedsDisplay(region)`). A full-screen, mouse-tracking
+    /// TUI like Claude Code that rewrites a SCROLLED view doesn't always mark
+    /// every visually-changed row, so incremental invalidation leaves stale cells
+    /// until a full redraw (window switch / scroll-to-bottom) — the corruption
+    /// seen when scrolling up. For a short window AFTER a scroll (and only while a
+    /// TUI owns the mouse), promote every invalidation — including the agent's own
+    /// re-render — to the full bounds, so `draw(dirtyRect:)` repaints every row
+    /// from the current buffer. Outside that window, and for a plain shell,
+    /// SwiftTerm's cheaper incremental drawing is untouched, so typing stays fast.
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        let scrolling = ProcessInfo.processInfo.systemUptime - lastScrollAt < scrollRedrawWindow
+        if scrolling, getTerminal().mouseMode != .off {
+            super.setNeedsDisplay(bounds)
+        } else {
+            super.setNeedsDisplay(invalidRect)
+        }
     }
 
     /// Approximate event → grid mapping from the view's own geometry (cell

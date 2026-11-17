@@ -24,6 +24,20 @@ struct LighthouseMain: App {
                     runtime.switcherPresented.toggle()
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                // Flip to the next / previous task in Harbor order and open it,
+                // from anywhere (⌘-shortcuts reach the app before the terminal).
+                // ⌘⇧] / ⌘⇧[ — the Safari/VS Code next/prev-tab convention.
+                Button("Next Task") { runtime.focusAdjacentTask(1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    .disabled(runtime.model.tasks.isEmpty)
+                Button("Previous Task") { runtime.focusAdjacentTask(-1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                    .disabled(runtime.model.tasks.isEmpty)
+                // Return from a task to the Harbor overview. ⌘⇧H ("Harbor") —
+                // NOT Esc, which the terminal/agent owns (interrupt, vim, …).
+                Button("Back to Harbor") { runtime.backToHarbor() }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                    .disabled(runtime.nav.view != .focus)
                 // ⌘P quick-open (Command, not Ctrl+P: Ctrl-P is a readline key
                 // the terminal owns). Only meaningful in Focus, where a task's
                 // file list exists.
@@ -66,6 +80,11 @@ struct LighthouseMain: App {
                 }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(runtime.selectedTaskId == nil)
+
+                // A plain terminal in a chosen directory, no repo. ⌘⌥T (⌘T is
+                // the in-task new-tab); always available.
+                Button("New Scratch Terminal…") { runtime.promptAndOpenScratchTerminal() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
 
                 Button("Close Terminal Tab") {
                     if let id = runtime.selectedTaskId { runtime.closeFocusedTab(for: id) }

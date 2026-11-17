@@ -111,6 +111,17 @@ final class ContentViewerModel {
         DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
     }
 
+    /// Scroll the ALREADY-loaded changes diff to `path` without reloading — used
+    /// when a second changed file is picked from the tree. The whole diff is one
+    /// page, so reloading it to show a different file both wastes work and races
+    /// the scroll bridge back to the first file (the "clicking a file jumps to
+    /// the top" bug). Same no-reload fix as `scrollToLine`.
+    func scrollToFile(_ path: String) {
+        guard let webView else { return }
+        scrollTo(file: path, in: webView)
+        DispatchQueue.main.async { webView.window?.makeFirstResponder(webView) }
+    }
+
     private static func functionReady(_ name: String, in webView: WKWebView) async -> Bool {
         await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(
@@ -168,8 +179,16 @@ final class WorkbenchModel {
     var navigatorMode: NavigatorMode = .changes
     /// Per-task navigator visibility (UI-only; not persisted). The navigator is
     /// now an on-demand overlay (spec §5.2), so it starts CLOSED — the terminal
-    /// is the full-bleed hero until the user opens it (◨ / ⌘\).
-    var navigatorVisible = false
+    /// is the full-bleed hero until the user opens it (◨ / ⌘\). Its transitions
+    /// also drive the live-diff refresh cadence: while it's closed nobody is
+    /// watching the changed-file tree, so the diff pipeline runs on the slow
+    /// background debounce and stops competing with terminal drawing.
+    var navigatorVisible = false {
+        didSet {
+            guard oldValue != navigatorVisible else { return }
+            review.setForeground(navigatorVisible)
+        }
+    }
 
     /// The pane the body actually shows — the ZStack renders exactly this.
     var effectiveBody: FocusBody { bodyState.effective }
@@ -182,6 +201,28 @@ final class WorkbenchModel {
     /// the viewer holds something that is not a single file (a commit diff, or
     /// nothing yet). Drives ⌘F's in-file search scope.
     private(set) var currentFilePath: String?
+
+    // MARK: File editing (simple native editor)
+
+    /// The current viewer content is a single editable text file (set by
+    /// `selectFile`; false for diffs, binaries, too-large files).
+    private(set) var currentFileEditable = false
+    /// In edit mode: the read-only page is replaced by a native text editor.
+    private(set) var isEditing = false
+    /// The editable buffer (bound by the editor view).
+    var editText = ""
+    /// File contents as loaded into the editor — the baseline for Cancel and for
+    /// the on-disk staleness check at save time.
+    private var editBaseline = ""
+    private(set) var editError: String?
+    /// The file changed on disk (e.g. the agent edited it) since editing began —
+    /// Save shows an Overwrite/Reload choice instead of clobbering silently.
+    private(set) var editConflict = false
+
+    /// Whether the Edit affordance should show for the current viewer content.
+    var canEditCurrentFile: Bool {
+        currentFileEditable && currentFilePath != nil && !isEditing
+    }
 
     // Files surface (browser tree, lazy).
     private(set) var files: [FileTreeNode] = []
@@ -207,8 +248,21 @@ final class WorkbenchModel {
 
     // MARK: Lifecycle (delegates to the live-diff engine)
 
-    func start() { review.start() }
+    func start() {
+        review.start()
+        // Match cadence to current visibility — the navigator starts closed, so
+        // the initial (one-shot) populate still runs, then bursts go slow until
+        // it's opened.
+        review.setForeground(navigatorVisible)
+    }
     func stop() { review.stop() }
+
+    /// Re-syncs the review pane after a workspace was added to this task while
+    /// the workbench is live (add-repo-to-task), so the new repo appears in the
+    /// picker without recreating the workbench.
+    func syncTask(_ task: TaskRecord, repos: [RepoConfig]) {
+        review.syncWorkspaces(task: task, repos: repos)
+    }
 
     // MARK: Center body (spec §3.4 — rules live in FocusBodyState)
 
@@ -271,6 +325,32 @@ final class WorkbenchModel {
             caseSensitive: false, folder: folder)
     }
 
+    /// Local branches of the selected repo — the candidate list for the base
+    /// picker in the Summary tab. Loaded lazily; empty on failure.
+    private(set) var availableBranches: [String] = []
+    /// The branch the selected worktree is currently on (its HEAD), for display
+    /// in the Summary tab. nil when detached or unknown.
+    private(set) var worktreeBranch: String?
+
+    /// Loads the base-picker candidates AND the worktree's current branch — the
+    /// branch names the Summary tab shows. Cheap; safe to call on appear.
+    func loadBranchInfo() async {
+        guard let url = review.selectedWorktreeURL else {
+            availableBranches = []; worktreeBranch = nil; return
+        }
+        availableBranches = await git.listBranches(in: url)
+        worktreeBranch = try? await git.currentBranch(in: url)
+    }
+
+    /// Sets the diff base branch for the selected workspace: updates the live
+    /// diff and persists the per-task override through the model (survives a
+    /// relaunch). `persist` receives the selected workspace's repo id.
+    func setBase(_ base: String?, persist: (_ repoId: UUID, _ base: String?) -> Void) {
+        let repoId = review.selectedRepoId
+        review.setBase(base)
+        if let repoId { persist(repoId, base) }
+    }
+
     func loadFiles() async {
         guard let url = review.selectedWorktreeURL else { return }
         filesLoaded = true
@@ -299,11 +379,26 @@ final class WorkbenchModel {
     // MARK: Selection → center viewer (async I/O here, pure mapping in the
     // presenter). Each selection promotes the viewer into the center stage.
 
-    /// Changes: render the whole live diff and scroll to the picked file.
+    /// The changes-diff patch currently rendered in the viewer, if any. When the
+    /// next file pick is within this same diff, we scroll rather than reload —
+    /// the whole diff is one page (see `scrollToFile`). Cleared whenever the
+    /// viewer loads something else (a file page, a commit diff).
+    private var shownChangesPatch: String?
+
+    /// Changes: render the whole live diff and scroll to the picked file. If the
+    /// diff for the current patch is already showing, just scroll to the file —
+    /// no reload — so picking files doesn't snap back to the top.
     func selectChangedFile(_ path: String) async {
+        exitEditing()
+        currentFileEditable = false // a diff is not an editable single file
         await review.awaitRefresh()
         guard let patch = review.latestPatch else { return }
-        viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
+        if shownChangesPatch == patch {
+            viewer.scrollToFile(path)
+        } else {
+            viewer.apply(NavigatorPresenter.changesSelection(patch: patch, file: path))
+            shownChangesPatch = patch
+        }
         viewerTitle = path
         currentFilePath = path
         bodyState.activateViewer()
@@ -321,11 +416,15 @@ final class WorkbenchModel {
             bodyState.activateViewer()
             return
         }
+        exitEditing()
         do {
             let contents = try await git.fileContents(worktree: url, relativePath: path)
+            // Only a real text file is editable — not binaries or oversized files.
+            if case .text = contents { currentFileEditable = true } else { currentFileEditable = false }
             viewer.apply(NavigatorPresenter.fileSelection(
                 contents: contents, filename: path, scrollToLine: line))
         } catch {
+            currentFileEditable = false
             // A read fault (traversal, missing) becomes an escaped message page,
             // never a crash.
             viewer.apply(.file(html: FilePageBuilder.page(
@@ -333,11 +432,14 @@ final class WorkbenchModel {
         }
         viewerTitle = path
         currentFilePath = path
+        shownChangesPatch = nil  // the viewer now holds a file, not the diff
         bodyState.activateViewer()
     }
 
     /// History: render the picked commit's diff.
     func selectCommit(_ commit: CommitSummary) async {
+        exitEditing()
+        currentFileEditable = false // a commit diff is not an editable file
         guard let url = review.selectedWorktreeURL else { return }
         do {
             let patch = try await git.commitDiff(worktree: url, hash: commit.hash)
@@ -349,6 +451,78 @@ final class WorkbenchModel {
         }
         viewerTitle = commit.shortHash
         currentFilePath = nil  // a commit diff is not a single file
+        shownChangesPatch = nil  // a commit diff is not the changes diff
         bodyState.activateViewer()
+    }
+
+    // MARK: File editing
+
+    /// Enter edit mode for the current file: re-read it fresh from disk (so the
+    /// editor starts from the current bytes) and swap in the native editor.
+    func beginEditing() async {
+        guard let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        do {
+            guard case .text(let contents) = try await git.fileContents(
+                worktree: url, relativePath: path) else {
+                editError = "This file can't be edited here."
+                return
+            }
+            editText = contents
+            editBaseline = contents
+            editError = nil
+            editConflict = false
+            isEditing = true
+        } catch {
+            editError = "Could not open \(path) for editing: \(error)"
+        }
+    }
+
+    /// Save the buffer to disk. If the file changed underneath us (the agent
+    /// touched it), surface a conflict instead of clobbering — the view then
+    /// offers Overwrite / Reload.
+    func saveEdits() async {
+        guard isEditing, let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        // Staleness: compare the current on-disk bytes to what we loaded.
+        if case .text(let onDisk) = try? await git.fileContents(worktree: url, relativePath: path),
+           onDisk != editBaseline {
+            editConflict = true
+            return
+        }
+        await writeAndExit(path: path, url: url)
+    }
+
+    /// Overwrite despite an on-disk change (the conflict banner's choice).
+    func overwriteEdits() async {
+        guard isEditing, let path = currentFilePath, let url = review.selectedWorktreeURL else { return }
+        await writeAndExit(path: path, url: url)
+    }
+
+    /// Discard local edits and reload the file's current on-disk contents into
+    /// the editor (the conflict banner's other choice).
+    func reloadForEditing() async {
+        editConflict = false
+        await beginEditing()
+    }
+
+    private func writeAndExit(path: String, url: URL) async {
+        do {
+            try await git.writeFile(worktree: url, relativePath: path, contents: editText)
+            editConflict = false
+            exitEditing()
+            // Re-render the (now saved) file so the read-only viewer is current;
+            // the live-diff watcher also picks the change up on its own.
+            await selectFile(path)
+        } catch {
+            editError = "Could not save \(path): \(error)"
+        }
+    }
+
+    /// Leave edit mode without saving (Cancel, or any new selection).
+    func exitEditing() {
+        isEditing = false
+        editText = ""
+        editBaseline = ""
+        editError = nil
+        editConflict = false
     }
 }

@@ -1,10 +1,12 @@
 import AppKit
 import Foundation
 import Observation
+import WebKit
 import SwiftUI
 import LighthouseAdapter
 import LighthouseAppCore
 import LighthouseGit
+import LighthouseSupervisor
 import LighthouseTaskEngine
 
 /// Composition root: builds the model, the attention socket, and the session
@@ -18,12 +20,31 @@ final class AppRuntime {
     /// (baked/action/model/ctx) and Focus entry / Stop (diffStat).
     let digests = TaskDigestCache()
     let registry = SessionRegistry()
+    /// Orchestrator phase 1a (docs/orchestrator-design.md): observation-only log of
+    /// hook events from tasks the user opted in to supervising. The log and its
+    /// durable JSONL sink are always present; the socket listener and the hooks
+    /// exist only while at least one task is supervised.
+    let hookLog: HookEventLog
+    /// Orchestrator slice 2 (docs/orchestrator-design.md §12): the app-owned queue of
+    /// what the supervisor proposed. Nothing in it is ever sent to a session yet.
+    let proposals: ProposalCenter
+    /// Orchestrator slice 4b/4c (docs §14): wakes the supervisor model — by hand ("Run now" in
+    /// the Supervisor panel) and, if the user switched it on, when a supervised turn ends.
+    let supervisor: SupervisorRunner
+    /// Slice 4c: asks the runner to look whenever a supervised task's turn ends (only if the
+    /// user switched automatic runs on; the policy still decides whether anything runs).
+    let supervisorWaker: SupervisorAutoWaker
+    var supervisorPanelPresented = false
+    @ObservationIgnored private var proposalTask: Task<Void, Never>?
+    private let hookInstaller: HookInstaller
+    @ObservationIgnored private var hookListener: HookEventListener?
+    @ObservationIgnored private var hookEventTask: Task<Void, Never>?
+    private let configDirectory: URL
     /// Routes wheel events over terminals into mouse reports when the TUI
     /// owns the mouse (see LighthouseTerminalView).
     private let wheelMonitor = WheelReportMonitor()
     /// Single GitClient shared by the model and the review pane.
     let git = GitClient()
-    private let listener: AttentionSocketListener
     private let adapter = ClaudeCodeAdapter()
 
     /// Owns the active theme and drives app-wide re-resolution; the resolved
@@ -49,6 +70,14 @@ final class AppRuntime {
     /// surface (Harbor card, beacon-rail dot) can trigger it without threading
     /// a binding down; the old sidebar that owned this trigger was retired.
     var taskPendingRemoval: TaskRecord?
+    /// Drives the "add a repo/worktree to this task" sheet. Item-based so the
+    /// navigator's + button (and any future entry point) can open it for a
+    /// specific task without threading a binding down.
+    var taskPendingAddWorkspace: TaskRecord?
+    /// Drives the "remove this repo from the task" sheet — the inverse of the
+    /// add-workspace flow. Carries the task AND which repo's workspace is being
+    /// removed (the navigator's selected repo).
+    var workspacePendingRemoval: WorkspaceRemovalRequest?
     /// Drives the Register-Repo sheet. On the runtime (like `switcherPresented`)
     /// so the File menu command AND the Harbor "Add repo" controls can all open
     /// it — the sidebar that used to own this trigger was retired.
@@ -58,13 +87,8 @@ final class AppRuntime {
     /// selected falls back to Harbor. Mutating it re-renders the shell (normal
     /// @Observable propagation).
     var nav = NavigationState()
-    /// Active merge-back walk for the selected task, when one is running.
-    var mergeWalk: MergeWalkController?
     /// Surfaced verbatim in the UI — always the full typed description.
     var lastError: String?
-    /// Set when the attention socket could not start: sessions still run,
-    /// badges degrade to unknown (spec §8 fail-safe) — but say so visibly.
-    var attentionDegraded: String?
 
     /// LIGHTHOUSE_CONFIG_DIR overrides the config+socket location — used by
     /// scripted checks so they never touch the real config or unlink a live
@@ -79,12 +103,15 @@ final class AppRuntime {
     }
 
     init(configDirectory: URL = AppRuntime.defaultConfigDirectory()) {
-        // Socket at the config-directory ROOT: unix socket paths cap at ~104
-        // bytes (sun_path), so no nesting.
-        listener = AttentionSocketListener(directory: configDirectory, adapter: adapter)
+        self.configDirectory = configDirectory
+        hookLog = HookEventLog(sink: HookEventSink(directory: configDirectory))
+        proposals = ProposalCenter(directory: configDirectory)
+        let supervisor = SupervisorWiring.makeRunner(directory: configDirectory)
+        self.supervisor = supervisor
+        supervisorWaker = SupervisorAutoWaker(runner: supervisor)
+        hookInstaller = HookInstaller(git: git)
         model = AppModel(
             store: ConfigStore(directory: configDirectory),
-            socketPath: listener.socketURL,
             adapter: adapter,
             git: git)
         do {
@@ -107,26 +134,21 @@ final class AppRuntime {
         // session-only) falls back to Harbor rather than a blank detail pane.
         let startView: NavView = model.startView == "focus" ? .focus : .harbor
         nav = NavigationState(view: startView == .focus && selectedTaskId == nil ? .harbor : startView)
-        notifications.onSelectTask = { [weak self] id in self?.selectedTaskId = id }
         // First-run setup auto-opens when there are no repos and setup was
         // never completed; always re-runnable from Help.
         setupPresented = model.repos.isEmpty && !model.hasCompletedSetup
-        // NSApp does not exist yet during App.init — anything touching NSApp
-        // (dock badge) or UN* must run AFTER launch, on the main actor, once
-        // NSApplication.main() is up. (A dock-badge write in init crashed on
-        // a nil NSApp — 2026-07-14.)
-        Task { @MainActor in
-            notifications.configure()
-            updateDockBadge()
-            refreshNotificationStatus()
+        // Bring back the recent hook-event history so the card isn't blank after a
+        // restart (read-only: nothing is re-written to the file).
+        hookLog.restore(tasks: model.tasks)
+        // Re-arm supervision for tasks opted in last run: the listener is not
+        // persistent, and re-installing repairs a moved socket path.
+        if model.tasks.contains(where: \.supervised) {
+            Task { @MainActor [weak self] in await self?.resumeSupervision() }
         }
-        Task { await runAttentionPipeline() }
         setUpGeometryProbeIfRequested()
         runDiffRenderCheckIfRequested()
         runFileRenderCheckIfRequested()
         runNavigatorCheckIfRequested()
-        runMergeWalkCheckIfRequested()
-        runNotificationCheckIfRequested()
         runThemeCheckIfRequested()
         runHarborCheckIfRequested()
         runFocusCheckIfRequested()
@@ -217,7 +239,7 @@ final class AppRuntime {
             repoId: repo.id, worktreePath: fixture.path, mergeState: .unmerged)
         let task = TaskRecord(
             name: "digest-probe", branch: "task/digest", adapterKind: "debug",
-            sessionRef: nil, state: .done, workspaces: [workspace])
+            sessionRef: nil, workspaces: [workspace])
         model.insertEphemeralTask(task)
 
         // A hostile last-assistant-message: markup + script + markdown. Stored
@@ -328,17 +350,12 @@ final class AppRuntime {
         let repo = RepoConfig(
             path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
         model.insertEphemeralRepo(repo)
-        // Three tasks (varied states) so the rail shows a non-trivial dot count.
-        let seedStates: [(String, TaskAttentionState)] = [
-            ("focus-probe", .done),
-            ("focus-working", .working),
-            ("focus-needs", .needsInput),
-        ]
+        // Three tasks so the rail shows a non-trivial dot count.
         var seeded: [TaskRecord] = []
-        for (name, state) in seedStates {
+        for name in ["focus-probe", "focus-two", "focus-three"] {
             let task = TaskRecord(
                 name: name, branch: "task/\(name)", adapterKind: "debug",
-                sessionRef: nil, state: state, workspaces: [])
+                sessionRef: nil, workspaces: [])
             model.insertEphemeralTask(task)
             seeded.append(task)
         }
@@ -445,21 +462,12 @@ final class AppRuntime {
             path: FileManager.default.temporaryDirectory.path, baseBranch: "main")
         model.insertEphemeralRepo(repo)
         // Seed one task per state — two needsInput so the group order and the
-        // needs-count are both non-trivial. Order chosen so a WRONG sort (plain
-        // name, or InboxOrder's needs→working→dirty→done) yields a different
-        // sequence than the expected needs→working→idle(done)→stale(dirty).
-        let seedStates: [(String, TaskAttentionState)] = [
-            ("harbor-needs-a", .needsInput),
-            ("harbor-needs-b", .needsInput),
-            ("harbor-working", .working),
-            ("harbor-idle", .done),
-            ("harbor-stale", .dirty),
-        ]
+        // Five tasks so the grid renders a non-trivial card count.
         var seeded: [TaskRecord] = []
-        for (name, state) in seedStates {
+        for name in ["harbor-a", "harbor-b", "harbor-c", "harbor-d", "harbor-e"] {
             let task = TaskRecord(
                 name: name, branch: "task/\(name)", adapterKind: "debug",
-                sessionRef: nil, state: state, workspaces: [])
+                sessionRef: nil, workspaces: [])
             model.insertEphemeralTask(task)
             seeded.append(task)
         }
@@ -480,23 +488,9 @@ final class AppRuntime {
                 FileHandle.standardOutput.write(Data("HARBOR-STAGE \(m)\n".utf8))
             }
 
-            // Sort: the Harbor order restricted to the seeded tasks must be
-            // needs → working → idle(done) → stale(dirty).
-            let order = model.harborOrder()
-                .filter { seededIds.contains($0.id) }
-                .map { model.attentionState(of: $0.id).rawValue }
-            log("sort=\(order.joined(separator: ","))")
-
-            // Filter chips: each yields the right subset of the seeded tasks.
-            @MainActor func count(_ filter: HarborFilter) -> Int {
-                model.harborOrder().filter {
-                    seededIds.contains($0.id)
-                        && filter.matches(model.attentionState(of: $0.id))
-                }.count
-            }
-            log("filter-all=\(count(.all)) filter-needs=\(count(.needs)) "
-                + "filter-working=\(count(.working)) filter-idle=\(count(.idle)) "
-                + "filter-stale=\(count(.stale))")
+            // Order: the standard task order includes every seeded task.
+            let ordered = model.orderedTasks().filter { seededIds.contains($0.id) }
+            log("ordered-count=\(ordered.count)")
 
             // card → Focus: driving `open(id)` (what a card tap calls) sets
             // view=.focus AND the selection.
@@ -646,42 +640,7 @@ final class AppRuntime {
 
     /// Whether the first-run setup sheet is showing.
     var setupPresented = false
-    /// Whether notification authorization is known-denied (drives the
-    /// one-time, dismissible inbox hint).
-    private(set) var notificationsDenied = false
-
-    /// The dismissible "notifications are off" inbox hint: shown once, when
-    /// denied and there are tasks, until the user dismisses it.
-    var notificationsHintVisible: Bool {
-        notificationsDenied && !model.notificationsHintDismissed && !model.tasks.isEmpty
-    }
-
-    func dismissNotificationsHint() { model.dismissNotificationsHint() }
-
-    private func refreshNotificationStatus() {
-        Task { @MainActor in
-            notificationsDenied = await notifications.authorizationStatus() == .denied
-        }
-    }
-
     private let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-
-    /// Begins a merge-back walk for `task` over `orderedRepoIds` (default:
-    /// creation order). The UI shows the conflict pane when it pauses.
-    func startMergeWalk(for task: TaskRecord, orderedRepoIds: [UUID]) async {
-        let controller = MergeWalkController(
-            task: task, repos: model.repos, orderedRepoIds: orderedRepoIds,
-            git: git, session: registry, loginShell: loginShell)
-        mergeWalk = controller
-        await controller.start()
-        // A clean walk finishes immediately: reflect done, drop the pane.
-        if case .completed = controller.state {
-            model.markMerged(taskId: task.id)
-            mergeWalk = nil
-        }
-    }
-
-    func endMergeWalk() { mergeWalk = nil }
 
     // MARK: - Two-mode navigation (spec §3.4)
 
@@ -703,96 +662,79 @@ final class AppRuntime {
     /// Back to the Harbor overview (the Focus toolbar ◱ button / `backToHarbor`).
     func backToHarbor() { nav.backToHarbor() }
 
+    // MARK: - Keyboard task navigation
+
+    /// Whether Harbor currently reveals hidden tasks (the "Hidden (N)" toggle).
+    var showHiddenTasks = false
+
+    /// The tasks Harbor shows, in order — the single source the grid and the
+    /// keyboard navigation both read, so they never disagree. Hidden tasks are
+    /// excluded unless `showHiddenTasks` is on.
+    var visibleHarborTasks: [TaskRecord] {
+        model.orderedTasks().filter { showHiddenTasks || !$0.hidden }
+    }
+
+    /// How many tasks are currently hidden — drives the "Hidden (N)" affordance.
+    var hiddenTaskCount: Int { model.tasks.lazy.filter(\.hidden).count }
+
+    /// Hide a shown task / show a hidden one.
+    func toggleTaskHidden(_ task: TaskRecord) {
+        model.setTaskHidden(!task.hidden, for: task.id)
+        // Don't leave the arrow-highlight stranded on a now-hidden card.
+        if task.hidden == false, harborHighlightedTaskId == task.id {
+            harborHighlightedTaskId = nil
+        }
+    }
+
+    /// The tasks keyboard navigation steps through — the SAME set Harbor shows.
+    var navigableTasks: [TaskRecord] { visibleHarborTasks }
+
+    /// Flip to the next (`+1`) / previous (`-1`) task in Harbor order and open it
+    /// in Focus. Wraps around. From Harbor with nothing selected, `+1` lands on
+    /// the first task and `-1` on the last. ⌘⇧] / ⌘⇧[.
+    func focusAdjacentTask(_ delta: Int) {
+        if let next = AppModel.stepTask(
+            ids: navigableTasks.map(\.id), from: selectedTaskId, delta: delta) {
+            open(next)
+        }
+    }
+
+    /// Jump straight to the Nth task (1-based) in Harbor order, if it exists. ⌘1–9.
+    func focusTask(number: Int) {
+        let tasks = navigableTasks
+        guard number >= 1, number <= tasks.count else { return }
+        open(tasks[number - 1].id)
+    }
+
+    /// The card the Harbor arrow-key highlight is on (browse without opening).
+    /// nil when Harbor isn't being browsed; Return opens it.
+    var harborHighlightedTaskId: UUID?
+
+    /// Move the Harbor highlight by `delta` (wraps); seeds from the selected task.
+    func moveHarborHighlight(_ delta: Int) {
+        harborHighlightedTaskId = AppModel.stepTask(
+            ids: navigableTasks.map(\.id),
+            from: harborHighlightedTaskId ?? selectedTaskId, delta: delta)
+    }
+
+    /// Open the Harbor-highlighted task into Focus (Return). No-op if none.
+    func openHarborHighlight() {
+        if let id = harborHighlightedTaskId { open(id) }
+    }
+
     /// A SetupModel wired to this runtime's services. Fresh each time the
     /// sheet opens so checks re-run cleanly.
     func makeSetupModel() -> SetupModel {
-        SetupModel(
-            git: git, loginShell: loginShell, socketPath: listener.socketURL,
-            notifications: notifications,
-            makeListener: { dir in AttentionSocketListener(directory: dir, adapter: ClaudeCodeAdapter()) })
+        SetupModel(git: git, loginShell: loginShell)
     }
 
     func finishSetup() {
         model.markSetupCompleted()
         setupPresented = false
-        refreshNotificationStatus()
     }
 
     /// Help → Run Setup Checks (re-runnable any time).
     func openSetup() { setupPresented = true }
-
-    /// LIGHTHOUSE_DEBUG_NOTIFY=<output-file>: drives a real attention
-    /// transition on a probe task that is NOT currently viewed and writes the
-    /// decision + UN* enqueue result to the file (a file, not stdout, so
-    /// capture is reliable regardless of launch method). MUST be launched via
-    /// `open` — UNUserNotificationCenter.current() SIGTRAPs when the binary is
-    /// direct-exec'd (LaunchServices hasn't registered the app). It does NOT
-    /// call requestAuthorization (that shows a blocking modal); `center.add`
-    /// enqueues without authorization. Banner DISPLAY still needs the user's
-    /// grant — the gate asserts the decision + enqueue path only, honestly.
-    private func runNotificationCheckIfRequested() {
-        guard let outPath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_NOTIFY"],
-              !outPath.isEmpty else { return }
-        Task { @MainActor in
-            var lines: [String] = []
-            func log(_ m: String) {
-                lines.append("NOTIFY-STAGE \(m)")
-                try? lines.joined(separator: "\n").appending("\n")
-                    .write(toFile: outPath, atomically: true, encoding: .utf8)
-            }
-            let taskId = UUID()
-            let transition = AttentionTransition(
-                taskId: taskId, event: .agentNeedsInput, oldState: .working, newState: .needsInput)
-            log("decision=\(NotificationDecider.decide(transition, isCurrentlyViewed: false).map(\.rawValue) ?? "nil")")
-            log("suppressed-when-viewed=\(NotificationDecider.decide(transition, isCurrentlyViewed: true) == nil)")
-            // UN* init happens here; under `open` it is safe.
-            let enqueued = notifications.post(kind: .needsInput, taskId: taskId, taskName: "notify-probe")
-            log("enqueued=\(enqueued)")
-            log("done")
-        }
-    }
-
-    /// LIGHTHOUSE_DEBUG_MERGEWALK=<clone-with-conflict>: drives a full
-    /// merge-back cycle in the real app over a scripted conflicting repo —
-    /// run → assert paused-conflicted → resolve every text file whole-file
-    /// (current) via the transform API → complete → assert completed. Logs
-    /// each stage for Scripts/smoke-run.sh to assert.
-    private var mergeWalkKeepAlive: MergeWalkController?
-    private func runMergeWalkCheckIfRequested() {
-        guard let clonePath = ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_MERGEWALK"]
-        else { return }
-        Task { @MainActor in
-            func log(_ m: String) {
-                FileHandle.standardOutput.write(Data("MERGEWALK-STAGE \(m)\n".utf8))
-            }
-            let repo = RepoConfig(path: clonePath, baseBranch: "main")
-            let task = TaskRecord(
-                name: "mergewalk-probe", branch: "task", adapterKind: "debug",
-                sessionRef: nil, state: .done,
-                workspaces: [Workspace(repoId: repo.id, worktreePath: clonePath, mergeState: .unmerged)])
-            let controller = MergeWalkController(
-                task: task, repos: [repo], orderedRepoIds: [repo.id],
-                git: git, session: registry, loginShell: loginShell)
-            mergeWalkKeepAlive = controller
-            await controller.start()
-            guard controller.isPausedConflicted else {
-                log("unexpected-state \(controller.state)"); return
-            }
-            log("paused conflicted=\(controller.conflicts.count)")
-            for conflict in controller.conflicts {
-                if case .text = conflict.kind {
-                    await controller.resolveWholeFileText(path: conflict.path, side: .current)
-                }
-            }
-            log("resolved remaining=\(controller.conflicts.count)")
-            await controller.completeCurrentRepo()
-            if case .completed = controller.state {
-                log("completed")
-            } else {
-                log("not-completed \(controller.state)")
-            }
-        }
-    }
 
     /// LIGHTHOUSE_DEBUG_DIFFRENDER=1: renders the hostile fixture diff
     /// through the REAL pipeline (page builder → vendored assets → locked
@@ -828,18 +770,42 @@ final class AppRuntime {
     private var fileRenderKeepAlive: [AnyObject] = []
     private func runFileRenderCheckIfRequested() {
         guard ProcessInfo.processInfo.environment["LIGHTHOUSE_DEBUG_FILERENDER"] == "1" else { return }
+        // One fixture per rendering path, rendered one after another in a single
+        // web view: plain text, highlighted code, and rendered markdown.
+        let fixtures: [(name: String, content: String, rendering: FileRendering)] = [
+            ("plain", FilePageBuilder.hostileContent, .plain),
+            ("code", FilePageBuilder.hostileContent, FileRendering(language: "swift", markdown: false)),
+            ("markdown", FilePageBuilder.hostileMarkdown, FileRendering(language: "markdown", markdown: true)),
+        ]
         do {
             let directory = try DiffWebViewFactory.makeRenderDirectory()
+            var remaining = fixtures
+            var current = ""
+            var webViewRef: WKWebView?
+            func loadNext() {
+                guard !remaining.isEmpty, let webView = webViewRef else { return }
+                let fixture = remaining.removeFirst()
+                current = fixture.name
+                do {
+                    let page = FilePageBuilder.page(
+                        content: fixture.content, filename: "evil.txt",
+                        rendering: fixture.rendering, debugChecks: true)
+                    try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
+                } catch {
+                    FileHandle.standardOutput.write(Data("FILERENDER-STAGE failed \(error)\n".utf8))
+                }
+            }
             let gate = LocalOnlyNavigationDelegate(allowedRoot: directory) { message in
-                FileHandle.standardOutput.write(Data("FILERENDER result \(message)\n".utf8))
+                // The page's verdict, tagged with the fixture that produced it.
+                FileHandle.standardOutput.write(Data("FILERENDER result \(current) \(message)\n".utf8))
+                loadNext()
             }
             let webView = DiffWebViewFactory.makeWebView(
                 renderDirectory: directory, navigationGate: gate)
+            webViewRef = webView
             fileRenderKeepAlive = [webView, gate]
-            let page = FilePageBuilder.page(
-                content: FilePageBuilder.hostileContent, filename: "evil.txt", debugChecks: true)
-            try DiffWebViewFactory.load(page: page, into: webView, renderDirectory: directory)
             FileHandle.standardOutput.write(Data("FILERENDER-STAGE loaded\n".utf8))
+            loadNext()
         } catch {
             FileHandle.standardOutput.write(Data("FILERENDER-STAGE failed \(error)\n".utf8))
         }
@@ -866,7 +832,7 @@ final class AppRuntime {
             let repo = RepoConfig(path: repoPath, baseBranch: "main")
             let task = TaskRecord(
                 name: "navigator-probe", branch: "task", adapterKind: "debug",
-                sessionRef: nil, state: .done,
+                sessionRef: nil,
                 workspaces: [Workspace(repoId: repo.id, worktreePath: repoPath, mergeState: .unmerged)])
             // A live terminal so "still running after the swap" is a real check.
             let plan = LaunchPlan(
@@ -951,7 +917,7 @@ final class AppRuntime {
         }
         let probe = TaskRecord(
             name: "geometry-probe", branch: "debug/geometry-probe",
-            adapterKind: "debug", sessionRef: nil, state: .done, workspaces: workspaces)
+            adapterKind: "debug", sessionRef: nil, workspaces: workspaces)
         model.insertEphemeralTask(probe)
         let plan = LaunchPlan(
             executable: "/bin/cat", arguments: [], environment: [:],
@@ -969,61 +935,6 @@ final class AppRuntime {
         // creation in other launch contexts and silently no-opped.
     }
 
-    private func runAttentionPipeline() async {
-        do {
-            try await listener.start()
-        } catch {
-            attentionDegraded =
-                "Attention socket failed to start (\(error)). Sessions still work; badges won't update."
-            return
-        }
-        for task in model.tasks {
-            if let ref = task.sessionRef {
-                await listener.register(sessionRef: ref, taskId: task.id)
-            }
-        }
-        let stream = await listener.signals()
-        for await signal in stream {
-            let transition = model.apply(signal)
-            handleTransition(transition)
-            feedDigest(from: signal)
-        }
-    }
-
-    /// Feeds the digest cache from a raw attention signal. `baked` is measured
-    /// between this task's most recent `agentWorking` (UserPromptSubmit) and its
-    /// `agentStopped` (Stop); on Stop we also stash the untrusted action and
-    /// kick off the (bounded) transcript read for model/ctx and a diffStat
-    /// refresh. Wall-clock is stamped here, at the moment the signal lands.
-    private func feedDigest(from signal: TaskAttentionSignal) {
-        let now = Date()
-        switch signal.event {
-        case .agentWorking:
-            digests.noteWorkStarted(taskId: signal.taskId, at: now)
-        case .agentStopped:
-            digests.recordStop(
-                taskId: signal.taskId, action: signal.lastAssistantMessage, at: now)
-            if let path = signal.transcriptPath {
-                refreshTranscriptDigest(taskId: signal.taskId, transcriptPath: path)
-            }
-            if let task = model.tasks.first(where: { $0.id == signal.taskId }) {
-                Task { await refreshDiffDigest(for: task) }
-            }
-        default:
-            break
-        }
-    }
-
-    /// Reads the transcript OFF the main actor (bounded tail, malformed-safe)
-    /// and folds the honest model + ctx estimate into the cache. Any failure
-    /// leaves those fields blank — never fabricated.
-    private func refreshTranscriptDigest(taskId: UUID, transcriptPath: String) {
-        Task {
-            let digest = await Task.detached { TranscriptReader.read(path: transcriptPath) }.value
-            digests.setTranscript(taskId: taskId, model: digest.model, context: digest.context)
-        }
-    }
-
     /// Recomputes the deterministic diff counts for a task by summing
     /// `git diff --numstat --merge-base <base>` across its worktrees (each vs
     /// its repo's base). A per-worktree failure leaves that worktree out rather
@@ -1033,41 +944,16 @@ final class AppRuntime {
         var total: DiffStat?
         for workspace in task.workspaces {
             guard let repo = model.repos.first(where: { $0.id == workspace.repoId }) else { continue }
+            // The CHANGES card must use the SAME base the review pane shows — the
+            // per-task override if set, else the repo default — not the repo
+            // default unconditionally (2026-08-03: the card was ignoring the
+            // chosen base and disagreeing with the "Compare vs" branch).
+            let base = workspace.baseOverride ?? repo.baseBranch
             guard let stat = try? await git.diffStat(
-                worktree: workspace.worktreeURL, base: repo.baseBranch) else { continue }
+                worktree: workspace.worktreeURL, base: base) else { continue }
             total = (total ?? .zero).adding(stat)
         }
         digests.setDiffStat(taskId: task.id, total)
-    }
-
-    let notifications = NotificationService()
-
-    /// Whether the user is currently looking at a task: app active AND that
-    /// task selected. Notifications fire only when a signal would be MISSED.
-    private func isCurrentlyViewed(_ taskId: UUID) -> Bool {
-        NSApp.isActive && selectedTaskId == taskId
-    }
-
-    /// Decides (pure) then posts a notification for an attention transition,
-    /// and refreshes the dock badge. Called for every transition — socket
-    /// signals and session start/stop alike.
-    func handleTransition(_ transition: AttentionTransition?) {
-        if let transition,
-           let kind = NotificationDecider.decide(
-               transition, isCurrentlyViewed: isCurrentlyViewed(transition.taskId)),
-           let task = model.tasks.first(where: { $0.id == transition.taskId }) {
-            notifications.post(kind: kind, taskId: task.id, taskName: task.name)
-        }
-        updateDockBadge()
-    }
-
-    /// Dock badge = number of needs-input tasks; cleared when zero. Uses
-    /// NSApplication.shared (always valid) — the `NSApp` global is nil until
-    /// the app instance is first created, which crashed a dock-badge write in
-    /// App.init (2026-07-14); this and deferring the first call past init fix it.
-    func updateDockBadge() {
-        let count = model.needsInputCount
-        NSApplication.shared.dockTile.badgeLabel = count > 0 ? String(count) : nil
     }
 
     // MARK: - Terminal tabs (UI-only, not persisted; die with the app)
@@ -1078,8 +964,10 @@ final class AppRuntime {
     var focusedTab: [UUID: UUID] = [:]
 
     private func loginShellURL(for task: TaskRecord) -> URL? {
-        guard let workspace = task.workspaces.first else { return nil }
-        return workspace.worktreeURL
+        if let workspace = task.workspaces.first { return workspace.worktreeURL }
+        // Scratch terminal: no workspace — the chosen directory lives in `branch`.
+        // Without this, ⌘T / the tab-bar `+` no-op'd on a scratch terminal.
+        return task.branch.isEmpty ? nil : URL(fileURLWithPath: task.branch, isDirectory: true)
     }
 
     // MARK: - Task + session flows
@@ -1094,7 +982,6 @@ final class AppRuntime {
             let (task, plan) = inPlace
                 ? try await model.createInPlaceTask(name: name, repoIds: repoIds)
                 : try await model.createTask(name: name, branch: branch, repoIds: repoIds)
-            await listener.register(sessionRef: plan.sessionRef, taskId: task.id)
             startAgentSession(taskId: task.id, plan: plan)
             selectedTaskId = task.id
         } catch let failure as TaskCreationFailure {
@@ -1103,6 +990,42 @@ final class AppRuntime {
             lastError = FailureDescriber.describe(error)
         } catch {
             lastError = String(describing: error)
+        }
+    }
+
+    /// Creates a task from a GitHub PR (`reference` = number or URL) in `repoId`
+    /// and starts its session. `name` empty → the PR title.
+    func createTaskFromPRAndStartSession(
+        reference: String, repoId: UUID, name: String
+    ) async {
+        do {
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let (task, plan) = try await model.createTaskFromPR(
+                reference: reference, repoId: repoId,
+                name: trimmedName.isEmpty ? nil : trimmedName)
+            startAgentSession(taskId: task.id, plan: plan)
+            selectedTaskId = task.id
+        } catch let error as PullRequestCheckoutError {
+            lastError = Self.describePRCheckout(error)
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    private static func describePRCheckout(_ error: PullRequestCheckoutError) -> String {
+        switch error {
+        case .ghNotAvailable:
+            return "The GitHub CLI (gh) was not found. Install it and run `gh auth login` to create tasks from PRs."
+        case .invalidReference(let ref):
+            return "'\(ref)' is not a PR number or URL."
+        case .resolveFailed(let stderr):
+            return "Could not find that PR (is it in the selected repo, and are you signed in?):\n\(stderr)"
+        case .checkoutFailed(let stderr):
+            return "PR checkout failed:\n\(stderr)"
+        case .launchFailed(let reason):
+            return "Could not launch gh: \(reason)"
         }
     }
 
@@ -1120,7 +1043,7 @@ final class AppRuntime {
             if let controller = registry.agentController(taskId: task.id), controller.isRunning,
                let command = plan.typedCommand {
                 registry.runCommand(taskId: task.id, tabId: TabID.agent, command: command)
-                handleTransition(model.noteSessionStarted(taskId: task.id))
+                model.noteSessionStarted(taskId: task.id)
             } else {
                 startAgentSession(taskId: task.id, plan: plan) // calls noteSessionStarted
             }
@@ -1146,7 +1069,7 @@ final class AppRuntime {
         tabs[taskId, default: []].removeAll { $0.id == TabID.agent }
         tabs[taskId, default: []].insert(TerminalTab(id: TabID.agent, title: "Agent", isAgent: true), at: 0)
         focusedTab[taskId] = TabID.agent
-        handleTransition(model.noteSessionStarted(taskId: taskId))
+        model.noteSessionStarted(taskId: taskId)
     }
 
     /// Cmd+T: a plain persistent login shell in the task's primary worktree —
@@ -1166,6 +1089,53 @@ final class AppRuntime {
         focusedTab[task.id] = tabId
     }
 
+    // MARK: - Scratch terminal (repo-less)
+
+    /// Prompts for a directory (default $HOME) and opens a plain scratch
+    /// terminal there — see `openScratchTerminal`. Shared by the Harbor button
+    /// and the ⌘⌥T menu command so the picker lives in one place.
+    func promptAndOpenScratchTerminal() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        panel.prompt = "Open Terminal"
+        panel.message = "Choose a directory for the scratch terminal"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openScratchTerminal(directory: url)
+    }
+
+    /// Opens a repo-less scratch terminal: a plain login shell at `directory`,
+    /// no agent, no hooks, no review pane (the task has no workspaces). The task
+    /// is ephemeral — it vanishes when its shell exits, when closed, or on quit.
+    func openScratchTerminal(directory: URL) {
+        let task = model.createScratchTask(directory: directory)
+        open(task.id)
+        let tabId = UUID()
+        let plan = LaunchPlan(
+            executable: loginShell, arguments: ["-l", "-i"], environment: [:],
+            workingDirectory: directory, sessionRef: "", typedCommand: nil)
+        registry.open(taskId: task.id, tabId: tabId, plan: plan) { [weak self] key, _ in
+            self?.handleTerminalExit(key)
+        }
+        tabs[task.id] = [TerminalTab(id: tabId, title: "shell", isAgent: false)]
+        focusedTab[task.id] = tabId
+    }
+
+    /// Closes a scratch terminal task: tears down its terminals and drops the
+    /// ephemeral task. No engine / worktree cleanup — it owns nothing on disk.
+    func closeScratchTask(_ task: TaskRecord) {
+        let wasViewing = selectedTaskId == task.id
+        registry.discardTask(taskId: task.id)
+        tabs[task.id] = nil
+        focusedTab[task.id] = nil
+        digests.remove(taskId: task.id)
+        if wasViewing { selectedTaskId = nil }
+        model.removeScratchTask(task.id)
+        if wasViewing { backToHarbor() }
+    }
+
     /// Cmd+W: close the focused non-agent tab (the agent tab is closed only
     /// via task removal / explicit confirmation elsewhere).
     func closeFocusedTab(for taskId: UUID) {
@@ -1183,11 +1153,17 @@ final class AppRuntime {
 
     private func handleTerminalExit(_ key: TabKey) {
         if key.tabId == TabID.agent {
-            handleTransition(model.noteSessionEnded(taskId: key.taskId))
+            model.noteSessionEnded(taskId: key.taskId)
         }
         tabs[key.taskId]?.removeAll { $0.id == key.tabId }
         if focusedTab[key.taskId] == key.tabId {
             focusedTab[key.taskId] = tabs[key.taskId]?.first?.id
+        }
+        // A scratch terminal IS its shell: when that shell exits and no tabs
+        // remain, the repo-less task has nothing left, so retire it entirely.
+        if let task = model.tasks.first(where: { $0.id == key.taskId }),
+           task.workspaces.isEmpty, (tabs[key.taskId] ?? []).isEmpty {
+            closeScratchTask(task)
         }
     }
 
@@ -1199,15 +1175,15 @@ final class AppRuntime {
             // digests — a failed removal must leave the task fully intact
             // (session alive, still listed) so the user can retry or cancel.
             _ = try await model.removeTask(task, mode: mode)
-            if let ref = task.sessionRef {
-                await listener.unregister(sessionRef: ref)
-            }
+            // In-place workspaces live on in the user's own checkout; take our
+            // hooks out of them (worktrees are gone already — a no-op there).
+            if task.supervised { await uninstallHooks(from: task.workspaces) }
+            hookLog.remove(taskId: task.id)
             registry.discardTask(taskId: task.id)
             tabs[task.id] = nil
             focusedTab[task.id] = nil
             digests.remove(taskId: task.id)
             if selectedTaskId == task.id { selectedTaskId = nil }
-            updateDockBadge() // a needs-input task may have gone away
             return true
         } catch let error as TaskEngineError {
             lastError = FailureDescriber.describe(error)
@@ -1218,9 +1194,259 @@ final class AppRuntime {
         }
     }
 
-    /// Called on the way out (applicationWillTerminate): unlink the socket.
-    /// Ptys die with the app; conversation context survives via --resume.
-    nonisolated func shutdown() {
-        listener.stop()
+    /// Removes a single repo (workspace) from a task — the inverse of the
+    /// add-repo flow. The engine refuses (and throws) on an unconfirmed hazard,
+    /// exactly like `removeTask`; the open workbench re-syncs itself off the
+    /// task's workspace-count change, so nothing here touches the navigator.
+    func removeWorkspace(
+        fromTask taskId: UUID, repoId: UUID, mode: TaskRemovalMode
+    ) async -> Bool {
+        let leaving = model.tasks.first { $0.id == taskId }?.workspaces
+            .filter { $0.repoId == repoId } ?? []
+        do {
+            _ = try await model.removeWorkspace(fromTask: taskId, repoId: repoId, mode: mode)
+            await uninstallHooks(from: leaving)
+            return true
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+            return false
+        } catch {
+            lastError = String(describing: error)
+            return false
+        }
+    }
+
+    /// Detach (untrack) a repo from a task without deleting its worktree/branch —
+    /// the non-destructive alternative offered alongside remove. Synchronous
+    /// (no git), but kept here so the sheet drives it the same way.
+    @discardableResult
+    func detachWorkspace(fromTask taskId: UUID, repoId: UUID) -> Bool {
+        let leaving = model.tasks.first { $0.id == taskId }?.workspaces
+            .filter { $0.repoId == repoId } ?? []
+        do {
+            try model.detachWorkspace(fromTask: taskId, repoId: repoId)
+            // Detach keeps the worktree on disk — don't leave our hooks in it.
+            Task { await uninstallHooks(from: leaving) }
+            return true
+        } catch let error as TaskEngineError {
+            lastError = FailureDescriber.describe(error)
+            return false
+        } catch {
+            lastError = String(describing: error)
+            return false
+        }
+    }
+
+    /// Called on the way out (applicationWillTerminate): tear down the wheel
+    /// monitor. Ptys die with the app; conversation context survives via
+    /// --resume.
+    func shutdown() {
+        wheelMonitor.stop()
+        hookEventTask?.cancel()
+        proposalTask?.cancel()
+        hookListener?.stop()
+    }
+
+    // MARK: - Supervision (orchestrator phase 1a — observation only)
+
+    /// Opt a task in or out of supervision. Opting IN starts the hook socket (if
+    /// not running) and installs the observation hooks in every workspace; the
+    /// flag is persisted only once ALL installs succeeded, and a partial failure
+    /// is rolled back so nothing is left half-wired. Opting OUT persists first
+    /// (so a failed uninstall can't leave the task looking supervised) and then
+    /// removes our hooks.
+    ///
+    /// Claude Code reads hook settings when a session starts, so a session that
+    /// is ALREADY running will not report until it is resumed (unverified against
+    /// the CLI — the UI says so rather than promise otherwise).
+    func setSupervised(_ on: Bool, for task: TaskRecord) async {
+        if !on {
+            model.setTaskSupervised(false, for: task.id)
+            await uninstallHooks(from: task.workspaces)
+            if !model.tasks.contains(where: \.supervised) { stopHookListener() }
+            return
+        }
+        guard !task.workspaces.isEmpty else {
+            lastError = "\(task.name) has no workspaces to supervise."
+            return
+        }
+        var installed: [Workspace] = []
+        do {
+            let socket = try await ensureHookListener()
+            for workspace in task.workspaces {
+                try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+                installed.append(workspace)
+            }
+            model.setTaskSupervised(true, for: task.id)
+        } catch {
+            await uninstallHooks(from: installed)
+            if !model.tasks.contains(where: \.supervised) { stopHookListener() }
+            lastError = "Could not enable supervision: \(describeHookError(error))"
+        }
+    }
+
+    /// A workspace was added to a task that is already supervised: wire it too, or
+    /// that repo's agent would silently go unobserved. A no-op for unsupervised tasks.
+    func superviseNewWorkspace(_ workspace: Workspace, taskId: UUID) async {
+        guard model.tasks.first(where: { $0.id == taskId })?.supervised == true else { return }
+        do {
+            let socket = try await ensureHookListener()
+            try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+        } catch {
+            lastError = "Could not enable supervision for the new workspace: \(describeHookError(error))"
+        }
+    }
+
+    /// Launch-time re-arm for tasks that were supervised last run.
+    private func resumeSupervision() async {
+        do {
+            let socket = try await ensureHookListener()
+            for task in model.tasks where task.supervised {
+                for workspace in task.workspaces {
+                    try await hookInstaller.install(in: workspace.worktreeURL, socketPath: socket)
+                }
+            }
+        } catch {
+            lastError = "Could not re-arm supervision: \(describeHookError(error))"
+        }
+    }
+
+    private func ensureHookListener() async throws -> URL {
+        if let listener = hookListener { return listener.socketURL }
+        let log = hookLog
+        let listener = HookEventListener(
+            directory: configDirectory,
+            onDrop: { reason in Task { @MainActor in log.recordDrop(reason) } })
+        let url = try await listener.start()
+        let stream = await listener.events()
+        hookListener = listener
+        startProposalPolling()
+        hookEventTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                // The record is on disk before the waker looks (the run reads the file).
+                let logged = self.hookLog.record(event, tasks: self.model.tasks)
+                self.supervisorWaker.eventRecorded(logged)
+            }
+        }
+        return url
+    }
+
+    /// While supervision is active, pick up supervisor submissions every couple of
+    /// seconds. Cheap when the inbox is empty (one directory listing).
+    private func startProposalPolling() {
+        guard proposalTask == nil else { return }
+        proposalTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.proposals.drain(tasks: self.model.tasks)
+                // Retire sends the agent has moved past, so a stale suggestion can't sit
+                // there looking actionable.
+                self.proposals.expireStale(
+                    tasks: self.model.tasks, eventsFor: { self.hookLog.events(for: $0) })
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func stopHookListener() {
+        proposalTask?.cancel()
+        proposalTask = nil
+        hookEventTask?.cancel()
+        hookEventTask = nil
+        hookListener?.stop()
+        hookListener = nil
+    }
+
+    /// Best-effort removal of our hooks; a failure is surfaced but never blocks
+    /// the removal/opt-out that triggered it (our handlers are inert without the
+    /// listener — async curl to a missing socket just fails quietly).
+    private func uninstallHooks(from workspaces: [Workspace]) async {
+        for workspace in workspaces {
+            do { try await hookInstaller.uninstall(from: workspace.worktreeURL) }
+            catch { lastError = "Could not remove supervision hooks: \(describeHookError(error))" }
+        }
+    }
+
+    private func describeHookError(_ error: Error) -> String {
+        switch error {
+        case let e as HookInstallerError:
+            switch e {
+            case .existingSettingsInvalid(let path, let detail):
+                return "\(path) is not valid JSON (\(detail)); left untouched."
+            case .ioFailure(let path, let detail):
+                return "I/O failure at \(path): \(detail)"
+            }
+        case let e as HookSocketError:
+            return "hook socket: \(e)"
+        default:
+            return String(describing: error)
+        }
     }
 }
+
+/// Which repo of which task the remove-repo sheet is confirming. Item-based (an
+/// `Identifiable` sheet trigger) so the navigator's − button can open it for the
+/// currently-selected repo without threading a binding down.
+struct WorkspaceRemovalRequest: Identifiable, Equatable {
+    let task: TaskRecord
+    let repoId: UUID
+    let repoName: String
+    var id: String { "\(task.id.uuidString):\(repoId.uuidString)" }
+}
+
+// MARK: - Proposal delivery (orchestrator slice 3a)
+
+extension AppRuntime: ProposalDelivering {
+    func terminalRunning(taskId: UUID) -> Bool {
+        registry.agentController(taskId: taskId)?.isRunning ?? false
+    }
+
+    /// nil when the foreground process could not be read (treated as "unknown").
+    func claudeIsForeground(taskId: UUID) -> Bool? {
+        ForegroundProbe.isClaude(name: registry.agentController(taskId: taskId)?.foregroundProcessName())
+    }
+
+    func lastUserInput(taskId: UUID) -> Date? {
+        registry.agentController(taskId: taskId)?.lastUserInput
+    }
+
+    /// Wakes the supervisor once, now, on the user's explicit request. The runner records
+    /// the outcome (`supervisor.lastResult`, the run log); proposals arrive through the inbox.
+    func runSupervisorNow() {
+        Task { @MainActor [supervisor] in await supervisor.evaluate(trigger: .manual) }
+    }
+
+    /// Types WITHOUT a newline: in 3a the user reads the text in place and presses Enter.
+    func typeInto(taskId: UUID, text: String) -> Bool {
+        registry.typeIntoSession(taskId: taskId, text: text)
+    }
+
+    /// The gate's live verdict for the review sheet.
+    func deliveryVerdict(for proposal: Proposal, task: TaskRecord) -> GateResult? {
+        let source = sourceTask(of: proposal)
+        return proposals.evaluate(
+            proposal.id, task: task, events: hookLog.events(for: task.id),
+            source: source, sourceEvents: proposal.sourceTaskId.map { hookLog.events(for: $0) },
+            delivery: self)
+    }
+
+    /// The task a proposal was judged from, when that is not the task it messages.
+    func sourceTask(of proposal: Proposal) -> TaskRecord? {
+        guard let id = proposal.sourceTaskId else { return nil }
+        return model.tasks.first { $0.id == id }
+    }
+
+    /// Confirms a send. On success the user is taken to that task's terminal, where the
+    /// text now sits in the prompt box waiting for them to review it and press Enter.
+    @discardableResult
+    func confirmProposal(_ proposal: Proposal, task: TaskRecord) -> ConfirmOutcome {
+        let outcome = proposals.confirm(
+            proposal.id, task: task, events: hookLog.events(for: task.id),
+            source: sourceTask(of: proposal),
+            sourceEvents: proposal.sourceTaskId.map { hookLog.events(for: $0) }, delivery: self)
+        if outcome == .sent { open(task.id) }
+        return outcome
+    }
+}
+

@@ -26,13 +26,3 @@ public struct DiffEntry: Sendable, Equatable {
         self.originalPath = originalPath
     }
 }
-
-/// Result of `merge` / `merge --continue`. A conflict is an expected state,
-/// not an error — it is reported here, never thrown.
-public enum MergeOutcome: Sendable, Equatable {
-    /// The merge completed (fast-forward or merge commit).
-    case merged
-    /// The merge stopped with conflicts; the repo has MERGE_HEAD and these
-    /// paths have unmerged (`u`) status entries.
-    case conflicted(paths: [String])
-}
