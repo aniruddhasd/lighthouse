@@ -1,15 +1,36 @@
 # Lighthouse
 
-A native macOS developer tool: a single-app home for daily agentic development
-across git worktrees. A **task** owns one or more git workspaces (a worktree per
-repo, or a repo's own checkout) and a Claude Code session; Lighthouse runs the
-sessions side by side, lets you review each task's changes live, and handles the
-worktree bookkeeping.
+## What Lighthouse is
+
+Lighthouse is a native macOS app for running several AI coding agents at once
+without losing track of any of them. Each unit of work is a **task**. A task owns
+a set of git workspaces (a worktree per repo, or a repo's own checkout) and a live
+Claude Code session, so agents work in parallel on separate branches without
+colliding.
+
+- **Harbor** is the fleet view. You see every task, whether its session is live,
+  your own status note, and its diff counts.
+- **Focus** is one task. The agent's terminal fills the window, with live diffs, a
+  file viewer (syntax-highlighted code, rendered markdown) and history alongside.
+- **The supervisor** is an optional orchestrator. You give it standing
+  instructions in plain language, such as "when review-doc finishes, tell api-fix
+  to run the tests". For tasks you opt in, it reads each agent's finished turn and
+  proposes the next prompt. Today you confirm each proposal and it is typed into
+  the agent's prompt box (not submitted). Unattended delivery is not built yet.
+
+Everything runs locally. Lighthouse doesn't guess what an agent is doing; the
+signals it shows are your own status notes, whether a terminal is live, and hook
+events from tasks you opt in.
+
+*Not:* an editor, a Claude Code replacement, or a cloud service.
+
+## Views
 
 The app has two top-level views:
 
 - **Harbor** — the fleet overview: a grid of task cards (live-session dot,
-  free-text status, diff counts) plus a collapsible Repos section.
+  free-text status, diff counts) plus a collapsible Repos section. Its header
+  holds the Supervisor button (the supervisor's state: off / on / auto / halted).
 - **Focus** — one task, with the terminal as the full-bleed hero. A 60px rail of
   task dots on the left; a slide-in navigator (Changes / Files / History) and a
   file viewer/editor on demand; a Terminal ⇄ Summary toggle.
@@ -25,10 +46,10 @@ remains:
 - **Session liveness** — whether a pty exists for the task right now
   (`AppModel.isSessionLive`). This is the only automatic signal, and it gates
   the quit confirmation and resume.
-- **Supervision (opt-in, observation only)** — a per-task `supervised` flag.
-  When on, Lighthouse installs Claude Code hooks in the task's workspaces and
-  logs the events the agent reports (Summary tab → Supervision). Nothing acts on
-  them yet; this is orchestrator phase 1a, see `docs/orchestrator-design.md`.
+- **Supervision (opt-in)** — a per-task `supervised` flag. When on, Lighthouse
+  installs Claude Code hooks in the task's workspaces and logs the events the
+  agent reports (Summary tab → Supervision). The log is what the supervisor reads
+  (see *The supervisor* below); with the supervisor off, nothing acts on it.
 - **Hide** — a per-task view preference that drops a task from the Harbor grid
   and ⌘K (Harbor's "Hidden N" toggle reveals them).
 
@@ -77,18 +98,22 @@ drives it.
   overlays), the SwiftTerm session layer (`SessionRegistry`,
   `LighthouseTerminalView`), a runtime theme (Beacon dark / Native light), a
   custom titlebar, motion, Preferences, and the review pane (changed-files tree,
-  diff in a locked-down WKWebView, FSEvents-driven refresh). Terminals live in a
+  diff and file viewer in a locked-down WKWebView, FSEvents-driven refresh). Terminals live in a
   registry keyed by task id, outside the SwiftUI view tree — sessions keep
   running while unfocused and survive Harbor ⇄ Focus flips. The diff renderer is
-  vendored diff2html (`docs/diff-renderer.md`) — fully offline. The terminal font
+  vendored diff2html, and the file viewer's highlighter and markdown renderer are
+  vendored highlight.js and markdown-it (`docs/diff-renderer.md`) — fully offline. The terminal font
   is a bundled JetBrains Mono.
 - `Sources/LighthouseSupervisor` + `Sources/LighthouseSupervisorMCP` — the
-  orchestrator's tool surface: an MCP server (`lighthouse-supervisor-mcp`) with three
-  read tools over supervised tasks (`list_tasks`, `recent_events`, `last_turn`) and
-  proposal tools (`propose_send`, `hold`, `ask_user`, `list_proposals`) that can only
-  queue a validated suggestion in an inbox; the app owns the queue. A send proposal
-  reaches a session only when you review it and confirm: it is typed into Claude's
-  prompt box (not submitted) after a gate re-checks that the agent hasn't moved on. See `docs/orchestrator-design.md` §11–§13.
+  orchestrator. `lighthouse-supervisor-mcp` is an MCP server with read tools over
+  supervised tasks (`list_tasks`, `recent_events`, `last_turn`) and proposal tools
+  (`propose_send`, `hold`, `ask_user`, `list_proposals`) that can only queue a
+  validated suggestion in an inbox; the app owns the queue. The library adds the
+  supervisor runner (one headless `claude -p` run per wake, with budget, rate and
+  failure limits), the wake policy, the automatic waker, and the delivery gate. A
+  send reaches a session only after you confirm it and the gate re-checks that the
+  agent hasn't moved on. See [The supervisor](#the-supervisor) and
+  `docs/orchestrator-design.md` §11–§14.
 - `Sources/LighthouseFixtures` — test harness: generates hermetic, throwaway git
   repositories with known state. Never touches global git config or the network.
   A separate target so fixtures can never ship inside an app target.
@@ -126,6 +151,8 @@ drives it.
 - The diff base is a per-task, per-workspace branch override chosen on the
   Summary tab (default: the repo's registered base branch).
 - File viewer with a simple editor (⌘S saves; external-change conflict prompt).
+  Code is syntax-highlighted; markdown files open rendered, with a Rendered /
+  Source toggle. Very large files fall back to plain text.
 - ⌘P quick-open, ⌘F find in file, ⇧⌘F find in files (`git grep`).
 - **Summary** tab: status, diff-base picker, diff-stat cards, and the opt-in
   **Supervision** card (hook-event log for that task).
@@ -156,6 +183,33 @@ drives it.
 Chrome shortcuts use ⌘ (not Ctrl, not Esc) because ⌘ reaches the app before the
 terminal; Ctrl keys and Esc belong to the shell and the agent.
 
+## The supervisor
+
+Off by default. It has three switches, all yours: a per-task **supervised** flag
+(Summary → Supervision), the supervisor **enabled** (Harbor → Supervisor), and
+**automatic** runs, which are a separate switch so enabling the supervisor never
+spends anything by itself.
+
+- **Standing instructions** are your own words and the only text the supervisor
+  obeys. Everything an agent says is untrusted data to it.
+- **A run** is one stateless headless `claude -p` call (default model Sonnet 5.5,
+  the default account) that reads the supervised tasks' last turns through the MCP
+  tools and can only *propose*. Run it by hand ("Run now") or automatically when a
+  supervised task's turn ends.
+- **Limits** (editable): $0.25 per run, $5 per day, 20 runs per hour, and the
+  supervisor halts itself after 3 failed runs in a row.
+- **Delivery today**: a proposal appears on the task's card; you review it and
+  confirm. Lighthouse re-checks the agent state, records the send, then types the
+  text into the task's Claude prompt box. You press Enter. Cross-task sends
+  ("when A finishes, tell B") are supported; a busy target is refused, not waited
+  for.
+- **Not built**: unattended delivery (typing and submitting without your
+  confirmation), and a control centre on Harbor. Today's configuration is a modal
+  panel.
+
+The design, threat model and what was and wasn't verified are in
+`docs/orchestrator-design.md`.
+
 ## Building, testing, running
 
 Requires macOS 14+, git ≥ 2.35, Xcode 26+ (SwiftTerm needs the full SDK), and
@@ -169,8 +223,8 @@ open dist/Lighthouse.app
 ```
 
 The SPM package is the single source of truth — there is no .xcodeproj.
-`make-app.sh` first runs the supply-chain gates (vendored diff2html and bundled
-fonts match their `SHA256SUMS`; `Package.resolved` matches
+`make-app.sh` first runs the supply-chain gates (vendored diff2html, highlight.js,
+markdown-it and bundled fonts match their `SHA256SUMS`; `Package.resolved` matches
 `Scripts/pinned-revisions.txt`), builds with `--force-resolved-versions`, then
 wraps the release binary in a minimal bundle (`dev.lighthouse.app`, ad-hoc
 signed, app icon compiled with `iconutil`, build stamp = short git SHA plus
@@ -198,6 +252,10 @@ any time from **Help → Run Setup Checks**.
   5 MB; contains agent output — treat as sensitive) beside the config, and a
   `.claude/settings.local.json` in each supervised workspace (git-excluded via the
   repo's shared `info/exclude`).
+- Supervisor, beside the config: `supervisor-settings.json`,
+  `supervisor-state.json` (run log and spend), `proposals.json` (the queue),
+  `supervisor-inbox/` (proposals waiting to be ingested) and `supervisor-work/`.
+  They hold your instructions and agent output — treat as sensitive.
 - Config: `~/Library/Application Support/Lighthouse/config.json` (schema v6;
   older versions migrate on load; the legacy attention `state` key is ignored).
   Holds repos, tasks (name, branch, adapter kind, session ref, free-text status,
@@ -218,9 +276,10 @@ any time from **Help → Run Setup Checks**.
   shell, transcript schema). Hook sections are retained as history; see its
   status banner.
 - `docs/orchestrator-design.md` and `docs/hook-observations.md` — the supervisor
-  design (phase 1a built) and the dated evidence log from real hook runs.
+  design (slices 1 to 4c built; unattended delivery not) and the dated evidence
+  log from real hook runs.
 - `docs/diff-renderer.md` — diff2html choice, vendoring, checksum and pin gates,
-  and the diff-pane security posture.
+  the diff-pane security posture, and the file viewer's vendored assets.
 - `docs/redesign-implementation-spec.md` — the Harbor/Focus redesign plan, with a
   status section listing what shipped and where reality diverged.
 
@@ -233,8 +292,14 @@ any time from **Help → Run Setup Checks**.
   did", "next step") was never built.
 - `Scripts/smoke-run.sh` still asserts the removed `attention.sock` (the new
   socket is `hooks.sock`, and only exists while a task is supervised).
-- Supervision (phase 1a) rests on a handful of real interactive runs (see
+- Supervision rests on a handful of real interactive runs (see
   `docs/hook-observations.md`); the gated live test covers `-p` mode only.
+- Automatic supervisor runs (slice 4c) have unit and end-to-end tests with a fake
+  process; the manual test at the end of `docs/orchestrator-design.md` §14 has not
+  been recorded as done. A turn that never ends (Esc, an unanswered question) does
+  not wake the supervisor.
+- The file viewer's highlighting and markdown rendering are covered by unit tests
+  and a real-WebKit gate, but have not been checked by eye in dark mode.
 - Stale wording remains in comments and UI strings (e.g. the RemoveTaskSheet
   in-place text mentions "attention hooks"; `AppRuntime`/`SetupView` doc
   comments describe the socket and hook self-test).
